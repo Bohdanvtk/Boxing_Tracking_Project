@@ -1,0 +1,22 @@
+#configs/infer_tracks.yaml
+
+openpose:
+  root: "/home/bohdan/openpose"   # path to openpose root
+  hand: false
+  face: false
+  net_resolution: "-1x256"
+  num_gpu: 1
+  num_gpu_start: 0
+  render_pose: 0
+  disable_blending: true
+  number_people_max: 5
+  disable_multi_thread: true
+
+data:
+  image_dir: "/home/bohdan/Документи/Samples/Images/boxing/Processed_data/output/"
+  save_width: 800 # SAVE_WIDTH
+
+tracking:
+  config_path: "configs/tracking.yaml"
+  num_frames_merge: 40           # how many pictures at one time will appear
+
