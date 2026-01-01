@@ -1,14 +1,14 @@
 from __future__ import annotations
 import copy
 import numbers
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional, Union
 from collections import defaultdict
 import numpy as np
 
-from .kalman import KalmanTracker
+from boxing_project.kalman_filter.kalman import KalmanTracker
 from .track import Track, Detection
 from .matcher import MatchConfig, match_tracks_and_detections
 from . import DEFAULT_TRACKING_CONFIG_PATH
@@ -20,6 +20,29 @@ from . import DEFAULT_TRACKING_CONFIG_PATH
 
 @dataclass
 class TrackerConfig:
+    """
+    Configuration bundle for MultiObjectTracker.
+
+    Attributes:
+      dt : float
+          Time step between frames (1 / FPS).
+      process_var : float
+          Process noise variance for Kalman (acceleration).
+      measure_var : float
+          Measurement noise variance for Kalman.
+      p0 : float
+          Initial covariance scaling for Kalman.
+      max_age : int
+          How many frames a track can stay without updates before removal.
+      min_hits : int
+          Number of updates needed to mark a track as confirmed.
+      match : MatchConfig
+          Matching configuration (alpha, gating, etc.).
+      min_kp_conf : float
+          Minimum confidence for a keypoint to be considered in matching.
+      expect_body25 : bool
+          Hint about expected OpenPose format (BODY_25).
+    """
     dt: float
     process_var: float
     measure_var: float
@@ -29,6 +52,7 @@ class TrackerConfig:
     match: MatchConfig
     min_kp_conf: float
     expect_body25: bool
+
 
 # ----------------------------- #
 #     Adapter OpenPose → Det    #
@@ -124,9 +148,7 @@ def openpose_people_to_detections(
 @lru_cache(maxsize=None)
 def _cached_tracking_config(path: str):
     """Cache loader so multiple trackers reuse the parsed YAML."""
-
     from src.boxing_project.utils.config import load_tracking_config
-
     return load_tracking_config(path)
 
 
@@ -188,6 +210,20 @@ class MultiObjectTracker:
         cfg: Optional[TrackerConfig] = None,
         config_path: Optional[Union[str, Path]] = None,
     ):
+        """
+        Initialize multi-object tracker.
+
+        You can either:
+          - pass a ready TrackerConfig (cfg), or
+          - pass a path to YAML (config_path) and let the tracker load it.
+
+        Parameters:
+          cfg : TrackerConfig or None
+              Pre-built configuration. If provided, config_path must be None.
+          config_path : str or Path or None
+              Path to YAML with tracking settings. If cfg is None, this is used;
+              otherwise ignored.
+        """
         if cfg is not None and config_path is not None:
             raise ValueError("Provide either cfg or config_path, not both")
 
@@ -220,6 +256,21 @@ class MultiObjectTracker:
         return copy.deepcopy(self._raw_config)
 
     def _new_track(self, det: Detection) -> Track:
+        """
+        Create and initialize a new Track from a detection.
+
+        Steps:
+          1) Initialize a KalmanTracker with detection center as the initial state.
+          2) Create a Track with a new unique track_id.
+          3) Immediately call track.update(det) to align its state with the first measurement.
+
+        Parameters:
+          det : Detection
+              Detection used to bootstrap the new track.
+
+        Returns:
+          Track : newly created and updated Track instance.
+        """
         kf = KalmanTracker(
             x0=[det.center[0], det.center[1], 0.0, 0.0],
             dt=self.cfg.dt,
@@ -227,6 +278,7 @@ class MultiObjectTracker:
             measure_var=self.cfg.measure_var,
             p0=self.cfg.p0
         )
+
         trk = Track(
             track_id=self._next_id,
             kf=kf,
@@ -234,10 +286,15 @@ class MultiObjectTracker:
         )
         self._next_id += 1
         # immediate first update — to align state with initial measurement
-        trk.update(det)
+        trk.update(det, ema_alpha=self.cfg.match.emb_ema_alpha)
         return trk
 
     def _remove_dead(self):
+        """
+        Remove tracks that exceeded max_age without being updated.
+
+        This keeps the list self.tracks containing only active (alive) tracks.
+        """
         self.tracks = [t for t in self.tracks if not t.is_dead(self.cfg.max_age)]
 
     # ---- per-frame API ---- #
@@ -267,8 +324,31 @@ class MultiObjectTracker:
 
     def update(
             self,
-            detections: List[Detection]
+            detections: List[Detection],
+            g: float = 1.0,
     ) -> Dict[str, Any]:
+        """
+        Main per-frame update step given a list of detections.
+
+        Pipeline:
+          1) Predict all existing tracks with Kalman filter.
+          2) Build cost matrix and run Hungarian to match tracks ↔ detections.
+          3) Update matched tracks with their detections.
+          4) Spawn new tracks for unmatched detections.
+          5) Remove dead tracks (not updated for > max_age).
+          6) Build a summary dict with:
+             - matches in (track_id, det_index) space
+             - unmatched track ids and detection indices
+             - cost matrix
+             - per-track debug logs and state snapshot.
+
+        Parameters:
+          detections : List[Detection]
+              Detections extracted for the current frame.
+
+        Returns:
+          Dict[str, Any] : summary of tracking results for this frame.
+        """
         # 1) PREDICT
         for trk in self.tracks:
             trk.predict()
@@ -284,6 +364,7 @@ class MultiObjectTracker:
             detections=detections,
             cfg=self.cfg.match,
             debug=self.show_debug,
+            g=g
         )
 
         # 3) collect pair_logs_by_tid ...
@@ -299,8 +380,9 @@ class MultiObjectTracker:
         for i_track, j_det in matches_idx:
             trk = self.tracks[i_track]
             det = detections[j_det]
-            trk.update(det)
+            trk.update(det, ema_alpha=self.cfg.match.emb_ema_alpha)
             id_pairs.append((trk.track_id, j_det))
+
 
         # 5) create new tracks from unmatched detections ...
         for j in um_det_idx:

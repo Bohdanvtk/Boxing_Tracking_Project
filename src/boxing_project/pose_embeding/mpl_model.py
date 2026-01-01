@@ -1,4 +1,4 @@
-# src/boxing_project/embeding/mlp_model.py
+# src/boxing_project/pose_embeding/mlp_model.py
 
 from dataclasses import dataclass
 from typing import List

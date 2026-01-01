@@ -1,4 +1,4 @@
-# src/boxing_project/embeding/dataset.py
+# src/boxing_project/pose_embeding/dataset.py
 
 from dataclasses import dataclass
 import numpy as np

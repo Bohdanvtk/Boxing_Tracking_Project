@@ -1,4 +1,4 @@
-# src/boxing_project/embeding/losses.py
+# src/boxing_project/pose_embeding/losses.py
 
 import tensorflow as tf
 

@@ -1,0 +1,6 @@
+shot_boundary:
+  resize: [160, 90]
+  grid: [4, 4]
+  ema_alpha: 0.2
+  cut_threshold: 0.45
+  min_frames_between_cuts: 8

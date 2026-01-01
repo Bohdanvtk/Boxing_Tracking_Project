@@ -1,0 +1,22 @@
+seed: 42
+
+data:
+  train_pairs: "artifacts/data/apperance/train_pairs.npz"
+  val_pairs: "artifacts/data/apperance/val_pairs.npz"
+  image_size: [128, 128]
+  to_rgb: false   # true якщо твої кропи BGR з OpenCV
+
+model:
+  backbone: "mobilenetv3small"
+  embedding_dim: 128
+  dropout: 0.1
+  l2_reg: 0.0
+  train_backbone: true
+
+training:
+  batch_size: 64
+  learning_rate: 0.0003
+  epochs: 20
+  margin: 1.0
+  save_dir: "artifacts/models/apperance_cnn"
+  save_name: "apperance_encoder.h5"

@@ -1,7 +1,22 @@
 # scripts/infer_tracks.py
 
+
+# (якщо є shebang або коментарі — вони можуть бути вище)
+
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+
+
 import yaml
 from pathlib import Path
+import sys
 
 from src.boxing_project.tracking.inference_utils import (
     init_openpose_from_config,
@@ -9,6 +24,11 @@ from src.boxing_project.tracking.inference_utils import (
 )
 from src.boxing_project.tracking.tracker import MultiObjectTracker
 
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 # !!! do NOT import src.boxing_project.utils.config here !!!
 
@@ -70,7 +90,6 @@ def main():
         p for p in image_dir.rglob("*")
         if p.suffix.lower() in (".jpg", ".jpeg", ".png")
     )
-
 
 
     if not images:
