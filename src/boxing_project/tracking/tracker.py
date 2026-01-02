@@ -148,7 +148,7 @@ def openpose_people_to_detections(
 @lru_cache(maxsize=None)
 def _cached_tracking_config(path: str):
     """Cache loader so multiple trackers reuse the parsed YAML."""
-    from src.boxing_project.utils.config import load_tracking_config
+    from boxing_project.utils.config import load_tracking_config
     return load_tracking_config(path)
 
 
@@ -163,36 +163,6 @@ def _load_tracker_config_from_yaml(
     # Ensure nested MatchConfig is also unique per tracker instance.
     tracker_cfg_copy.match = copy.deepcopy(match_cfg)
     return tracker_cfg_copy, copy.deepcopy(raw_cfg)
-
-
-def resolve_show_level(value: Any) -> int:
-    """Convert configuration values to the logging level 0/1/2."""
-
-    if isinstance(value, bool):
-        return 2 if value else 0
-
-    if value is None:
-        return 1
-
-    if isinstance(value, numbers.Integral):
-        level = int(value)
-    elif isinstance(value, str):
-        value = value.strip()
-        if value == "":
-            return 1
-        try:
-            level = int(value)
-        except ValueError as exc:
-            raise ValueError(
-                "tracking.show must be an integer 0, 1 or 2"
-            ) from exc
-    else:
-        raise ValueError("tracking.show must be an integer 0, 1 or 2")
-
-    if level not in (0, 1, 2):
-        raise ValueError("tracking.show must be one of {0, 1, 2}")
-
-    return level
 
 
 class MultiObjectTracker:
@@ -243,8 +213,9 @@ class MultiObjectTracker:
 
         raw_cfg = self.get_config_dict() or {}
         show_value = raw_cfg.get("tracking", {}).get("show", None)
-        self.show_level: int = resolve_show_level(show_value)
-        self.show_debug: bool = self.show_level >= 2
+        raw_cfg = self.get_config_dict() or {}
+        self.debug: bool = bool(raw_cfg.get("tracking", {}).get("debug", False))
+
 
     # ---- utility methods ---- #
 
@@ -363,7 +334,7 @@ class MultiObjectTracker:
             tracks=self.tracks,
             detections=detections,
             cfg=self.cfg.match,
-            debug=self.show_debug,
+            debug=self.debug,
             g=g
         )
 

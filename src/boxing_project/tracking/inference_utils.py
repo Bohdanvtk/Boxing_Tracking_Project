@@ -270,59 +270,39 @@ def process_frame(result, tracker, original_img, conf_th):
 
 
 
-
 def visualize_sequence(opWrapper, tracker, images, save_width, merge_n):
-    """
-    Iterate through images, run inference, print debug info, and visualize batches.
-    """
     frames = []
     count = 0
 
-    # Resolve debug level
-    show_level = getattr(tracker, "show_level", 1)
+    debug = bool(getattr(tracker, "debug", False))  # або tracker.cfg.debug
 
-    from src.boxing_project.tracking.tracking_debug import (
-        print_pre_tracking_results,
-        print_tracking_results,
-    )
+    if debug:
+        from src.boxing_project.tracking.tracking_debug import (
+            print_pre_tracking_results,
+            print_tracking_results,
+        )
 
     for idx, path in enumerate(images):
-        # use 1-based index for logging: 1, 2, 3, ...
         frame_idx = idx + 1
 
-        if show_level >= 2:
+        if debug:
             print_pre_tracking_results(frame_idx)
 
         result, img = preprocess_image(opWrapper, path, save_width, return_img=True)
         frame, log = process_frame(result, tracker, img, tracker.cfg.min_kp_conf)
 
-        # ---- draw "Frame N" label in the top-right corner ----
-        h, w = frame.shape[:2]
-        text = f"Frame {frame_idx}"
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.8
-        color = (0, 255, 0)
-        thickness = 2
+        # ... putText ...
 
-        text_size, _ = cv2.getTextSize(text, font, font_scale, thickness)
-        text_w, text_h = text_size
-        org = (w - text_w - 10, text_h + 10)
-
-        cv2.putText(frame, text, org, font, font_scale, color, thickness, cv2.LINE_AA)
-        # ------------------------------------------------------
-
-        if show_level >= 1:
+        if debug:
             print_tracking_results(log, frame_idx)
 
         frames.append(frame)
         count += 1
 
-        if count == merge_n and show_level >= 1:
+        if count == merge_n and debug:
             _show_merged(frames, merge_n)
             frames = []
             count = 0
-
-
 
 
 def _show_merged(frames, n):

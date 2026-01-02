@@ -28,18 +28,50 @@ class Track:
     """
     Single target track managed by the tracker.
 
+    Represents one real-world object (e.g. a person) across multiple frames.
+    A track stores:
+    - motion state (Kalman filter),
+    - reliability over time (hits / confirmation),
+    - and object identity via smoothed pose and appearance embeddings (EMA).
+
     Attributes:
-      track_id : unique integer ID of this track.
-      kf : KalmanTracker instance for motion model.
-      min_hits : how many successful updates are needed to mark track as confirmed.
-      age : number of frames since creation.
-      hits : number of frames where this track was updated with a detection.
-      time_since_update : how many frames passed since last update().
-      confirmed : whether track is considered reliable (hits >= min_hits).
-      last_keypoints : last used keypoints (K, 2) for pose matching.
-      last_kp_conf : last keypoint confidences (K,).
-      last_det_center : last measurement center used for update.
-    """
+    track_id : int
+    Unique ID of the tracked object.
+
+    kf : KalmanTracker
+    Motion model used to predict and update the object position.
+
+    min_hits : int
+    Number of successful updates required to confirm the track.
+
+    age : int
+    Total number of frames since track creation.
+
+    hits : int
+    Number of frames where the track was matched with a detection.
+
+    time_since_update : int
+    Frames since the last successful update; used for track removal.
+
+    confirmed : bool
+    Whether the track is considered reliable (hits >= min_hits).
+
+    last_det_center : Tuple[float, float]
+    Last detection center used to update the track.
+
+    last_keypoints : Optional[np.ndarray]
+    Last observed keypoints (K, 2), used as a fallback for pose matching.
+
+    last_kp_conf : Optional[np.ndarray]
+    Confidence scores for the last keypoints (K,).
+
+    pose_emb_ema : Optional[np.ndarray]
+    EMA of pose embeddings, representing the track’s long-term pose memory.
+
+    app_emb_ema : Optional[np.ndarray]
+    EMA of appearance embeddings, representing the track’s long-term visual identity.
+
+"""
     track_id: int
     kf: KalmanTracker
     min_hits: int

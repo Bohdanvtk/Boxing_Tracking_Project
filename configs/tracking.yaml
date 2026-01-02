@@ -1,5 +1,5 @@
 tracking:
-  show: 2                        # 0 = off, 1 = basic logs, 2 = full debug
+  debug: false                        #  false=off, true=on
   fps: 50.0                         # frames per seconds
   kalman:
     process_var: 68.0                # σ_a^2 — dispersion of accelerating

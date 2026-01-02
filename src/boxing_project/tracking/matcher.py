@@ -395,7 +395,7 @@ def _load_match_config_from_yaml(
 
     If config_path is None, DEFAULT_TRACKING_CONFIG_PATH is used.
     """
-    from src.boxing_project.utils.config import load_tracking_config
+    from boxing_project.utils.config import load_tracking_config
 
     resolved = Path(config_path) if config_path is not None else DEFAULT_TRACKING_CONFIG_PATH
     # load_tracking_config already creates the dataclass instances.
