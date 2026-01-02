@@ -2,25 +2,48 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 
-# -----------------------------
-# S U P E R   S I M P L E   L O G
-# -----------------------------
+@dataclass
+class MatrixCell:
+    """
+    One cell of the cost matrix debug.
+
+    Stores all components you compute for a pair (track_i, det_j).
+    """
+    d_motion: float = 0.0
+    d_pose: float = 0.0
+    d_app: float = 0.0
+    cost: float = 0.0
+
+    # optional gating info (if you want)
+    allowed: bool = True
+    d2: Optional[float] = None
+
+
 @dataclass
 class DebugLog:
     """
-    Мінімальний логер:
-    - може друкувати в консоль (enabled_print=True)
-    - може збирати рядки в buffer (для збереження/виводу)
+    Minimal matrix debugger.
+
+    - create_matrix(n_rows, n_cols): allocates MatrixCell[n_rows][n_cols]
+    - log[i, j] returns MatrixCell to fill:
+        log[i, j].d_motion = ...
+        log[i, j].d_pose = ...
+        log[i, j].d_app = ...
+        log[i, j].cost = ...
+    - show_matrix(): prints ALL (i, j) breakdown + cost matrix table, then resets
     """
     enabled_print: bool = True
     sink: Callable[[str], None] = print
-    buffer: List[str] = field(default_factory=list)
 
-    # будь-які метадані, якщо треба
+    buffer: List[str] = field(default_factory=list)
     meta: Dict[str, Any] = field(default_factory=dict)
+
+    n_rows: int = 0
+    n_cols: int = 0
+    matrix: List[List[MatrixCell]] = field(default_factory=list)
 
     def _emit(self, line: str) -> None:
         self.buffer.append(line)
@@ -29,148 +52,77 @@ class DebugLog:
 
     def section(self, title: str) -> None:
         self._emit("")
-        self._emit(title)
+        self._emit(str(title))
 
-    def _print(self, msg: str) -> None:
-        self._emit(msg)
+    def line(self, msg: str) -> None:
+        self._emit(str(msg))
 
-    def set_meta(self, cfg: Any, shape: Tuple[int, int]) -> None:
-        # не привʼязуємось жорстко до MatchConfig (аби не було імпорт-циклів)
-        self.meta = {
-            "shape": [int(shape[0]), int(shape[1])],
-            "alpha": float(getattr(cfg, "alpha", 0.0)),
-            "chi2_gating": float(getattr(cfg, "chi2_gating", 0.0)),
-            "large_cost": float(getattr(cfg, "large_cost", 0.0)),
-            "min_kp_conf": float(getattr(cfg, "min_kp_conf", 0.0)),
-        }
+    def create_matrix(self, n_rows: int, n_cols: int) -> None:
+        self.n_rows = int(n_rows)
+        self.n_cols = int(n_cols)
+        self.matrix = [[MatrixCell() for _ in range(self.n_cols)] for _ in range(self.n_rows)]
 
+    def reset_matrix(self) -> None:
+        self.n_rows = 0
+        self.n_cols = 0
+        self.matrix = []
 
-# -----------------------------
-# Matcher helpers (API-compatible)
-# -----------------------------
-def create_matcher_log(cfg: Any, shape: Tuple[int, int], show: bool = True,
-                       sink: Optional[Callable[[str], None]] = None) -> DebugLog:
-    log = DebugLog(enabled_print=show, sink=sink or print)
-    log.set_meta(cfg, shape)
-    return log
+    def __getitem__(self, idx: Union[Tuple[int, int], int]) -> Union[MatrixCell, List[MatrixCell]]:
+        """
+        log[i, j] -> MatrixCell
+        log[i]    -> row (list of MatrixCell)
+        """
+        if isinstance(idx, tuple):
+            i, j = idx
+            return self.matrix[int(i)][int(j)]
+        return self.matrix[int(idx)]
 
+    def show_matrix(self, precision: int = 6) -> None:
+        """
+        Prints:
+          1) Full breakdown for ALL pairs (i, j):
+             [i; j]:
+               d_motion =
+               d_pose =
+               d_app =
+               cost =
+          2) Cost matrix table
+        Then resets the matrix.
+        """
+        if not self.enabled_print:
+            self.reset_matrix()
+            return
 
-def make_pair_base(track_index: int, det_index: int) -> Dict[str, Any]:
-    return {"track_index": track_index, "det_index": det_index}
+        if self.n_rows == 0 or self.n_cols == 0:
+            self.section("[debug] empty matrix")
+            self.reset_matrix()
+            return
 
+        # 1) Breakdown for ALL cells
+        self.section("[debug] per-pair breakdown for ALL (i, j)")
+        for i in range(self.n_rows):
+            for j in range(self.n_cols):
+                cell = self.matrix[i][j]
+                self.line(f"\n[{i}; {j}]:")
+                self.line(f"d_motion = {cell.d_motion:.{precision}f}")
+                self.line(f"d_pose   = {cell.d_pose:.{precision}f}")
+                self.line(f"d_app    = {cell.d_app:.{precision}f}")
+                self.line(f"cost     = {cell.cost:.{precision}f}")
 
-def fill_pair_gated_out(*, pair_obj: Dict[str, Any], cfg: Any,
-                        d_motion: float = 0.0, d2: Optional[float] = None,
-                        cost: Optional[float] = None, **_ignored) -> None:
-    """
-    Важливо: приймає зайві kwargs (d2, cost, ...) щоб matcher.py не падав.
-    """
-    large_cost = float(cost if cost is not None else getattr(cfg, "large_cost", 1e6))
-    pair_obj["motion"] = {"d2": d2, "allowed": False, "d_motion": float(d_motion)}
-    pair_obj["pose"] = {"used_count": 0, "D_pose": 0.0}
-    pair_obj["final"] = {
-        "alpha": float(getattr(cfg, "alpha", 0.0)),
-        "cost": large_cost,
-        "components": {"d_motion": float(d_motion), "d_pose": 0.0},
-        "reason": "gated_out",
-    }
+        # 2) Cost matrix table (compact)
+        self.section(f"\n[debug] matcher matrix (cost) shape={self.n_rows}x{self.n_cols}")
+        header = "      " + " ".join([f"j={j:02d}" for j in range(self.n_cols)])
+        self.line(header)
 
+        table_precision = 3
+        fmt = f"{{:>{table_precision + 6}.{table_precision}f}}"
+        for i in range(self.n_rows):
+            row_vals = [fmt.format(float(self.matrix[i][j].cost)) for j in range(self.n_cols)]
+            self.line(f"i={i:02d} " + " ".join(row_vals))
 
-def fill_pair_ok(*, pair_obj: Dict[str, Any], cfg: Any,
-                 d_motion: float, d_pose: float, cost: float,
-                 pose_dict: Optional[Dict[str, Any]] = None, **_ignored) -> None:
-    pair_obj["pose"] = pose_dict or {"used_count": 0, "D_pose": float(d_pose)}
-    pair_obj["final"] = {
-        "alpha": float(getattr(cfg, "alpha", 0.0)),
-        "cost": float(cost),
-        "components": {"d_motion": float(d_motion), "d_pose": float(d_pose)},
-        "reason": "ok",
-    }
-
-
-def print_gating_result(log: Optional[DebugLog], pair_tag: str, *args, **kwargs) -> None:
-    """
-    Під matcher.py може прилетіти купа аргументів — ми їх ігноруємо.
-    Корисне: d2, chi2, large_cost (якщо є).
-    """
-    if not (log and log.enabled_print):
-        return
-
-    # спробуємо витягнути d2 “розумно”:
-    d2 = kwargs.get("d2", None)
-    if d2 is None and len(args) >= 1:
-        # matcher інколи передає allowed, d2, chi2, large_cost
-        # тож d2 може бути другим позиційним
-        if len(args) >= 2:
-            d2 = args[1]
-
-    chi2 = kwargs.get("chi2_gating", None)
-    large_cost = kwargs.get("large_cost", None)
-
-    log.section(f"[pair {pair_tag}] gated out")
-    log._print(f"d2={d2}  chi2={chi2}  cost={large_cost}")
+        self.reset_matrix()
 
 
-def print_pair_result(log: Optional[DebugLog], pair_tag: str, *args, **kwargs) -> None:
-    """
-    Мінімальний рядок: motion, pose, final_cost.
-    Параметри можуть приходити в різних форматах — не ламаємось.
-    """
-    if not (log and log.enabled_print):
-        return
-
-    # типово matcher може викликати: print_pair_result(log, pair_tag, pair_obj, d_motion, d_pose, cost)
-    d_motion = None
-    d_pose = None
-    cost = None
-
-    if len(args) >= 3:
-        d_motion = args[-3]
-        d_pose = args[-2]
-        cost = args[-1]
-
-    log.section(f"[pair {pair_tag}] ok")
-    log._print(f"d_motion={d_motion}  d_pose={d_pose}  cost={cost}")
-
-
-# -----------------------------
-# Pose helpers (мінімальні)
-# -----------------------------
-def set_pose_no_keypoints(pose_dict: Dict[str, Any], log: Optional[DebugLog], pair_tag: str) -> None:
-    pose_dict.update({"has_pose": False, "used_count": 0, "D_pose": 0.0})
-    if log and log.enabled_print:
-        log.section(f"[{pair_tag}] pose")
-        log._print("no keypoints -> D_pose=0.0")
-
-
-def set_pose_no_good_points(pose_dict: Dict[str, Any], log: Optional[DebugLog],
-                            pair_tag: str, good_mask: Any) -> None:
-    pose_dict.update({"has_pose": True, "used_count": 0, "D_pose": 0.0})
-    if log and log.enabled_print:
-        log.section(f"[{pair_tag}] pose")
-        log._print("no jointly-good keypoints -> D_pose=0.0")
-
-
-def fill_pose_full_debug(*, pose_dict: Dict[str, Any], log: Optional[DebugLog], pair_tag: str,
-                         D_pose: float, used_count: Optional[int] = None, **_ignored) -> None:
-    """
-    Замість мегатаблиць — тільки коротке резюме.
-    """
-    if used_count is None:
-        # якщо не передали — просто не знаємо
-        used_count = int(pose_dict.get("used_count", 0) or 0)
-
-    pose_dict["D_pose"] = float(D_pose)
-    pose_dict["used_count"] = int(used_count)
-
-    if log and log.enabled_print:
-        log.section(f"[{pair_tag}] pose")
-        log._print(f"D_pose={D_pose:.6f} over used_kps={used_count}")
-
-
-# -----------------------------
-# Tracking printing (якщо треба)
-# -----------------------------
 def print_pre_tracking_results(frame_idx: int) -> None:
     print("\n" + "=" * 80)
     print(f"PRE TRACKING RESULTS: frame={frame_idx}")
@@ -178,18 +130,12 @@ def print_pre_tracking_results(frame_idx: int) -> None:
 
 
 def print_tracking_results(log: dict, iteration: int, show_pose_tables: bool = False) -> None:
-    """
-    Дуже короткий вивід (без полотна таблиць).
-    """
     print("\n" + "=" * 80)
     print(f"TRACKING RESULTS: frame={iteration}")
     print("=" * 80)
-
     active_tracks = log.get("active_tracks", [])
     print(f"active_tracks: {len(active_tracks)}")
-
-    # по 1 рядку на трек
     for t in active_tracks:
         tid = t.get("track_id", "N/A")
         pos = t.get("pos", None)
-        print(f"  - Track {tid} pos={pos} logs={len(t.get('match_log', []))}")
+        print(f"  - Track {tid} pos={pos}")

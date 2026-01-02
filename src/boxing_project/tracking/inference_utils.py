@@ -148,13 +148,51 @@ def _find_label_position(base_x, base_ty,
     return base_x, ty
 
 
-def process_frame(result, tracker, original_img, conf_th):
+def draw_frame_index(frame: np.ndarray, frame_idx: int,
+                     margin: int = 10,
+                     font_scale: float = 0.8,
+                     thickness: int = 2) -> None:
+    """
+    Draws "Frame: N" in the top-right corner of the image (in-place).
+    """
+    text = f"Frame: {frame_idx}"
+
+    (tw, th), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+
+    h, w = frame.shape[:2]
+    x = max(0, w - tw - margin)
+    y = max(th + margin, margin + th)  # baseline y
+
+    # Optional: draw a dark rectangle behind text for readability
+    pad = 6
+    x1 = max(0, x - pad)
+    y1 = max(0, y - th - pad)
+    x2 = min(w, x + tw + pad)
+    y2 = min(h, y + baseline + pad)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 0), -1)
+
+    cv2.putText(
+        frame,
+        text,
+        (x, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        (255, 255, 255),
+        thickness,
+        cv2.LINE_AA,
+    )
+
+
+
+
+def process_frame(result, tracker, original_img, conf_th, frame_idx: int):
     """
     Convert OpenPose output to tracker input, update tracker and draw results.
     Returns processed_frame, log_dict.
     """
     frame = original_img.copy()
     h, w = frame.shape[:2]
+
 
     if result.poseKeypoints is None:
         return frame, {
@@ -266,6 +304,8 @@ def process_frame(result, tracker, original_img, conf_th):
             2,
         )
 
+    draw_frame_index(frame, frame_idx)
+
     return frame, log
 
 
@@ -277,7 +317,7 @@ def visualize_sequence(opWrapper, tracker, images, save_width, merge_n):
     debug = bool(getattr(tracker, "debug", False))  # або tracker.cfg.debug
 
     if debug:
-        from src.boxing_project.tracking.tracking_debug import (
+        from boxing_project.tracking.tracking_debug import (
             print_pre_tracking_results,
             print_tracking_results,
         )
@@ -289,9 +329,9 @@ def visualize_sequence(opWrapper, tracker, images, save_width, merge_n):
             print_pre_tracking_results(frame_idx)
 
         result, img = preprocess_image(opWrapper, path, save_width, return_img=True)
-        frame, log = process_frame(result, tracker, img, tracker.cfg.min_kp_conf)
+        frame, log = process_frame(result, tracker, img, tracker.cfg.min_kp_conf, frame_idx)
 
-        # ... putText ...
+
 
         if debug:
             print_tracking_results(log, frame_idx)
