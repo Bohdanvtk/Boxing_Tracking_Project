@@ -95,13 +95,20 @@ def main():
     if not images:
         raise RuntimeError(f"No images found in directory: {image_dir}")
 
+
+    pose_emb_path = tracking_cfg['pose_embedding_model_path']
+    app_emb_path = tracking_cfg['apperance_embedding_model_path']
+
     # --- run inference loop ---
     visualize_sequence(
         opWrapper=opWrapper,
         tracker=tracker,
+        pose_emb_path=pose_emb_path,
+        app_emb_path=app_emb_path,
         images=images,
         save_width=data_cfg["save_width"],
         merge_n=tracking_cfg["num_frames_merge"],
+
     )
 
 

@@ -214,3 +214,8 @@ def normalize_pose_2d(
     rotated = rotate_skeleton_2d(scaled, angle)
 
     return rotated, scale, angle
+
+
+def normalize_keypoints(kps):
+    rotated, _, _ = normalize_pose_2d(kps)
+    return rotated

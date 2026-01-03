@@ -153,13 +153,6 @@ class MultiObjectTracker:
     def _remove_dead(self):
         self.tracks = [t for t in self.tracks if not t.is_dead(self.cfg.max_age)]
 
-    def update_with_openpose(self, openpose_people: List[Dict[str, Any]]) -> Dict[str, Any]:
-        detections = openpose_people_to_detections(
-            openpose_people,
-            min_kp_conf=self.cfg.min_kp_conf,
-            expect_body25=self.cfg.expect_body25,
-        )
-        return self.update(detections)
 
     def update(self, detections: List[Detection], g: float = 1.0) -> Dict[str, Any]:
         # 1) predict

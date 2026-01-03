@@ -19,4 +19,6 @@ data:
 tracking:
   config_path: "configs/tracking.yaml"
   num_frames_merge: 40           # how many pictures at one time will appear
+  apperance_embedding_model_path:
+  pose_embedding_model_path:
 

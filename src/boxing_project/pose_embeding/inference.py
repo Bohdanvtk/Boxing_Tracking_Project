@@ -5,8 +5,15 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import os
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+
 
 try:
+
+
     import tensorflow as tf
 except Exception:
     tf = None

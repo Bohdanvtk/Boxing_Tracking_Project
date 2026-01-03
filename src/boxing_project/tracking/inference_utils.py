@@ -3,6 +3,8 @@ import sys
 import cv2
 import numpy as np
 from pathlib import Path
+from boxing_project.tracking.tracker import openpose_people_to_detections
+
 
 """
 This module contains reusable inference components:
@@ -185,14 +187,13 @@ def draw_frame_index(frame: np.ndarray, frame_idx: int,
 
 
 
-def process_frame(result, tracker, original_img, conf_th, frame_idx: int):
+def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_embedder, frame_idx: int):
     """
-    Convert OpenPose output to tracker input, update tracker and draw results.
+    Convert OpenPose output to tracker input, compute embeddings, update tracker, draw results.
     Returns processed_frame, log_dict.
     """
     frame = original_img.copy()
     h, w = frame.shape[:2]
-
 
     if result.poseKeypoints is None:
         return frame, {
@@ -201,46 +202,84 @@ def process_frame(result, tracker, original_img, conf_th, frame_idx: int):
             "active_tracks": [],
         }
 
-    kps = result.poseKeypoints
-    people = [{"keypoints": kps[i]} for i in range(len(kps))]
+    kps = result.poseKeypoints  # (N_people, K, 3)
+    n_people = len(kps)
 
-    log = tracker.update_with_openpose(people)
+    # 1) people list (raw for detector->detection)
+    people = [{"keypoints": kps[i]} for i in range(n_people)]
 
-    # Precompute all bounding boxes
-    bboxes = [keypoints_to_bbox(kps[i], conf_th) for i in range(len(kps))]
+    # 2) bbox list (index == OpenPose person index)
+    bboxes = [keypoints_to_bbox(kps[i], conf_th) for i in range(n_people)]
 
-    # --------- налаштування для всіх текстових підписів (ID + OP) ---------
-    label_rects = []          # тут лежать прямокутники всіх підписів
+    # 3) attach bbox to raw person so it survives into det.meta["raw"]
+    for i in range(n_people):
+        people[i]["bbox"] = bboxes[i]
+
+    # 4) build detections
+    detections = openpose_people_to_detections(
+        people,
+        min_kp_conf=tracker.cfg.min_kp_conf,
+        expect_body25=tracker.cfg.expect_body25,
+    )
+
+    # 5) compute embeddings and store into det.meta
+    #    det.meta already has {"raw": person} from openpose_people_to_detections
+    for det in detections:
+        raw = det.meta.get("raw", {})
+        bbox = raw.get("bbox", None)
+
+        # pose embedding
+        if pose_embedder is not None and det.keypoints is not None:
+            try:
+                det.meta["e_pose"] = pose_embedder.embed(det.keypoints, det.kp_conf)
+            except Exception as e:
+                det.meta["e_pose"] = None
+                det.meta["e_pose_error"] = str(e)
+
+        # appearance embedding
+        if app_embedder is not None and bbox is not None:
+            try:
+                det.meta["e_app"] = app_embedder.embed(frame, bbox)
+            except Exception as e:
+                det.meta["e_app"] = None
+                det.meta["e_app_error"] = str(e)
+
+    # 6) update tracker using detections (now they contain embeddings)
+    log = tracker.update(detections)
+
+    # --------- label layout settings ---------
+    label_rects = []
     label_height = 18
-    label_width_est_id = 60   # приблизна ширина "ID 123"
-    label_width_est_op = 70   # приблизна ширина "OP 12"
-    step = label_height + 4   # крок підняття
-    min_y = label_height + 2  # щоб текст не вилазив за верх
-    # ----------------------------------------------------------------------
+    label_width_est_id = 60
+    label_width_est_op = 70
+    step = label_height + 4
+    min_y = label_height + 2
 
-    # ---- Draw tracks: bbox + ID (з урахуванням неперекриття тексту) ----
-    for track_id, det_idx in log["matches"]:
-        bb = bboxes[det_idx]
+    # ---- Draw tracks: bbox + ID ----
+    for track_id, det_idx in log.get("matches", []):
+        # det_idx is index in "detections", NOT necessarily original OpenPose index
+        if det_idx < 0 or det_idx >= len(detections):
+            continue
+
+        raw = detections[det_idx].meta.get("raw", {})
+        bb = raw.get("bbox", None)
         if bb is None:
             continue
 
         x1, y1, x2, y2 = bb
 
-        # обмежимо bbox рамками зображення
-        x1 = max(0, min(x1, w - 1))
-        x2 = max(0, min(x2, w))
-        y1 = max(0, min(y1, h - 1))
-        y2 = max(0, min(y2, h))
+        x1 = max(0, min(int(x1), w - 1))
+        x2 = max(0, min(int(x2), w))
+        y1 = max(0, min(int(y1), h - 1))
+        y2 = max(0, min(int(y2), h))
 
         if x2 <= x1 or y2 <= y1:
             continue
 
-        # сам bbox
         cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
 
-        # шукаємо місце для "ID N"
         base_x_id = x1
-        base_ty_id = y1 - 5  # базовий baseline над bbox
+        base_ty_id = y1 - 5
 
         x_text_id, ty_id = _find_label_position(
             base_x=base_x_id,
@@ -264,7 +303,6 @@ def process_frame(result, tracker, original_img, conf_th, frame_idx: int):
             cv2.LINE_AA,
         )
 
-        # лінія від тексту до верхнього лівого кута bbox
         cv2.line(
             frame,
             (x_text_id, ty_id - label_height // 2),
@@ -274,14 +312,15 @@ def process_frame(result, tracker, original_img, conf_th, frame_idx: int):
             cv2.LINE_AA,
         )
 
-    # ---- Draw OpenPose det indices: "OP i" теж без перекриття ----
-    for det_idx, bb in enumerate(bboxes):
+    # ---- Draw OpenPose det indices: OP i ----
+    # NOTE: these are raw OpenPose indices, not detection indices
+    for op_idx, bb in enumerate(bboxes):
         if bb is None:
             continue
         x1, y1, _, _ = bb
 
-        base_x_op = x1
-        base_ty_op = y1 - 25  # хочемо, щоб "OP" був трохи вище, ніж ID
+        base_x_op = int(x1)
+        base_ty_op = int(y1) - 25
 
         x_text_op, ty_op = _find_label_position(
             base_x=base_x_op,
@@ -296,7 +335,7 @@ def process_frame(result, tracker, original_img, conf_th, frame_idx: int):
 
         cv2.putText(
             frame,
-            f"OP {det_idx}",
+            f"OP {op_idx}",
             (x_text_op, ty_op),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
@@ -305,12 +344,11 @@ def process_frame(result, tracker, original_img, conf_th, frame_idx: int):
         )
 
     draw_frame_index(frame, frame_idx)
-
     return frame, log
 
 
 
-def visualize_sequence(opWrapper, tracker, images, save_width, merge_n):
+def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, images, save_width, merge_n, ):
     frames = []
     count = 0
 
@@ -322,6 +360,12 @@ def visualize_sequence(opWrapper, tracker, images, save_width, merge_n):
             print_tracking_results,
         )
 
+    from boxing_project.pose_embeding.inference import PoseEmbedder, PoseEmbedConfig
+    from boxing_project.apperance_embedding.inference import AppearanceEmbedder, AppearanceEmbedConfig
+
+    pose_embedder = None #PoseEmbedder(PoseEmbedConfig(model_path=pose_emb_path))
+    app_embedder = None #AppearanceEmbedder(AppearanceEmbedConfig(model_path=app_emb_path))
+
     for idx, path in enumerate(images):
         frame_idx = idx + 1
 
@@ -329,7 +373,7 @@ def visualize_sequence(opWrapper, tracker, images, save_width, merge_n):
             print_pre_tracking_results(frame_idx)
 
         result, img = preprocess_image(opWrapper, path, save_width, return_img=True)
-        frame, log = process_frame(result, tracker, img, tracker.cfg.min_kp_conf, frame_idx)
+        frame, log = process_frame(result, tracker, img, tracker.cfg.min_kp_conf, pose_embedder, app_embedder, frame_idx)
 
 
 

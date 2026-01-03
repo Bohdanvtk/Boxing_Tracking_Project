@@ -15,13 +15,15 @@ class Detection:
       center : (x, y) center of the person (e.g. median of visible keypoints).
       keypoints : (K, 2) array with 2D keypoints; may contain NaNs for low-conf joints.
       kp_conf : (K,) array of keypoint confidences.
-      meta : arbitrary metadata (e.g. raw OpenPose JSON, bbox, etc.).
+
+      meta : arbitrary metadata (e.g. raw OpenPose JSON, bbox, errors, etc.).
     """
     center: Tuple[float, float]
     keypoints: Optional[np.ndarray] = None
     kp_conf: Optional[np.ndarray] = None
-    meta: Dict[str, Any] = field(default_factory=dict)
 
+
+    meta: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class Track:
