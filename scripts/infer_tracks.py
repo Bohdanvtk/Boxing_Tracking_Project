@@ -99,12 +99,22 @@ def main():
     pose_emb_path = tracking_cfg['pose_embedding_model_path']
     app_emb_path = tracking_cfg['apperance_embedding_model_path']
 
+    sb_cfg_path = cfg['shot_boundary']['config_path']
+
+    if  sb_cfg_path is None:
+        raise FileNotFoundError(f"Shot boundary config not found: {sb_cfg_path}")
+
+    sb_cfg = load_config(sb_cfg_path)
+
+
+
     # --- run inference loop ---
     visualize_sequence(
         opWrapper=opWrapper,
         tracker=tracker,
         pose_emb_path=pose_emb_path,
         app_emb_path=app_emb_path,
+        sb_cfg=sb_cfg,
         images=images,
         save_width=data_cfg["save_width"],
         merge_n=tracking_cfg["num_frames_merge"],

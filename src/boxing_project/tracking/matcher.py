@@ -23,11 +23,7 @@ class MatchConfig:
     keypoint_weights: Optional[np.ndarray]
     min_kp_conf: float
 
-    w_motion_base: float = 1.0
-    w_pose_base: float = 1.0
-    w_pose_cut: float = 2.0
-    w_app_base: float = 1.0
-    w_app_cut: float = 3.0
+
     emb_ema_alpha: float = 0.9
 
 
@@ -50,15 +46,15 @@ def _pose_distance(track: Track, det: Detection, cfg: MatchConfig) -> float:
     If nothing usable -> returns 0.0
     """
     if track.last_keypoints is None or det.keypoints is None:
-        return 0.0
+        return cfg.large_cost
 
     kpt_t = np.asarray(track.last_keypoints, dtype=float)
     kpt_d = np.asarray(det.keypoints, dtype=float)
 
     if kpt_t.ndim != 2 or kpt_d.ndim != 2 or kpt_t.shape[1] < 2 or kpt_d.shape[1] < 2:
-        return 0.0
+        return cfg.large_cost
     if kpt_t.shape[0] != kpt_d.shape[0]:
-        return 0.0
+        return cfg.large_cost
 
     n_k = kpt_t.shape[0]
     conf_t = (
@@ -70,17 +66,17 @@ def _pose_distance(track: Track, det: Detection, cfg: MatchConfig) -> float:
         if det.kp_conf is not None else np.ones((n_k,), dtype=float)
     )
     if conf_t.shape[0] != n_k or conf_d.shape[0] != n_k:
-        return 0.0
+        return cfg.large_cost
 
     good_t = np.isfinite(kpt_t).all(axis=1) & (conf_t >= cfg.min_kp_conf)
     good_d = np.isfinite(kpt_d).all(axis=1) & (conf_d >= cfg.min_kp_conf)
     good = good_t & good_d
     if not np.any(good):
-        return 0.0
+        return cfg.large_cost
 
     diff = kpt_t[good, :2] - kpt_d[good, :2]
     per = np.linalg.norm(diff, axis=1)
-    return float(per.mean()) if per.size > 0 else 0.0
+    return float(per.mean()) if per.size > 0 else cfg.large_cost
 
 
 def _motion_cost_with_gating(track: Track, det: Detection, cfg: MatchConfig) -> Tuple[float, bool, float]:
@@ -104,12 +100,9 @@ def build_cost_matrix(
     C = np.zeros((n_t, n_d), dtype=np.float32)
 
     g = float(max(0.0, min(1.0, g)))
-    w_motion = g * float(cfg.w_motion_base)
-    w_pose = (1.0 - g) * float(cfg.w_pose_cut) + g * float(cfg.w_pose_base)
-    w_app = (1.0 - g) * float(cfg.w_app_cut) + g * float(cfg.w_app_base)
 
     log = DebugLog(enabled_print=show, sink=sink or print)
-    log.meta = {"g": g, "weights": {"w_motion": w_motion, "w_pose": w_pose, "w_app": w_app}}
+    log.meta = {"g": g}
     log.create_matrix(n_t, n_d)
 
     for i, trk in enumerate(tracks):
@@ -139,10 +132,9 @@ def build_cost_matrix(
             else:
                 d_app = 0.0
 
-            cost = w_motion * float(d_motion) + w_pose * float(d_pose) + w_app * float(d_app)
+            cost = g * float(d_motion) + (d_pose) + (d_app)
 
 
-            cell.d_motion = d_motion
             cell.d_pose = float(d_pose)
             cell.d_app = float(d_app)
             cell.cost = float(cost)

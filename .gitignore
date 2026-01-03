@@ -3,6 +3,4 @@ __pycache__/
 *.pyc
 artifacts/
 project_core_contents.txt
-.venv/
-__pycache__/
 .idea/

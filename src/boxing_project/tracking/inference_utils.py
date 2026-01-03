@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 from pathlib import Path
 from boxing_project.tracking.tracker import openpose_people_to_detections
+from boxing_project.shot_boundary.inference import ShotBoundaryInferencer, ShotBoundaryInferConfig
 
 
 """
@@ -187,7 +188,7 @@ def draw_frame_index(frame: np.ndarray, frame_idx: int,
 
 
 
-def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_embedder, frame_idx: int):
+def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_embedder, g:int, frame_idx: int):
     """
     Convert OpenPose output to tracker input, compute embeddings, update tracker, draw results.
     Returns processed_frame, log_dict.
@@ -245,7 +246,7 @@ def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_emb
                 det.meta["e_app_error"] = str(e)
 
     # 6) update tracker using detections (now they contain embeddings)
-    log = tracker.update(detections)
+    log = tracker.update(detections, g=g)
 
     # --------- label layout settings ---------
     label_rects = []
@@ -348,7 +349,7 @@ def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_emb
 
 
 
-def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, images, save_width, merge_n, ):
+def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, sb_cfg: dict, images, save_width, merge_n, ):
     frames = []
     count = 0
 
@@ -366,6 +367,19 @@ def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, images, 
     pose_embedder = None #PoseEmbedder(PoseEmbedConfig(model_path=pose_emb_path))
     app_embedder = None #AppearanceEmbedder(AppearanceEmbedConfig(model_path=app_emb_path))
 
+    sb_cfg = sb_cfg.get("shot_boundary", sb_cfg)
+
+    sb = ShotBoundaryInferencer(
+        ShotBoundaryInferConfig(
+            resize_w=sb_cfg["resize"][0],
+            resize_h=sb_cfg["resize"][1],
+            grid_x=sb_cfg["grid"][0],
+            grid_y=sb_cfg["grid"][1],
+            ema_alpha=sb_cfg.get("ema_alpha", 0.9),
+        )
+    )
+
+
     for idx, path in enumerate(images):
         frame_idx = idx + 1
 
@@ -373,7 +387,9 @@ def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, images, 
             print_pre_tracking_results(frame_idx)
 
         result, img = preprocess_image(opWrapper, path, save_width, return_img=True)
-        frame, log = process_frame(result, tracker, img, tracker.cfg.min_kp_conf, pose_embedder, app_embedder, frame_idx)
+        g = float(sb.update(img))
+
+        frame, log = process_frame(result, tracker, img, tracker.cfg.min_kp_conf, pose_embedder, app_embedder, g=g, frame_idx=frame_idx)
 
 
 

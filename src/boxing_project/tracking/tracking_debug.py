@@ -98,6 +98,16 @@ class DebugLog:
             self.reset_matrix()
             return
 
+
+        g = None
+        if isinstance(self.meta, dict):
+            g = self.meta.get("g", None)
+
+        if g is not None:
+            self.section(f"[debug] frame coefficient g = {g:.3f}")
+
+
+
         # 1) Breakdown for ALL cells
         self.section("[debug] per-pair breakdown for ALL (i, j)")
         for i in range(self.n_rows):
