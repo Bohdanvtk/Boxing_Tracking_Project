@@ -78,11 +78,16 @@ class InferRunner:
         save_width = int(data_cfg.get("save_width", 800))
         merge_n = int(tracking_cfg.get("num_frames_merge", 40))
 
-        # ---------- Optional embeddings ----------
-        pose_emb_path = tracking_cfg.get("pose_embedding_model_path")  # may be None / empty
-        app_emb_path = tracking_cfg.get("apperance_embedding_model_path")  # may be None / empty
+        # NEW: artifacts output dir
+        save_dir_raw = data_cfg.get("save_dir", None)
+        save_dir = _resolve(pr, save_dir_raw) if save_dir_raw else None
+        if save_dir is not None:
+            save_dir.mkdir(parents=True, exist_ok=True)
 
-        # normalize empty strings -> None
+        # ---------- Optional embeddings ----------
+        pose_emb_path = tracking_cfg.get("pose_embedding_model_path")
+        app_emb_path = tracking_cfg.get("apperance_embedding_model_path")
+
         pose_emb_path = str(pose_emb_path).strip() if pose_emb_path is not None else ""
         app_emb_path = str(app_emb_path).strip() if app_emb_path is not None else ""
         pose_emb_path = pose_emb_path if pose_emb_path else None
@@ -98,23 +103,20 @@ class InferRunner:
             raise FileNotFoundError(f"Shot boundary config not found: {sb_cfg_path}")
 
         sb_yaml = _load_yaml(sb_cfg_path)
-
-        # allow both formats:
-        # 1) shot_boundary: {...}
-        # 2) {...}
         sb_cfg = sb_yaml.get("shot_boundary", sb_yaml)
 
         if not isinstance(sb_cfg, dict) or not sb_cfg:
             raise ValueError(f"Shot boundary config is empty or invalid: {sb_cfg_path}")
 
-        # ---------- Run ----------
+        # ---------- RUN ----------
         visualize_sequence(
             opWrapper=opWrapper,
             tracker=tracker,
-            images=images,
-            save_width=save_width,
-            merge_n=merge_n,
             pose_emb_path=pose_emb_path,
             app_emb_path=app_emb_path,
             sb_cfg=sb_cfg,
+            images=images,
+            save_width=save_width,
+            merge_n=merge_n,
+            save_dir=save_dir,
         )

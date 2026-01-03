@@ -5,6 +5,7 @@ import numpy as np
 from pathlib import Path
 from boxing_project.tracking.tracker import openpose_people_to_detections
 from boxing_project.shot_boundary.inference import ShotBoundaryInferencer, ShotBoundaryInferConfig
+from boxing_project.tracking.image_utils import keypoints_to_bbox, draw_frame_index, _find_label_position
 
 
 """
@@ -89,106 +90,81 @@ def preprocess_image(opWrapper, img_path: Path, save_width: int, return_img=Fals
 
 
 
-def keypoints_to_bbox(kps, conf_th=0.1):
+
+
+def _save_matched_det(
+    *,
+    save_dir: Path,
+    frame_idx: int,
+    track_id: int,
+    frame: np.ndarray,
+    bbox,
+    keypoints: np.ndarray | None,
+    kp_conf: np.ndarray | None,
+    conf_th: float,
+) -> None:
     """
-    Compute bounding box over keypoints with confidence > conf_th.
-    Returns None if no valid keypoints found.
+    Saves:
+      save_dir/frame_000001/track_3/crop.jpg
+      save_dir/frame_000001/track_3/kps.npz
+    kps saved as (K,4): [x, y, conf, mask]
     """
-    valid = kps[:, 2] > conf_th
-    if not valid.any():
-        return None
-
-    xs, ys = kps[valid, 0], kps[valid, 1]
-    return int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
-
-
-
-def _rects_intersect(r1, r2) -> bool:
-    x1, y1, x2, y2 = r1
-    X1, Y1, X2, Y2 = r2
-    if x2 <= X1 or X2 <= x1:
-        return False
-    if y2 <= Y1 or Y2 <= y1:
-        return False
-    return True
-
-
-def _find_label_position(base_x, base_ty,
-                         label_width, label_height,
-                         img_w,
-                         label_rects,
-                         step,
-                         min_y):
-    """
-    Підбирає вертикальну позицію для тексту так, щоб
-    його прямокутник не перетинався з уже існуючими в label_rects.
-    Повертає (x, baseline_y) і ДОПИСУЄ прямокутник у label_rects.
-    """
-    # щоб не вилізти за праву межу кадру
-    base_x = max(0, min(base_x, img_w - label_width - 1))
-
-    # щоб текст не вилазив за верх і був не нижче min_y
-    ty = max(min_y, base_ty)
-
-    while True:
-        top = ty - label_height
-        bottom = ty
-        rect = (base_x, top, base_x + label_width, bottom)
-
-        if top < 0:
-            # далі піднімати вже нікуди
-            break
-
-        conflict = any(_rects_intersect(rect, r) for r in label_rects)
-        if not conflict:
-            break
-
-        # піднімаємо текст вище
-        ty -= step
-
-    # запам'ятовуємо зайняту зону
-    label_rects.append((base_x, ty - label_height, base_x + label_width, ty))
-    return base_x, ty
-
-
-def draw_frame_index(frame: np.ndarray, frame_idx: int,
-                     margin: int = 10,
-                     font_scale: float = 0.8,
-                     thickness: int = 2) -> None:
-    """
-    Draws "Frame: N" in the top-right corner of the image (in-place).
-    """
-    text = f"Frame: {frame_idx}"
-
-    (tw, th), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+    if save_dir is None:
+        return
 
     h, w = frame.shape[:2]
-    x = max(0, w - tw - margin)
-    y = max(th + margin, margin + th)  # baseline y
 
-    # Optional: draw a dark rectangle behind text for readability
-    pad = 6
-    x1 = max(0, x - pad)
-    y1 = max(0, y - th - pad)
-    x2 = min(w, x + tw + pad)
-    y2 = min(h, y + baseline + pad)
-    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 0), -1)
+    frame_dir = Path(save_dir) / f"frame_{frame_idx:06d}"
+    track_dir = frame_dir / f"track_{track_id}"
+    track_dir.mkdir(parents=True, exist_ok=True)
 
-    cv2.putText(
-        frame,
-        text,
-        (x, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        font_scale,
-        (255, 255, 255),
-        thickness,
-        cv2.LINE_AA,
-    )
+    # -------- crop.jpg --------
+    if bbox is not None:
+        x1, y1, x2, y2 = bbox
+        x1 = max(0, min(int(x1), w - 1))
+        x2 = max(0, min(int(x2), w))
+        y1 = max(0, min(int(y1), h - 1))
+        y2 = max(0, min(int(y2), h))
 
+        if x2 > x1 and y2 > y1:
+            crop = frame[y1:y2, x1:x2]
+            cv2.imwrite(str(track_dir / "crop.jpg"), crop)
 
+    # -------- kps.npz (K,4) --------
+    # If no keypoints -> still write empty array for consistency
+    if keypoints is None or kp_conf is None:
+        kps4 = np.zeros((0, 4), dtype=np.float32)
+    else:
+        # keypoints expected (K,2) possibly with NaNs; kp_conf (K,)
+        xy = keypoints.astype(np.float32, copy=False)
+        conf = kp_conf.astype(np.float32, copy=False)
 
+        if xy.ndim != 2 or xy.shape[1] != 2:
+            # fail-safe: try reshape if someone passed (K,3) accidentally
+            xy = xy.reshape((-1, 2)).astype(np.float32, copy=False)
 
-def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_embedder, g:int, frame_idx: int):
+        conf = conf.reshape((-1,))
+        K = min(xy.shape[0], conf.shape[0])
+        xy = xy[:K]
+        conf = conf[:K]
+
+        # mask: 1 if kp is "present"
+        # presence = conf >= conf_th AND coords finite
+        finite = np.isfinite(xy[:, 0]) & np.isfinite(xy[:, 1])
+        mask = (conf >= float(conf_th)) & finite
+
+        kps4 = np.concatenate(
+            [
+                xy,
+                conf[:, None],
+                mask.astype(np.float32)[:, None],
+            ],
+            axis=1,
+        ).astype(np.float32, copy=False)
+
+    np.savez_compressed(str(track_dir / "kps.npz"), kps=kps4)
+
+def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_embedder, g: int, frame_idx: int, save_dir: Path | None):
     """
     Convert OpenPose output to tracker input, compute embeddings, update tracker, draw results.
     Returns processed_frame, log_dict.
@@ -247,6 +223,27 @@ def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_emb
 
     # 6) update tracker using detections (now they contain embeddings)
     log = tracker.update(detections, g=g)
+
+    # dump matched detections (crop + kps) for this frame
+    if save_dir is not None:
+        for track_id, det_idx in log.get("matches", []):
+            if det_idx < 0 or det_idx >= len(detections):
+                continue
+
+            det = detections[det_idx]
+            raw = det.meta.get("raw", {})
+            bbox = raw.get("bbox", None)
+
+            _save_matched_det(
+                save_dir=save_dir,
+                frame_idx=frame_idx,
+                track_id=int(track_id),
+                frame=original_img,  #
+                bbox=bbox,
+                keypoints=det.keypoints,
+                kp_conf=det.kp_conf,
+                conf_th=conf_th,
+            )
 
     # --------- label layout settings ---------
     label_rects = []
@@ -347,9 +344,9 @@ def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_emb
     draw_frame_index(frame, frame_idx)
     return frame, log
 
+def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, sb_cfg: dict, images, save_width, merge_n,
+                    save_dir: Path | None):
 
-
-def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, sb_cfg: dict, images, save_width, merge_n, ):
     frames = []
     count = 0
 
@@ -389,9 +386,13 @@ def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, sb_cfg: 
         result, img = preprocess_image(opWrapper, path, save_width, return_img=True)
         g = float(sb.update(img))
 
-        frame, log = process_frame(result, tracker, img, tracker.cfg.min_kp_conf, pose_embedder, app_embedder, g=g, frame_idx=frame_idx)
-
-
+        frame, log = process_frame(
+            result, tracker, img,
+            tracker.cfg.min_kp_conf,
+            pose_embedder, app_embedder,
+            g=g, frame_idx=frame_idx,
+            save_dir=save_dir,
+        )
 
         if debug:
             print_tracking_results(log, frame_idx)

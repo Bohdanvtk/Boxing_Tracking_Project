@@ -14,7 +14,9 @@ openpose:
 
 data:
   image_dir: "/home/bohdan/Документи/Samples/Images/boxing/Processed_data/output/"
-  save_width: 800 # SAVE_WIDTH
+  save_width: 800
+  save_dir: "/home/bohdan/Документи/Samples/Images/boxing_tracker/test"
+
 
 tracking:
   config_path: "configs/tracking.yaml"
