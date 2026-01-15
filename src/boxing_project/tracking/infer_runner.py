@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 
 import yaml
 
 from boxing_project.tracking.inference_utils import init_openpose_from_config, visualize_sequence
 from boxing_project.tracking.tracker import MultiObjectTracker
+from boxing_project.tracking.video_utils import load_inference_images
 
 
 def _load_yaml(path: Path) -> Dict[str, Any]:
@@ -64,16 +65,7 @@ class InferRunner:
 
         # ---------- Data / Images ----------
         data_cfg = cfg.get("data", {})
-        image_dir = _resolve(pr, data_cfg.get("image_dir"))
-        if image_dir is None or not image_dir.exists():
-            raise FileNotFoundError(f"Image directory does not exist: {image_dir}")
-
-        images: List[Path] = sorted(
-            p for p in image_dir.rglob("*")
-            if p.suffix.lower() in (".jpg", ".jpeg", ".png")
-        )
-        if not images:
-            raise RuntimeError(f"No images found in directory: {image_dir}")
+        images = load_inference_images(data_cfg, pr)
 
         save_width = int(data_cfg.get("save_width", 800))
         merge_n = int(tracking_cfg.get("num_frames_merge", 40))
