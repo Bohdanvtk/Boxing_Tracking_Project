@@ -32,6 +32,7 @@ class InferRunner:
     Usage:
         from boxing_project.tracking.infer_runner import InferRunner
         InferRunner("configs/infer_tracks.yaml").run()
+        InferRunner("configs/infer_tracks.yaml").run(video=True)
     """
     infer_cfg_path: str | Path
 
@@ -46,7 +47,7 @@ class InferRunner:
         self.project_root = self.infer_cfg_path.parent.parent
         self.cfg = _load_yaml(self.infer_cfg_path)
 
-    def run(self) -> None:
+    def run(self, video: bool = False) -> None:
         cfg = self.cfg
         pr = self.project_root
 
