@@ -66,7 +66,7 @@ class InferRunner:
 
         # ---------- Data / Images ----------
         data_cfg = cfg.get("data", {})
-        images = load_inference_images(data_cfg, pr, video=video)
+        images = load_inference_images(data_cfg, pr)
 
         save_width = int(data_cfg.get("save_width", 800))
         merge_n = int(tracking_cfg.get("num_frames_merge", 40))

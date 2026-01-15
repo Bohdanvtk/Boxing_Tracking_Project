@@ -347,10 +347,10 @@ def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_emb
 def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, sb_cfg: dict, images, save_width, merge_n,
                     save_dir: Path | None):
 
+    debug = bool(getattr(tracker, "debug", False))  # або tracker.cfg.debug
+    show_merge = debug and merge_n > 0
     frames = []
     count = 0
-
-    debug = bool(getattr(tracker, "debug", False))  # або tracker.cfg.debug
 
     if debug:
         from boxing_project.tracking.tracking_debug import (
@@ -397,13 +397,14 @@ def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, sb_cfg: 
         if debug:
             print_tracking_results(log, frame_idx)
 
-        frames.append(frame)
-        count += 1
+        if show_merge:
+            frames.append(frame)
+            count += 1
 
-        if count == merge_n and debug:
-            _show_merged(frames, merge_n)
-            frames = []
-            count = 0
+            if count == merge_n:
+                _show_merged(frames, merge_n)
+                frames = []
+                count = 0
 
 
 def _show_merged(frames, n):

@@ -57,15 +57,26 @@ def _extract_video_frames(video_path: Path, output_dir: Path) -> list[Path]:
     return frames
 
 
-def load_inference_images(data_cfg: dict, project_root: Path, *, video: bool) -> list[Path]:
-    if video:
-        video_path = _resolve(project_root, data_cfg.get("video_path"))
-        if video_path is None:
-            raise KeyError("Missing data.video_path for video inference.")
+def _is_video_path(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() in {
+        ".mp4",
+        ".avi",
+        ".mov",
+        ".mkv",
+        ".webm",
+        ".m4v",
+    }
+
+
+def load_inference_images(data_cfg: dict, project_root: Path) -> list[Path]:
+    input_path = _resolve(project_root, data_cfg.get("input_dir"))
+    if input_path is None:
+        raise KeyError("Missing data.input_dir for inference.")
+
+    if _is_video_path(input_path):
         frames_dir = _resolve(project_root, data_cfg.get("video_frames_dir"))
         if frames_dir is None:
-            frames_dir = project_root / ".cache" / "video_frames" / video_path.stem
-        return _extract_video_frames(video_path, frames_dir)
+            frames_dir = project_root / ".cache" / "video_frames" / input_path.stem
+        return _extract_video_frames(input_path, frames_dir)
 
-    image_dir = _resolve(project_root, data_cfg.get("image_dir"))
-    return _list_images(image_dir)
+    return _list_images(input_path)
