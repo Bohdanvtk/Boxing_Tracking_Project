@@ -68,7 +68,6 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
     max_age = int(_get(cfg, "tracking.tracker.max_age", 10))
     min_hits = int(_get(cfg, "tracking.tracker.min_hits", 3))
     min_kp_conf = float(_get(cfg, "tracking.tracker.min_kp_conf", 0.05))
-    expect_body25 = bool(_get(cfg, "tracking.tracker.expect_body25", True))
 
     return TrackerConfig(
         dt=dt,
@@ -79,7 +78,6 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
         min_hits=min_hits,
         match=match_cfg,
         min_kp_conf=min_kp_conf,
-        expect_body25=expect_body25,
     )
 
 

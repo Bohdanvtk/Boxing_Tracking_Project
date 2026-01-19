@@ -41,47 +41,6 @@ def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
     return float(1.0 - float(np.dot(a, b) / (na * nb)))
 
 
-def _pose_distance(track: Track, det: Detection, cfg: MatchConfig) -> float:
-    """
-    Fallback pose distance based on keypoints.
-    Returns mean Euclidean distance over joints that are:
-      - finite in both track and det
-      - conf >= min_kp_conf in both
-    If nothing usable -> returns 0.0
-    """
-    if track.last_keypoints is None or det.keypoints is None:
-        return cfg.large_cost
-
-    kpt_t = np.asarray(track.last_keypoints, dtype=float)
-    kpt_d = np.asarray(det.keypoints, dtype=float)
-
-    if kpt_t.ndim != 2 or kpt_d.ndim != 2 or kpt_t.shape[1] < 2 or kpt_d.shape[1] < 2:
-        return cfg.large_cost
-    if kpt_t.shape[0] != kpt_d.shape[0]:
-        return cfg.large_cost
-
-    n_k = kpt_t.shape[0]
-    conf_t = (
-        np.asarray(track.last_kp_conf, dtype=float).reshape(-1)
-        if track.last_kp_conf is not None else np.ones((n_k,), dtype=float)
-    )
-    conf_d = (
-        np.asarray(det.kp_conf, dtype=float).reshape(-1)
-        if det.kp_conf is not None else np.ones((n_k,), dtype=float)
-    )
-    if conf_t.shape[0] != n_k or conf_d.shape[0] != n_k:
-        return cfg.large_cost
-
-    good_t = np.isfinite(kpt_t).all(axis=1) & (conf_t >= cfg.min_kp_conf)
-    good_d = np.isfinite(kpt_d).all(axis=1) & (conf_d >= cfg.min_kp_conf)
-    good = good_t & good_d
-    if not np.any(good):
-        return cfg.large_cost
-
-    diff = kpt_t[good, :2] - kpt_d[good, :2]
-    per = np.linalg.norm(diff, axis=1)
-    return float(per.mean()) if per.size > 0 else cfg.large_cost
-
 
 def _motion_cost_with_gating(track: Track, det: Detection, cfg: MatchConfig) -> Tuple[float, bool, float]:
     d2 = track.kf.gating_distance(np.asarray(det.center, dtype=float))
@@ -128,7 +87,7 @@ def build_cost_matrix(
             if trk.pose_emb_ema is not None and isinstance(det.meta, dict) and ("e_pose" in det.meta):
                 d_pose = cosine_distance(trk.pose_emb_ema, det.meta["e_pose"])
             else:
-                d_pose = _pose_distance(trk, det, cfg)
+                d_pose = 0.0
 
             # appearance (embedding або 0)
             if trk.app_emb_ema is not None and isinstance(det.meta, dict) and ("e_app" in det.meta):

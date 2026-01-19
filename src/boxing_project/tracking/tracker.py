@@ -24,13 +24,11 @@ class TrackerConfig:
     min_hits: int
     match: MatchConfig
     min_kp_conf: float
-    expect_body25: bool
 
 
 def openpose_people_to_detections(
     people: List[Dict[str, Any]],
     min_kp_conf: float = 0.05,
-    expect_body25: bool = True
 ) -> List[Detection]:
     dets: List[Detection] = []
     for person in people:

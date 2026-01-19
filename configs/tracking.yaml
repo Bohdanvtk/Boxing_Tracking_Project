@@ -18,4 +18,3 @@ tracking:
     max_age: 10                     # how long we can use track without update
     min_hits: 10                     # from what updating we can mark track as a reliable
     min_kp_conf: 0.05               # min conf to joint while update
-    expect_body25: true             #  BODY_25 from OpenPose

@@ -101,7 +101,7 @@ def main():
     save_dir = project_root / save_cfg.get("save_dir", "artifacts/models/pose_mlp")
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    save_path = save_dir / save_cfg.get("save_name", "pose_mlp_body25.keras")
+    save_path = save_dir / save_cfg.get("save_name", "pose_mlp.keras")
 
     # ❗ ЗБЕРІГАЄМО ТІЛЬКИ ENCODER
     base_mlp.save(save_path)

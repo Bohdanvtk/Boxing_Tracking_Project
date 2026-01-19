@@ -200,6 +200,9 @@ def normalize_pose_2d(
     """
     keypoints = np.asarray(keypoints, dtype=np.float32)
 
+    # 0. Replacing NaN and pos/neg inf with 0.0
+    keypoints[:, :2] = np.nan_to_num(keypoints[:, :2], nan=0.0, posinf=0.0, neginf=0.0)
+
     # 1. Centering
     centered = center_skeleton_2d(keypoints, root_index)
 
@@ -215,7 +218,3 @@ def normalize_pose_2d(
 
     return rotated, scale, angle
 
-
-def normalize_keypoints(kps):
-    rotated, _, _ = normalize_pose_2d(kps)
-    return rotated

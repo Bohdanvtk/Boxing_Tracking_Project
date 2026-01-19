@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 from typing import List
-import tensorflow as tf
 from tensorflow.keras import layers, regularizers, Model
 
 

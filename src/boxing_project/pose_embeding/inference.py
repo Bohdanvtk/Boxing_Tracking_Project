@@ -14,14 +14,13 @@ except Exception:
     tf = None
 
 
-from .normalization import normalize_keypoints
+from .normalization import normalize_pose_2d
 
 
 @dataclass(frozen=True)
 class PoseEmbedConfig:
     """Конфіг для PoseEmbedder (шлях до моделі + дрібні параметри інференсу)."""
     model_path: str
-    fill_nan_value: float = 0.0
     l2_normalize: bool = True
 
 
@@ -59,10 +58,8 @@ class PoseEmbedder:
             kps[bad] = np.nan
 
         # Нормалізація скелета (центр/масштаб/поворот) — твоя функція
-        kps_norm = normalize_keypoints(kps)
+        kps_norm, _, _ = normalize_pose_2d(kps)
 
-        # Замінюємо NaN на fill_nan_value, щоб модель могла порахувати embedding
-        kps_norm = np.where(np.isfinite(kps_norm), kps_norm, self.cfg.fill_nan_value).astype(np.float32)
 
         flat = kps_norm.reshape(1, -1)  # (1, 2K)
         emb = self.model.predict(flat, verbose=0)[0].astype(np.float32)

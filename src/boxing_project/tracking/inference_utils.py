@@ -161,6 +161,10 @@ def _save_matched_det(
             axis=1,
         ).astype(np.float32, copy=False)
 
+
+        #replacing NaN and pos/neg inf with 0.0
+        kps4[:, :2] = np.nan_to_num(kps4[:, :2], nan=0.0, posinf=0.0, neginf=0.0)
+
     np.savez_compressed(str(track_dir / "kps.npz"), kps=kps4)
 
 def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_embedder, g: int, frame_idx: int, save_dir: Path | None):
@@ -195,7 +199,6 @@ def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_emb
     detections = openpose_people_to_detections(
         people,
         min_kp_conf=tracker.cfg.min_kp_conf,
-        expect_body25=tracker.cfg.expect_body25,
     )
 
     # 5) compute embeddings and store into det.meta
@@ -360,7 +363,7 @@ def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, sb_cfg: 
     from boxing_project.pose_embeding.inference import PoseEmbedder, PoseEmbedConfig
     from boxing_project.apperance_embedding.inference import AppearanceEmbedder, AppearanceEmbedConfig
 
-    pose_embedder = None #PoseEmbedder(PoseEmbedConfig(model_path=pose_emb_path))
+    pose_embedder = PoseEmbedder(PoseEmbedConfig(model_path=pose_emb_path))
     app_embedder = AppearanceEmbedder(AppearanceEmbedConfig(model_path=app_emb_path))
 
     sb_cfg = sb_cfg.get("shot_boundary", sb_cfg)
