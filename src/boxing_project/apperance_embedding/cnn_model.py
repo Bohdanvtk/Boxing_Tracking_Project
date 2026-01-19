@@ -43,6 +43,6 @@ def build_appearance_cnn(cfg: AppearanceCNNConfig) -> tf.keras.Model:
     x = tf.keras.layers.Dense(cfg.embedding_dim, kernel_regularizer=reg, name="proj")(x)
 
     # L2 normalize embedding
-    x = tf.keras.layers.Lambda(lambda t: tf.math.l2_normalize(t, axis=-1), name="l2norm")(x)
+    x = tf.keras.layers.UnitNormalization(axis=-1, name="l2norm")(x)
 
     return tf.keras.Model(inputs, x, name="appearance_encoder")

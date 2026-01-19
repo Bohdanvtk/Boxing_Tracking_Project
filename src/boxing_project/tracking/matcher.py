@@ -26,6 +26,10 @@ class MatchConfig:
 
     emb_ema_alpha: float = 0.9
 
+    w_motion: float = float
+    w_pose: float = float
+    w_app: float = float
+
 
 def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
     a = np.asarray(a, dtype=np.float32).reshape(-1)
@@ -132,8 +136,9 @@ def build_cost_matrix(
             else:
                 d_app = 0.0
 
-            cost = g * float(d_motion) + (d_pose) + (d_app)
-
+            cost = (cfg.w_motion * (g * float(d_motion)) -
+                    (cfg.w_pose * float(d_pose)
+                    + cfg.w_app * float(d_app)))
 
             cell.d_pose = float(d_pose)
             cell.d_app = float(d_app)

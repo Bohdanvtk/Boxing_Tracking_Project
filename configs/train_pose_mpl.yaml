@@ -1,9 +1,9 @@
 seed: 42
 
 data:
-  train_pairs: "artifacts/datasets/pose_pairs_train.npz"
-  val_pairs: "artifacts/datasets/pose_pairs_val.npz"
-  num_keypoints: 25
+  train_pairs: "/home/bohdan/Документи/Samples/Images/boxing_tracker/fight_1/round_1_train/pose_embedding/pose_pairs.npz"
+  val_pairs: "/home/bohdan/Документи/Samples/Images/boxing_tracker/fight_1/round_1_test/pose_embedding/pose_pairs.npz"
+  num_keypoints: 17
 
 model:
   embedding_dim: 64
@@ -17,5 +17,5 @@ training:
   learning_rate: 1.0e-3
   log_every: 50
   save_dir: "artifacts/models/pose_mlp"
-  save_name: "pose_mlp_body25.h5"
+  save_name: "pose_mlp_body25.keras"
   loss: "contrastive"   # або "triplet", якщо захочеш

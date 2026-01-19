@@ -5,7 +5,7 @@ import yaml
 import tensorflow as tf
 
 from src.boxing_project.utils.config import set_seed
-from src.boxing_project.pose_embeding.mlp_model import PoseMLPConfig, build_pose_mlp
+from src.boxing_project.pose_embeding.mpl_model import PoseMLPConfig, build_pose_mlp
 from src.boxing_project.pose_embeding.dataset import PosePairs, prepare_contrastive_arrays
 from src.boxing_project.pose_embeding.losses import contrastive_loss
 
@@ -19,7 +19,7 @@ def main():
     project_root = Path(__file__).resolve().parents[1]
 
     # ---------- CONFIG ----------
-    cfg = load_yaml(project_root / "configs" / "train_pose_mlp.yaml")
+    cfg = load_yaml(project_root / "configs" / "train_pose_mpl.yaml")
 
     seed = int(cfg.get("seed", 42))
     set_seed(seed)
@@ -27,8 +27,8 @@ def main():
     # ---------- DATA ----------
     data_cfg = cfg["data"]
 
-    train_pairs = PosePairs.from_npz(project_root / data_cfg["train_pairs"])
-    val_pairs   = PosePairs.from_npz(project_root / data_cfg["val_pairs"])
+    train_pairs = PosePairs.from_npz(data_cfg["train_pairs"])
+    val_pairs   = PosePairs.from_npz(data_cfg["val_pairs"])
 
     num_keypoints = int(data_cfg["num_keypoints"])
     batch_size = int(cfg["training"]["batch_size"])
@@ -70,8 +70,10 @@ def main():
     emb_a = base_mlp(input_a)
     emb_b = base_mlp(input_b)
 
-    # ❗ МОДЕЛЬ ПОВЕРТАЄ DISTANCE
-    distance = tf.norm(emb_a - emb_b, axis=-1, keepdims=True)
+    distance = tf.keras.layers.Lambda(
+        lambda t: tf.norm(t[0] - t[1], axis=-1, keepdims=True),
+        name="l2_distance",
+    )([emb_a, emb_b])
 
     siamese_model = tf.keras.Model(
         inputs=[input_a, input_b],
@@ -99,7 +101,7 @@ def main():
     save_dir = project_root / save_cfg.get("save_dir", "artifacts/models/pose_mlp")
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    save_path = save_dir / save_cfg.get("save_name", "pose_mlp_body25.h5")
+    save_path = save_dir / save_cfg.get("save_name", "pose_mlp_body25.keras")
 
     # ❗ ЗБЕРІГАЄМО ТІЛЬКИ ENCODER
     base_mlp.save(save_path)

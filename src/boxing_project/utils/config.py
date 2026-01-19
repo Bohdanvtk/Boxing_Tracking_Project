@@ -30,6 +30,9 @@ def make_match_config(cfg: dict) -> MatchConfig:
     large_cost = float(_get(cfg, "tracking.matching.large_cost", 1e6))
     min_kp_conf = float(_get(cfg, "tracking.matching.min_kp_conf", 0.05))
     keypoint_weights = _get(cfg, "tracking.matching.keypoint_weights", None)
+    w_motion = _get(cfg, "tracking.matching.w_motion", 3)
+    w_pose = _get(cfg, "tracking.matching.w_pose", 5)
+    w_app = _get(cfg, "tracking.matching.w_app", 10)
 
     pose_scale_eps = float(_get(cfg, "tracking.matching.pose_scale_eps", 1e-6))
 
@@ -43,6 +46,9 @@ def make_match_config(cfg: dict) -> MatchConfig:
         large_cost=large_cost,
         min_kp_conf=min_kp_conf,
         keypoint_weights=keypoint_weights,
+        w_motion=w_motion,
+        w_pose=w_pose,
+        w_app=w_app,
         pose_scale_eps=pose_scale_eps
     )
 

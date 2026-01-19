@@ -47,7 +47,7 @@ class InferRunner:
         self.project_root = self.infer_cfg_path.parent.parent
         self.cfg = _load_yaml(self.infer_cfg_path)
 
-    def run(self, video: bool = False) -> None:
+    def run(self) -> None:
         cfg = self.cfg
         pr = self.project_root
 

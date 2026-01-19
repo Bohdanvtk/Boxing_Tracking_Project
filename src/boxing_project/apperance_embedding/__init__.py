@@ -10,5 +10,5 @@ Usage (in inference/tracking):
 """
 
 from .cnn_model import AppearanceCNNConfig, build_appearance_cnn
-from .dataset import CropPairs, prepare_contrastive_arrays
+from .dataset import FolderPairsConfig, CropPairsFolder
 from .losses import contrastive_loss

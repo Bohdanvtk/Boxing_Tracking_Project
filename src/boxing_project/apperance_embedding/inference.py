@@ -30,7 +30,7 @@ class AppearanceEmbedder:
         if tf is None:
             raise RuntimeError("TensorFlow не доступний. Перевір встановлення tensorflow у venv.")
         self.cfg = cfg
-        self.model = tf.keras.models.load_model(str(Path(cfg.model_path)), compile=False)
+        self.model = tf.keras.models.load_model(str(Path(cfg.model_path)), compile=False, safe_mode=False)
 
     def embed(self, frame_bgr: np.ndarray, bbox_xyxy: Tuple[int, int, int, int]) -> np.ndarray:
         """

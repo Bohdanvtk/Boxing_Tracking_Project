@@ -47,7 +47,7 @@ def build_pose_mlp(config: PoseMLPConfig) -> Model:
     )(x)
 
     # L2-normalize to use cosine similarity nicely
-    outputs = tf.nn.l2_normalize(x, axis=-1, name="l2_normalized_embedding")
+    outputs = layers.UnitNormalization(axis=-1, name="l2_normalized_embedding")(x)
 
     model = Model(inputs=inputs, outputs=outputs, name="pose_mlp")
     return model

@@ -1,8 +1,8 @@
 tracking:
   debug: true                        #  false=off, true=on
-  fps: 50.0                         # frames per seconds
+  fps: 30                         # frames per seconds
   kalman:
-    process_var: 68.0                # σ_a^2 — dispersion of accelerating
+    process_var: 420.0                # σ_a^2 — dispersion of accelerating
     measure_var: 58.0                # noise of detection
     p0: 1000.0                      # start covariation
   matching:
@@ -11,8 +11,11 @@ tracking:
     pose_scale_eps: 1.0e-6          # min value to avoid dividing by zero
     large_cost: 880.0               # threshold to  C[i,j]
     min_kp_conf: 0.05               # min conf to joint
+    w_motion: 1.0
+    w_pose: 5.0
+    w_app: 10
   tracker:
-    max_age: 40                     # how long we can use track without update
-    min_hits: 20                     # from what updating we can mark track as a reliable
+    max_age: 10                     # how long we can use track without update
+    min_hits: 10                     # from what updating we can mark track as a reliable
     min_kp_conf: 0.05               # min conf to joint while update
     expect_body25: true             #  BODY_25 from OpenPose

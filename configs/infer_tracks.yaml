@@ -13,15 +13,15 @@ openpose:
   disable_multi_thread: true
 
 data:
-  input_dir: "/home/bohdan/Документи/Samples/Images/boxing/Processed_data/output/"
+  input_dir: "/home/bohdan/Документи/Samples/Images/boxing_tracker/raw_data/fight_2_1.mp4"
   save_width: 800
   save_dir: "/home/bohdan/Документи/Samples/Images/boxing_tracker/test"
 
 
 tracking:
   config_path: "configs/tracking.yaml"
-  num_frames_merge: 40           # how many pictures at one time will appear
-  apperance_embedding_model_path:
+  num_frames_merge: 40      # how many pictures at one time will appear if it's 0, NO pictures will appear
+  apperance_embedding_model_path: "/home/bohdan/PycharmProjects/Boxing_Tracking_Project/artifacts/models/apperance_cnn/apperance_encoder.keras"
   pose_embedding_model_path:
 
 shot_boundary:

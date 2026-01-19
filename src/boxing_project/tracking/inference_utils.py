@@ -91,7 +91,6 @@ def preprocess_image(opWrapper, img_path: Path, save_width: int, return_img=Fals
 
 
 
-
 def _save_matched_det(
     *,
     save_dir: Path,
@@ -362,7 +361,7 @@ def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, sb_cfg: 
     from boxing_project.apperance_embedding.inference import AppearanceEmbedder, AppearanceEmbedConfig
 
     pose_embedder = None #PoseEmbedder(PoseEmbedConfig(model_path=pose_emb_path))
-    app_embedder = None #AppearanceEmbedder(AppearanceEmbedConfig(model_path=app_emb_path))
+    app_embedder = AppearanceEmbedder(AppearanceEmbedConfig(model_path=app_emb_path))
 
     sb_cfg = sb_cfg.get("shot_boundary", sb_cfg)
 

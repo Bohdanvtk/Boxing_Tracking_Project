@@ -1,10 +1,10 @@
 seed: 42
 
 data:
-  train_pairs: "artifacts/data/apperance/train_pairs.npz"
-  val_pairs: "artifacts/data/apperance/val_pairs.npz"
+  train_root: "/home/bohdan/Документи/Samples/Images/boxing_tracker/fight_1/round_1_train/appearance_embedding"
+  val_root: "/home/bohdan/Документи/Samples/Images/boxing_tracker/fight_1/round_1_test/appearance_embedding"
   image_size: [128, 128]
-  to_rgb: false   # true якщо твої кропи BGR з OpenCV
+  to_rgb: true   # true якщо твої кропи BGR з OpenCV
 
 model:
   backbone: "mobilenetv3small"
@@ -19,4 +19,4 @@ training:
   epochs: 20
   margin: 1.0
   save_dir: "artifacts/models/apperance_cnn"
-  save_name: "apperance_encoder.h5"
+  save_name: "apperance_encoder.keras"
