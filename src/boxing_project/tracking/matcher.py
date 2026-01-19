@@ -32,13 +32,19 @@ class MatchConfig:
 
 
 def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
+    '''
+        how embeddings vectors are similar
+        vector similarity [-1:1]
+            -1: not similar
+            1: similar
+    '''
     a = np.asarray(a, dtype=np.float32).reshape(-1)
     b = np.asarray(b, dtype=np.float32).reshape(-1)
     na = float(np.linalg.norm(a))
     nb = float(np.linalg.norm(b))
     if na < 1e-8 or nb < 1e-8:
         return 1.0
-    return float(1.0 - float(np.dot(a, b) / (na * nb)))
+    return float(np.dot(a, b) / (na * nb))
 
 
 
@@ -46,6 +52,7 @@ def _motion_cost_with_gating(track: Track, det: Detection, cfg: MatchConfig) -> 
     d2 = track.kf.gating_distance(np.asarray(det.center, dtype=float))
     allowed = (d2 <= cfg.chi2_gating)
     d_motion = float(np.sqrt(max(d2, 0.0)))
+
     return d_motion, allowed, float(d2)
 
 
@@ -73,7 +80,9 @@ def build_cost_matrix(
             cell = log[i, j]
 
             d_motion, allowed, d2 = _motion_cost_with_gating(trk, det, cfg)
-            cell.d_motion = float(d_motion)
+            # motion norm: d2 / chi2_gating -> [0,1]
+            d_motion_norm = float(np.clip(d2 / max(cfg.chi2_gating, 1e-12), 0.0, 1.0))
+            cell.d_motion = float(d_motion_norm)
             cell.allowed = bool(allowed)
             cell.d2 = float(d2)
 
@@ -82,6 +91,8 @@ def build_cost_matrix(
                 cell.cost = float(cfg.large_cost)
                 # (можна не рахувати інші компоненти)
                 continue
+
+
 
             # pose (embedding або fallback)
             if trk.pose_emb_ema is not None and isinstance(det.meta, dict) and ("e_pose" in det.meta):
@@ -95,12 +106,17 @@ def build_cost_matrix(
             else:
                 d_app = 0.0
 
-            cost = (cfg.w_motion * (g * float(d_motion)) -
-                    (cfg.w_pose * float(d_pose)
-                    + cfg.w_app * float(d_app)))
+            d_pose_norm = (1.0 - d_pose) / 2.0
+            d_app_norm = (1.0 - d_app) / 2.0
 
-            cell.d_pose = float(d_pose)
-            cell.d_app = float(d_app)
+            cost = (
+                    cfg.w_motion * (g * d_motion_norm)
+                    + cfg.w_pose * d_pose_norm
+                    + cfg.w_app * d_app_norm
+            )
+
+            cell.d_pose = float(d_pose_norm)
+            cell.d_app = float(d_app_norm)
             cell.cost = float(cost)
 
             C[i, j] = float(cost)
