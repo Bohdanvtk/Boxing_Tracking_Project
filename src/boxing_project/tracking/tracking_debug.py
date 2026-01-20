@@ -5,6 +5,17 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 
+GENERAL_LOG: list[str] = [] # need to save log in file
+FRAME_IDX: int = 1 # inner frame count which indepenable from infer_utils
+
+
+def frame_header(frame_idx: int) -> None:
+    GENERAL_LOG.append("\n" + "=" * 80)
+    GENERAL_LOG.append(f"FRAME {frame_idx:06d}")
+    GENERAL_LOG.append("=" * 80)
+
+
+
 @dataclass
 class MatrixCell:
     """
@@ -89,6 +100,9 @@ class DebugLog:
           2) Cost matrix table
         Then resets the matrix.
         """
+
+        global FRAME_IDX
+
         if not self.enabled_print:
             self.reset_matrix()
             return
@@ -129,6 +143,11 @@ class DebugLog:
         for i in range(self.n_rows):
             row_vals = [fmt.format(float(self.matrix[i][j].cost)) for j in range(self.n_cols)]
             self.line(f"i={i:02d} " + " ".join(row_vals))
+
+        frame_header(FRAME_IDX)
+        FRAME_IDX += 1
+        GENERAL_LOG.extend(self.buffer)
+
 
         self.reset_matrix()
 

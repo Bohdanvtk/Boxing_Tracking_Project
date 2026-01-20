@@ -101,6 +101,7 @@ def _save_matched_det(
     keypoints: np.ndarray | None,
     kp_conf: np.ndarray | None,
     conf_th: float,
+    debug: bool,
 ) -> None:
     """
     Saves:
@@ -165,9 +166,17 @@ def _save_matched_det(
         #replacing NaN and pos/neg inf with 0.0
         kps4[:, :2] = np.nan_to_num(kps4[:, :2], nan=0.0, posinf=0.0, neginf=0.0)
 
+    if debug:
+        from boxing_project.tracking.tracking_debug import GENERAL_LOG
+
+
+        log_path = save_dir / "debug_log.txt"
+        log_path.write_text("\n".join(GENERAL_LOG), encoding="utf-8")
+
     np.savez_compressed(str(track_dir / "kps.npz"), kps=kps4)
 
-def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_embedder, g: int, frame_idx: int, save_dir: Path | None):
+def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_embedder, g: int, frame_idx: int
+                  , save_dir: Path | None, debug: bool):
     """
     Convert OpenPose output to tracker input, compute embeddings, update tracker, draw results.
     Returns processed_frame, log_dict.
@@ -245,6 +254,7 @@ def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_emb
                 keypoints=det.keypoints,
                 kp_conf=det.kp_conf,
                 conf_th=conf_th,
+                debug=debug,
             )
 
     # --------- label layout settings ---------
@@ -394,10 +404,12 @@ def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, sb_cfg: 
             pose_embedder, app_embedder,
             g=g, frame_idx=frame_idx,
             save_dir=save_dir,
+            debug=debug,
         )
 
         if debug:
             print_tracking_results(log, frame_idx)
+
 
         if show_merge:
             frames.append(frame)
