@@ -34,6 +34,8 @@ def make_match_config(cfg: dict) -> MatchConfig:
     w_pose = _get(cfg, "tracking.matching.w_pose", 5)
     w_app = _get(cfg, "tracking.matching.w_app", 10)
 
+    save_log = bool(_get(cfg, "tracking.save_log", True))
+
     pose_scale_eps = float(_get(cfg, "tracking.matching.pose_scale_eps", 1e-6))
 
     if keypoint_weights is not None and not isinstance(keypoint_weights, (list, tuple)):
@@ -49,7 +51,8 @@ def make_match_config(cfg: dict) -> MatchConfig:
         w_motion=w_motion,
         w_pose=w_pose,
         w_app=w_app,
-        pose_scale_eps=pose_scale_eps
+        pose_scale_eps=pose_scale_eps,
+        save_log=save_log
     )
 
 def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
@@ -64,10 +67,13 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
     measure_var = float(_get(cfg, "tracking.kalman.measure_var", 9.0))
     p0 = float(_get(cfg, "tracking.kalman.p0", 1000.0))
 
+    debug = bool(_get(cfg, "tracking.debug", False))
+    save_log = bool(_get(cfg, "tracking.save_log", True))
 
     max_age = int(_get(cfg, "tracking.tracker.max_age", 10))
     min_hits = int(_get(cfg, "tracking.tracker.min_hits", 3))
     min_kp_conf = float(_get(cfg, "tracking.tracker.min_kp_conf", 0.05))
+
 
     return TrackerConfig(
         dt=dt,
@@ -78,6 +84,9 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
         min_hits=min_hits,
         match=match_cfg,
         min_kp_conf=min_kp_conf,
+        debug=debug,
+        save_log=save_log
+
     )
 
 

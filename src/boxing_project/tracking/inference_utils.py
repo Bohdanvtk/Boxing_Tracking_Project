@@ -107,7 +107,7 @@ def _save_matched_det(
     keypoints: np.ndarray | None,
     kp_conf: np.ndarray | None,
     conf_th: float,
-    debug: bool,
+    save_log: bool,
 ) -> None:
     """
     Saves:
@@ -175,7 +175,7 @@ def _save_matched_det(
         # replace NaN and inf with 0.0
         kps4[:, :2] = np.nan_to_num(kps4[:, :2], nan=0.0, posinf=0.0, neginf=0.0)
 
-    if debug:
+    if save_log:
         from boxing_project.tracking.tracking_debug import GENERAL_LOG
 
         log_path = save_dir / "debug_log.txt"
@@ -185,7 +185,7 @@ def _save_matched_det(
 
 
 def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_embedder, g: int, frame_idx: int
-                  , save_dir: Path | None, debug: bool):
+                  , save_dir: Path | None, save_log: bool):
     """
     Convert OpenPose output to tracker input, compute embeddings, update tracker, draw results.
     Returns processed_frame, log_dict.
@@ -255,9 +255,9 @@ def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_emb
     step = label_height + 4
     min_y = label_height + 2
 
-    # ---- Draw tracks: bbox + ID ----
+    # ---- Draw tracks: bbox + ID + Det# ----
     for track_id, det_idx in log.get("matches", []):
-        # det_idx is index in "detections", NOT necessarily original OpenPose index
+        # det_idx is index in "detections"
         if det_idx < 0 or det_idx >= len(detections):
             continue
 
@@ -276,15 +276,21 @@ def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_emb
         if x2 <= x1 or y2 <= y1:
             continue
 
+        # bbox
         cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
 
-        base_x_id = x1
-        base_ty_id = y1 - 5
+        # label position
+        base_x = x1
+        base_ty = y1 - 5
 
-        x_text_id, ty_id = _find_label_position(
-            base_x=base_x_id,
-            base_ty=base_ty_id,
-            label_width=label_width_est_id,
+        # NOTE: make label width estimate slightly larger because we print more text now
+        # Example text: "ID 12  Det#3"
+        label_width_est = int(label_width_est_id * 1.6)
+
+        x_text, ty = _find_label_position(
+            base_x=base_x,
+            base_ty=base_ty,
+            label_width=label_width_est,
             label_height=label_height,
             img_w=w,
             label_rects=label_rects,
@@ -294,8 +300,8 @@ def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_emb
 
         cv2.putText(
             frame,
-            f"ID {track_id}",
-            (x_text_id, ty_id),
+            f"ID {track_id}  Det {det_idx}",
+            (x_text, ty),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
             (36, 255, 12),
@@ -305,42 +311,11 @@ def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_emb
 
         cv2.line(
             frame,
-            (x_text_id, ty_id - label_height // 2),
+            (x_text, ty - label_height // 2),
             (x1, y1),
             (255, 255, 255),
             1,
             cv2.LINE_AA,
-        )
-
-    # ---- Draw OpenPose det indices: OP i ----
-    # NOTE: these are raw OpenPose indices, not detection indices
-    for op_idx, bb in enumerate(bboxes):
-        if bb is None:
-            continue
-        x1, y1, _, _ = bb
-
-        base_x_op = int(x1)
-        base_ty_op = int(y1) - 25
-
-        x_text_op, ty_op = _find_label_position(
-            base_x=base_x_op,
-            base_ty=base_ty_op,
-            label_width=label_width_est_op,
-            label_height=label_height,
-            img_w=w,
-            label_rects=label_rects,
-            step=step,
-            min_y=min_y,
-        )
-
-        cv2.putText(
-            frame,
-            f"OP {op_idx}",
-            (x_text_op, ty_op),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 255, 255),
-            2,
         )
 
     draw_frame_index(frame, frame_idx)
@@ -364,7 +339,7 @@ def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_emb
                 keypoints=det.keypoints,
                 kp_conf=det.kp_conf,
                 conf_th=conf_th,
-                debug=debug,
+                save_log=save_log,
             )
 
     return frame, log
@@ -372,12 +347,15 @@ def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_emb
 def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, sb_cfg: dict, images, save_width, merge_n,
                     save_dir: Path | None):
 
-    debug = bool(getattr(tracker, "debug", False))  # або tracker.cfg.debug
-    show_merge = debug and merge_n > 0
+
+    debug = tracker.cfg.debug
+    save_log = tracker.cfg.save_log
+
+    show_merge = merge_n > 0
     frames = []
     count = 0
 
-    if debug:
+    if debug or save_log:
         from boxing_project.tracking.tracking_debug import (
             print_pre_tracking_results,
             print_tracking_results,
@@ -417,7 +395,7 @@ def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, sb_cfg: 
             pose_embedder, app_embedder,
             g=g, frame_idx=frame_idx,
             save_dir=save_dir,
-            debug=debug,
+            save_log=save_log,
         )
 
         if debug:

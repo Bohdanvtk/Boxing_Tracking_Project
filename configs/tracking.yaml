@@ -1,9 +1,10 @@
 tracking:
-  debug: true                        #  false=off, true=on
+  debug: true                       #  false=off, true=on
+  save_log: true                      #  false=don't save, true=save |won't work if debug isn't true
   fps: 30                         # frames per seconds
   kalman:
     process_var: 3.2e6               # σ_a^2 — dispersion of accelerating
-    measure_var: 2500.0                # noise of detection
+    measure_var: 1.5e4               # noise of detection
     p0: 1000.0                      # start covariation
   matching:
     alpha: 0.8                      # ration coordinates to pose

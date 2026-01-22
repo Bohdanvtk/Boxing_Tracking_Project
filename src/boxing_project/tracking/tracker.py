@@ -24,6 +24,8 @@ class TrackerConfig:
     min_hits: int
     match: MatchConfig
     min_kp_conf: float
+    debug: bool
+    save_log: bool
 
 
 def openpose_people_to_detections(

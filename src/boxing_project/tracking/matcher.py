@@ -30,6 +30,8 @@ class MatchConfig:
     w_pose: float = float
     w_app: float = float
 
+    save_log: bool = bool
+
 
 def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
     """
@@ -46,23 +48,15 @@ def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (na * nb))
 
 
-def g_penalty(g: float, mu: float = 0.85885, sigma: float = 0.07274,
-              beta: float = 3.0, max_scale: float = 30.0) -> float:
-    """
-    g in [0,1]. If g below mean => increase motion cost (penalty).
-    scale = exp(beta * (mu-g)/sigma), capped.
-    """
-    g = float(np.clip(g, 0.0, 1.0))
-    if sigma <= 1e-12 or g >= mu:
-        return 1.0
-    z = (mu - g) / sigma  # how many sigmas below mean
-    return float(min(max_scale, math.exp(beta * z)))
 
 
-def _motion_cost_with_gating(track: Track, det: Detection, cfg: MatchConfig) -> Tuple[float, bool, float]:
+def _motion_cost_with_gating(track: Track, det: Detection, cfg: MatchConfig, gating: bool) -> Tuple[float, bool, float]:
     d2 = track.kf.gating_distance(np.asarray(det.center, dtype=float))
     allowed = (d2 <= cfg.chi2_gating)
     d_motion = float(np.sqrt(max(d2, 0.0)))
+
+    if gating == False:
+        allowed = True
     return d_motion, allowed, float(d2)
 
 
@@ -85,13 +79,19 @@ def build_cost_matrix(
     log.meta = {"g": g}
     log.create_matrix(n_t, n_d)
 
-    g_scale = g_penalty(g)  # <= головне: low g => bigger motion cost
+    gating = True
+
+    if g < 0.79:
+        g = g ** 3 # <= головне: low g => bigger motion cost
+        gating = False
+
 
     for i, trk in enumerate(tracks):
         for j, det in enumerate(detections):
             cell = log[i, j]
 
-            d_motion, allowed, d2 = _motion_cost_with_gating(trk, det, cfg)
+            d_motion, allowed, d2 = _motion_cost_with_gating(trk, det, cfg, gating)
+
 
             d_motion_norm = float(np.clip(d2 / max(cfg.chi2_gating, 1e-12), 0.0, 1.0))
             cell.d_motion = float(d_motion_norm)
@@ -119,7 +119,7 @@ def build_cost_matrix(
             d_app_norm = (1.0 - d_app) / 2.0
 
             cost = (
-                cfg.w_motion * (g_scale * d_motion_norm)
+                cfg.w_motion * (g * d_motion_norm)
                 + cfg.w_pose * d_pose_norm
                 + cfg.w_app * d_app_norm
             )
@@ -130,7 +130,7 @@ def build_cost_matrix(
 
             C[i, j] = float(cost)
 
-    if show:
+    if show or cfg.save_log:
         log.show_matrix()
 
     return C, log
