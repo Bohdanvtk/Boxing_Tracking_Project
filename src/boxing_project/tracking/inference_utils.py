@@ -91,12 +91,18 @@ def preprocess_image(opWrapper, img_path: Path, save_width: int, return_img=Fals
 
 
 
+import cv2
+import numpy as np
+from pathlib import Path
+
+
 def _save_matched_det(
     *,
     save_dir: Path,
     frame_idx: int,
     track_id: int,
     frame: np.ndarray,
+    processed_frame: np.ndarray,
     bbox,
     keypoints: np.ndarray | None,
     kp_conf: np.ndarray | None,
@@ -105,8 +111,10 @@ def _save_matched_det(
 ) -> None:
     """
     Saves:
+      save_dir/frame_000001/frame_vis.jpg
       save_dir/frame_000001/track_3/crop.jpg
       save_dir/frame_000001/track_3/kps.npz
+
     kps saved as (K,4): [x, y, conf, mask]
     """
     if save_dir is None:
@@ -115,6 +123,13 @@ def _save_matched_det(
     h, w = frame.shape[:2]
 
     frame_dir = Path(save_dir) / f"frame_{frame_idx:06d}"
+    frame_dir.mkdir(parents=True, exist_ok=True)
+
+    # -------- save processed frame ONCE per frame --------
+    vis_path = frame_dir / "frame_vis.jpg"
+    if processed_frame is not None and not vis_path.exists():
+        cv2.imwrite(str(vis_path), processed_frame)
+
     track_dir = frame_dir / f"track_{track_id}"
     track_dir.mkdir(parents=True, exist_ok=True)
 
@@ -131,16 +146,13 @@ def _save_matched_det(
             cv2.imwrite(str(track_dir / "crop.jpg"), crop)
 
     # -------- kps.npz (K,4) --------
-    # If no keypoints -> still write empty array for consistency
     if keypoints is None or kp_conf is None:
         kps4 = np.zeros((0, 4), dtype=np.float32)
     else:
-        # keypoints expected (K,2) possibly with NaNs; kp_conf (K,)
         xy = keypoints.astype(np.float32, copy=False)
         conf = kp_conf.astype(np.float32, copy=False)
 
         if xy.ndim != 2 or xy.shape[1] != 2:
-            # fail-safe: try reshape if someone passed (K,3) accidentally
             xy = xy.reshape((-1, 2)).astype(np.float32, copy=False)
 
         conf = conf.reshape((-1,))
@@ -148,8 +160,6 @@ def _save_matched_det(
         xy = xy[:K]
         conf = conf[:K]
 
-        # mask: 1 if kp is "present"
-        # presence = conf >= conf_th AND coords finite
         finite = np.isfinite(xy[:, 0]) & np.isfinite(xy[:, 1])
         mask = (conf >= float(conf_th)) & finite
 
@@ -162,18 +172,17 @@ def _save_matched_det(
             axis=1,
         ).astype(np.float32, copy=False)
 
-
-        #replacing NaN and pos/neg inf with 0.0
+        # replace NaN and inf with 0.0
         kps4[:, :2] = np.nan_to_num(kps4[:, :2], nan=0.0, posinf=0.0, neginf=0.0)
 
     if debug:
         from boxing_project.tracking.tracking_debug import GENERAL_LOG
 
-
         log_path = save_dir / "debug_log.txt"
         log_path.write_text("\n".join(GENERAL_LOG), encoding="utf-8")
 
     np.savez_compressed(str(track_dir / "kps.npz"), kps=kps4)
+
 
 def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_embedder, g: int, frame_idx: int
                   , save_dir: Path | None, debug: bool):
@@ -236,26 +245,7 @@ def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_emb
     log = tracker.update(detections, g=g)
 
     # dump matched detections (crop + kps) for this frame
-    if save_dir is not None:
-        for track_id, det_idx in log.get("matches", []):
-            if det_idx < 0 or det_idx >= len(detections):
-                continue
 
-            det = detections[det_idx]
-            raw = det.meta.get("raw", {})
-            bbox = raw.get("bbox", None)
-
-            _save_matched_det(
-                save_dir=save_dir,
-                frame_idx=frame_idx,
-                track_id=int(track_id),
-                frame=original_img,  #
-                bbox=bbox,
-                keypoints=det.keypoints,
-                kp_conf=det.kp_conf,
-                conf_th=conf_th,
-                debug=debug,
-            )
 
     # --------- label layout settings ---------
     label_rects = []
@@ -354,6 +344,29 @@ def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_emb
         )
 
     draw_frame_index(frame, frame_idx)
+
+    if save_dir is not None:
+        for track_id, det_idx in log.get("matches", []):
+            if det_idx < 0 or det_idx >= len(detections):
+                continue
+
+            det = detections[det_idx]
+            raw = det.meta.get("raw", {})
+            bbox = raw.get("bbox", None)
+
+            _save_matched_det(
+                save_dir=save_dir,
+                frame_idx=frame_idx,
+                track_id=int(track_id),
+                frame=original_img,
+                processed_frame=frame,  #
+                bbox=bbox,
+                keypoints=det.keypoints,
+                kp_conf=det.kp_conf,
+                conf_th=conf_th,
+                debug=debug,
+            )
+
     return frame, log
 
 def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, sb_cfg: dict, images, save_width, merge_n,
@@ -419,6 +432,8 @@ def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, sb_cfg: 
                 _show_merged(frames, merge_n)
                 frames = []
                 count = 0
+
+    print(f"[INFO] {frame_idx} frames were processed")
 
 
 def _show_merged(frames, n):

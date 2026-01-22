@@ -72,8 +72,11 @@ def openpose_people_to_detections(
         if np.all(~good):
             continue
 
-        cx = np.nanmedian(xy[:, 0])
-        cy = np.nanmedian(xy[:, 1])
+        TORSO = [1, 8]  # Neck, MidHip (BODY_25)
+        txy = xy[TORSO]
+        if np.all(np.isnan(txy)):
+            txy = xy
+        cx, cy = np.nanmedian(txy, axis=0)
 
         dets.append(
             Detection(

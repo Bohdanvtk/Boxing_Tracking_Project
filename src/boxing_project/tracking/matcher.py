@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple, Optional, Callable, Dict, Any, Union
+from typing import List, Tuple, Optional, Callable, Union
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
@@ -23,7 +24,6 @@ class MatchConfig:
     keypoint_weights: Optional[np.ndarray]
     min_kp_conf: float
 
-
     emb_ema_alpha: float = 0.9
 
     w_motion: float = float
@@ -32,12 +32,11 @@ class MatchConfig:
 
 
 def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
-    '''
-        how embeddings vectors are similar
-        vector similarity [-1:1]
-            -1: not similar
-            1: similar
-    '''
+    """
+    vector similarity [-1:1]
+        -1: not similar
+         1: similar
+    """
     a = np.asarray(a, dtype=np.float32).reshape(-1)
     b = np.asarray(b, dtype=np.float32).reshape(-1)
     na = float(np.linalg.norm(a))
@@ -47,12 +46,23 @@ def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (na * nb))
 
 
+def g_penalty(g: float, mu: float = 0.85885, sigma: float = 0.07274,
+              beta: float = 3.0, max_scale: float = 30.0) -> float:
+    """
+    g in [0,1]. If g below mean => increase motion cost (penalty).
+    scale = exp(beta * (mu-g)/sigma), capped.
+    """
+    g = float(np.clip(g, 0.0, 1.0))
+    if sigma <= 1e-12 or g >= mu:
+        return 1.0
+    z = (mu - g) / sigma  # how many sigmas below mean
+    return float(min(max_scale, math.exp(beta * z)))
+
 
 def _motion_cost_with_gating(track: Track, det: Detection, cfg: MatchConfig) -> Tuple[float, bool, float]:
     d2 = track.kf.gating_distance(np.asarray(det.center, dtype=float))
     allowed = (d2 <= cfg.chi2_gating)
     d_motion = float(np.sqrt(max(d2, 0.0)))
-
     return d_motion, allowed, float(d2)
 
 
@@ -69,18 +79,20 @@ def build_cost_matrix(
     n_d = len(detections)
     C = np.zeros((n_t, n_d), dtype=np.float32)
 
-    g = float(max(0.0, min(1.0, g)))
+    g = float(np.clip(g, 0.0, 1.0))
 
     log = DebugLog(enabled_print=show, sink=sink or print)
     log.meta = {"g": g}
     log.create_matrix(n_t, n_d)
+
+    g_scale = g_penalty(g)  # <= головне: low g => bigger motion cost
 
     for i, trk in enumerate(tracks):
         for j, det in enumerate(detections):
             cell = log[i, j]
 
             d_motion, allowed, d2 = _motion_cost_with_gating(trk, det, cfg)
-            # motion norm: d2 / chi2_gating -> [0,1]
+
             d_motion_norm = float(np.clip(d2 / max(cfg.chi2_gating, 1e-12), 0.0, 1.0))
             cell.d_motion = float(d_motion_norm)
             cell.allowed = bool(allowed)
@@ -89,10 +101,7 @@ def build_cost_matrix(
             if not allowed:
                 C[i, j] = float(cfg.large_cost)
                 cell.cost = float(cfg.large_cost)
-                # (можна не рахувати інші компоненти)
                 continue
-
-
 
             # pose (embedding або fallback)
             if trk.pose_emb_ema is not None and isinstance(det.meta, dict) and ("e_pose" in det.meta):
@@ -110,9 +119,9 @@ def build_cost_matrix(
             d_app_norm = (1.0 - d_app) / 2.0
 
             cost = (
-                    cfg.w_motion * (g * d_motion_norm)
-                    + cfg.w_pose * d_pose_norm
-                    + cfg.w_app * d_app_norm
+                cfg.w_motion * (g_scale * d_motion_norm)
+                + cfg.w_pose * d_pose_norm
+                + cfg.w_app * d_app_norm
             )
 
             cell.d_pose = float(d_pose_norm)
