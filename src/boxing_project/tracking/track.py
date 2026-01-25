@@ -34,7 +34,7 @@ class Track:
     A track stores:
     - motion state (Kalman filter),
     - reliability over time (hits / confirmation),
-    - and object identity via smoothed pose and appearance embeddings (EMA).
+    - and object identity via smoothed appearance embeddings (EMA).
 
     Attributes:
     track_id : int
@@ -67,9 +67,6 @@ class Track:
     last_kp_conf : Optional[np.ndarray]
     Confidence scores for the last keypoints (K,).
 
-    pose_emb_ema : Optional[np.ndarray]
-    EMA of pose embeddings, representing the track’s long-term pose memory.
-
     app_emb_ema : Optional[np.ndarray]
     EMA of appearance embeddings, representing the track’s long-term visual identity.
 
@@ -87,7 +84,6 @@ class Track:
     last_kp_conf: Optional[np.ndarray] = None
     last_det_center: Optional[Tuple[float, float]] = None
 
-    pose_emb_ema: Optional[np.ndarray] = None
     app_emb_ema: Optional[np.ndarray] = None
 
     def predict(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -113,7 +109,7 @@ class Track:
         Робить:
           1) Kalman update по det.center
           2) оновлює last_* поля (keypoints/conf/center)
-          3) EMA-оновлення embeddings (pose/app) з det.meta["e_pose"]/["e_app"]
+          3) EMA-оновлення embedding (app) з det.meta["e_app"]
 
         Args:
             det: Detection, який Hungarian приписав цьому треку.
@@ -128,14 +124,6 @@ class Track:
         self.last_det_center = det.center
         self.last_keypoints = None if det.keypoints is None else np.asarray(det.keypoints, dtype=float)
         self.last_kp_conf = None if det.kp_conf is None else np.asarray(det.kp_conf, dtype=float)
-
-        e_pose = det.meta.get("e_pose", None)
-        if e_pose is not None:
-            e_pose = np.asarray(e_pose, dtype=np.float32)
-            if self.pose_emb_ema is None:
-                self.pose_emb_ema = e_pose
-            else:
-                self.pose_emb_ema = ema_alpha * self.pose_emb_ema + (1.0 - ema_alpha) * e_pose
 
         e_app = det.meta.get("e_app", None)
         if e_app is not None:

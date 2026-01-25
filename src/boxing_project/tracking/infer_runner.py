@@ -78,12 +78,8 @@ class InferRunner:
             save_dir.mkdir(parents=True, exist_ok=True)
 
         # ---------- Optional embeddings ----------
-        pose_emb_path = tracking_cfg.get("pose_embedding_model_path")
         app_emb_path = tracking_cfg.get("apperance_embedding_model_path")
-
-        pose_emb_path = str(pose_emb_path).strip() if pose_emb_path is not None else ""
         app_emb_path = str(app_emb_path).strip() if app_emb_path is not None else ""
-        pose_emb_path = pose_emb_path if pose_emb_path else None
         app_emb_path = app_emb_path if app_emb_path else None
 
         # ---------- Shot boundary (REQUIRED) ----------
@@ -105,7 +101,6 @@ class InferRunner:
         visualize_sequence(
             opWrapper=opWrapper,
             tracker=tracker,
-            pose_emb_path=pose_emb_path,
             app_emb_path=app_emb_path,
             sb_cfg=sb_cfg,
             images=images,
