@@ -12,6 +12,7 @@ from scipy.optimize import linear_sum_assignment
 from .track import Track, Detection
 from . import DEFAULT_TRACKING_CONFIG_PATH
 from .tracking_debug import DebugLog
+from boxing_project.pose_embeding.normalization import normalize_pose_2d
 
 
 @dataclass
@@ -47,6 +48,85 @@ def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
         return 1.0
     return float(np.dot(a, b) / (na * nb))
 
+
+def _pose_distance(
+    track_keypoints: Optional[np.ndarray],
+    track_kp_conf: Optional[np.ndarray],
+    det_keypoints: Optional[np.ndarray],
+    det_kp_conf: Optional[np.ndarray],
+    cfg: MatchConfig,
+) -> float:
+    """
+    Fallback pose distance based on keypoints.
+    Returns mean Euclidean distance over joints that are:
+      - finite in both track and det
+      - conf >= min_kp_conf in both
+    If nothing usable -> returns 0.0
+    """
+    if track_keypoints is None or det_keypoints is None:
+        return cfg.large_cost
+
+    kpt_t = np.asarray(track_keypoints, dtype=float)
+    kpt_d = np.asarray(det_keypoints, dtype=float)
+
+    if kpt_t.ndim != 2 or kpt_d.ndim != 2 or kpt_t.shape[1] < 2 or kpt_d.shape[1] < 2:
+        return cfg.large_cost
+    if kpt_t.shape[0] != kpt_d.shape[0]:
+        return cfg.large_cost
+
+    n_k = kpt_t.shape[0]
+    conf_t = (
+        np.asarray(track_kp_conf, dtype=float).reshape(-1)
+        if track_kp_conf is not None else np.ones((n_k,), dtype=float)
+    )
+    conf_d = (
+        np.asarray(det_kp_conf, dtype=float).reshape(-1)
+        if det_kp_conf is not None else np.ones((n_k,), dtype=float)
+    )
+    if conf_t.shape[0] != n_k or conf_d.shape[0] != n_k:
+        return cfg.large_cost
+
+    good_t = np.isfinite(kpt_t).all(axis=1) & (conf_t >= cfg.min_kp_conf)
+    good_d = np.isfinite(kpt_d).all(axis=1) & (conf_d >= cfg.min_kp_conf)
+    good = good_t & good_d
+    if not np.any(good):
+        return cfg.large_cost
+
+    diff = kpt_t[good, :2] - kpt_d[good, :2]
+    per = np.linalg.norm(diff, axis=1)
+    return float(per.mean()) if per.size > 0 else cfg.large_cost
+
+
+def _prepare_pose_for_distance(
+    keypoints: Optional[np.ndarray],
+    kp_conf: Optional[np.ndarray],
+    cfg: MatchConfig,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    if keypoints is None:
+        return None, None
+
+    kpt = np.asarray(keypoints, dtype=float)
+    if kpt.ndim != 2 or kpt.shape[1] < 2:
+        return None, None
+
+    kpt = kpt[:, :2]
+    n_k = kpt.shape[0]
+    conf = (
+        np.asarray(kp_conf, dtype=float).reshape(-1)
+        if kp_conf is not None else np.ones((n_k,), dtype=float)
+    )
+    if conf.shape[0] != n_k:
+        return None, None
+
+    try:
+        norm_kpt, _, _ = normalize_pose_2d(kpt, eps=cfg.pose_scale_eps)
+    except Exception:
+        return None, None
+
+    conf_filtered = conf.copy()
+    conf_filtered[conf_filtered < cfg.min_kp_conf] = 0.0
+
+    return norm_kpt, conf_filtered
 
 
 
@@ -93,6 +173,15 @@ def build_cost_matrix(
         gating = False
 
 
+    track_pose = [
+        _prepare_pose_for_distance(trk.last_keypoints, trk.last_kp_conf, cfg)
+        for trk in tracks
+    ]
+    det_pose = [
+        _prepare_pose_for_distance(det.keypoints, det.kp_conf, cfg)
+        for det in detections
+    ]
+
     for i, trk in enumerate(tracks):
         for j, det in enumerate(detections):
             cell = log[i, j]
@@ -110,11 +199,9 @@ def build_cost_matrix(
                 cell.cost = float(cfg.large_cost)
                 continue
 
-            # pose (embedding або fallback)
-            if trk.pose_emb_ema is not None and isinstance(det.meta, dict) and ("e_pose" in det.meta):
-                d_pose = cosine_distance(trk.pose_emb_ema, det.meta["e_pose"])
-            else:
-                d_pose = 0.0
+            trk_kps, trk_conf = track_pose[i]
+            det_kps, det_conf = det_pose[j]
+            d_pose = _pose_distance(trk_kps, trk_conf, det_kps, det_conf, cfg)
 
             # appearance (embedding або 0)
             if trk.app_emb_ema is not None and isinstance(det.meta, dict) and ("e_app" in det.meta):
@@ -122,16 +209,15 @@ def build_cost_matrix(
             else:
                 d_app = 0.0
 
-            d_pose_norm = (1.0 - d_pose) / 2.0
             d_app_norm = (1.0 - d_app) / 2.0
 
             cost = (
                 cfg.w_motion * (g * d_motion_norm)
-                + cfg.w_pose * d_pose_norm
+                + cfg.w_pose * d_pose
                 + cfg.w_app * d_app_norm
             )
 
-            cell.d_pose = float(d_pose_norm)
+            cell.d_pose = float(d_pose)
             cell.d_app = float(d_app_norm)
             cell.cost = float(cost)
 

@@ -180,7 +180,7 @@ def _save_matched_det(
     np.savez_compressed(str(track_dir / "kps.npz"), kps=kps4)
 
 
-def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_embedder, g: int, frame_idx: int
+def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, frame_idx: int
                   , save_dir: Path | None, save_log: bool):
     """
     Convert OpenPose output to tracker input, compute embeddings, update tracker, draw results.
@@ -220,14 +220,6 @@ def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_emb
     for det in detections:
         raw = det.meta.get("raw", {})
         bbox = raw.get("bbox", None)
-
-        # pose embedding
-        if pose_embedder is not None and det.keypoints is not None:
-            try:
-                det.meta["e_pose"] = pose_embedder.embed(det.keypoints, det.kp_conf)
-            except Exception as e:
-                det.meta["e_pose"] = None
-                det.meta["e_pose_error"] = str(e)
 
         # appearance embedding
         if app_embedder is not None and bbox is not None:
@@ -340,7 +332,7 @@ def process_frame(result, tracker, original_img, conf_th, pose_embedder, app_emb
 
     return frame, log
 
-def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, sb_cfg: dict, images, save_width, merge_n,
+def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, save_width, merge_n,
                     save_dir: Path | None):
 
 
@@ -357,10 +349,8 @@ def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, sb_cfg: 
             print_tracking_results,
         )
 
-    from boxing_project.pose_embeding.inference import PoseEmbedder, PoseEmbedConfig
     from boxing_project.apperance_embedding.inference import AppearanceEmbedder, AppearanceEmbedConfig
 
-    pose_embedder = PoseEmbedder(PoseEmbedConfig(model_path=pose_emb_path))
     app_embedder = AppearanceEmbedder(AppearanceEmbedConfig(model_path=app_emb_path))
 
     sb_cfg = sb_cfg.get("shot_boundary", sb_cfg)
@@ -388,7 +378,7 @@ def visualize_sequence(opWrapper, tracker, pose_emb_path, app_emb_path, sb_cfg: 
         frame, log = process_frame(
             result, tracker, img,
             tracker.cfg.min_kp_conf,
-            pose_embedder, app_embedder,
+            app_embedder,
             g=g, frame_idx=frame_idx,
             save_dir=save_dir,
             save_log=save_log,
