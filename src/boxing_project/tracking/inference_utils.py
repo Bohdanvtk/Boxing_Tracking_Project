@@ -91,10 +91,6 @@ def preprocess_image(opWrapper, img_path: Path, save_width: int, return_img=Fals
 
 
 
-import cv2
-import numpy as np
-from pathlib import Path
-
 
 def _save_matched_det(
     *,

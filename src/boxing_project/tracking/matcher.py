@@ -76,7 +76,14 @@ def build_cost_matrix(
     g = float(np.clip(g, 0.0, 1.0))
 
     log = DebugLog(enabled_print=show, sink=sink or print)
-    log.meta = {"g": g}
+    log.meta = {
+        "g": g,
+        "tracks": tracks,  # <-- щоб _get_track_id(i) брав trk.track_id
+        "detections": detections,  # <-- щоб _get_det_id(j) міг брати id якщо є
+        "track_ids": [t.track_id for t in tracks],  # (опційно, але супер-надійно)
+        "det_ids": list(range(len(detections)))  # щоб явно було Det#j == j
+    }
+
     log.create_matrix(n_t, n_d)
 
     gating = True
@@ -135,7 +142,7 @@ def build_cost_matrix(
 
     return C, log
 
-
+'''
 def linear_assignment_with_unmatched(C: np.ndarray, large_cost: float) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
     if C.size == 0:
         return [], list(range(C.shape[0])), list(range(C.shape[1]))
@@ -154,6 +161,62 @@ def linear_assignment_with_unmatched(C: np.ndarray, large_cost: float) -> Tuple[
         used_dets.add(int(c))
 
     n_tracks, n_dets = C.shape
+    unmatched_tracks = [i for i in range(n_tracks) if i not in used_tracks]
+    unmatched_dets = [j for j in range(n_dets) if j not in used_dets]
+
+    return matched, unmatched_tracks, unmatched_dets
+'''
+
+def linear_assignment_with_unmatched(
+    C: np.ndarray,
+    large_cost: float,
+    greedy_threshold: float = 1.8,
+) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
+    """
+    Global greedy assignment:
+    - build list of all (track, det, cost) where cost < greedy_threshold
+      (and also skip large_cost if you still use it as "invalid match")
+    - sort by cost ascending
+    - take smallest edges while keeping one-to-one constraint
+    - return matched pairs + unmatched tracks/dets
+
+    This implements "smaller cost = higher priority" directly.
+    """
+
+    if C.size == 0:
+        # Note: for empty cost matrix, shapes still matter
+        return [], list(range(C.shape[0])), list(range(C.shape[1]))
+
+    n_tracks, n_dets = C.shape
+
+    # Collect all candidate edges
+    edges: List[Tuple[float, int, int]] = []
+    for r in range(n_tracks):
+        for c in range(n_dets):
+            cost = float(C[r, c])
+            # Skip invalid / gated entries
+            if cost >= large_cost:
+                continue
+            # Hard accept/reject threshold
+            if cost > greedy_threshold:
+                continue
+            edges.append((cost, r, c))
+
+    # Sort by increasing cost (best matches first)
+    edges.sort(key=lambda x: x[0])
+
+    matched: List[Tuple[int, int]] = []
+    used_tracks = set()
+    used_dets = set()
+
+    # Greedy pick
+    for cost, r, c in edges:
+        if r in used_tracks or c in used_dets:
+            continue
+        matched.append((int(r), int(c)))
+        used_tracks.add(r)
+        used_dets.add(c)
+
     unmatched_tracks = [i for i in range(n_tracks) if i not in used_tracks]
     unmatched_dets = [j for j in range(n_dets) if j not in used_dets]
 

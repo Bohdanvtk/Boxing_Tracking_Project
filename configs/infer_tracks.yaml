@@ -13,7 +13,7 @@ openpose:
   disable_multi_thread: true
 
 data:
-  input_dir: "/home/bohdan/Документи/Samples/Images/boxing_tracker/raw_data/fight_2_1.mp4"
+  input_dir: "/home/bohdan/Документи/Samples/Images/boxing_tracker/raw_data/fight_1_2_11.mp4"
   save_width: 800
   save_dir: "/home/bohdan/Документи/Samples/Images/boxing_tracker/test"
 
