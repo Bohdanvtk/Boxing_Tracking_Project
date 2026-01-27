@@ -23,23 +23,38 @@ def main():
     set_seed(seed)
 
     # ---------- DATA ----------
+
     data_cfg = cfg["data"]
 
-    train_root = project_root / Path(data_cfg["train_root"])
-    val_root = project_root / Path(data_cfg["val_root"])
-
     image_size = tuple(data_cfg.get("image_size", [128, 128]))
-    to_rgb = bool(data_cfg.get("to_rgb", False))  # якщо preprocess_crops_tf це підтримує
-
+    to_rgb = bool(data_cfg.get("to_rgb", False))
     batch_size = int(cfg["training"]["batch_size"])
 
-    train_ds_raw = CropPairsFolder.from_folder(
-        FolderPairsConfig(root_dir=train_root, image_size=image_size, seed=seed)
-    ).as_tf_dataset(batch_size=batch_size, shuffle=True)
+    # ---- helper: build dataset from one folder ----
+    def build_one_ds(root_dir: Path, shuffle: bool):
+        return CropPairsFolder.from_folder(
+            FolderPairsConfig(root_dir=root_dir, image_size=image_size, seed=seed)
+        ).as_tf_dataset(batch_size=batch_size, shuffle=shuffle)
 
-    val_ds_raw = CropPairsFolder.from_folder(
-        FolderPairsConfig(root_dir=val_root, image_size=image_size, seed=seed)
-    ).as_tf_dataset(batch_size=batch_size, shuffle=False)
+    # ---- read roots (support both single and list) ----
+    if "train_roots" in data_cfg:
+        train_roots = [project_root / Path(p) for p in data_cfg["train_roots"]]
+    else:
+        train_roots = [project_root / Path(data_cfg["train_root"])]
+
+    if "val_roots" in data_cfg:
+        val_roots = [project_root / Path(p) for p in data_cfg["val_roots"]]
+    else:
+        val_roots = [project_root / Path(data_cfg["val_root"])]
+
+    # ---- build list of datasets ----
+    train_datasets = [build_one_ds(r, shuffle=True) for r in train_roots]
+    val_datasets = [build_one_ds(r, shuffle=False) for r in val_roots]
+
+    # ---- mix them into one dataset ----
+    train_ds_raw = tf.data.Dataset.sample_from_datasets(train_datasets, seed=seed)
+    val_ds_raw = tf.data.Dataset.sample_from_datasets(val_datasets, seed=seed)
+
 
     # preprocessing тепер тут, централізовано
     def preprocess_pair(batch, y):

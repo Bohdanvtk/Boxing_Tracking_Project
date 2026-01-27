@@ -1,18 +1,16 @@
 from __future__ import annotations
 
 import copy
-import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple, Optional, Callable, Union
 
 import numpy as np
-from scipy.optimize import linear_sum_assignment
 
 from .track import Track, Detection
 from . import DEFAULT_TRACKING_CONFIG_PATH
 from .tracking_debug import DebugLog
-from boxing_project.pose_embeding.normalization import normalize_pose_2d
+from boxing_project.tracking.normalization import normalize_pose_2d
 
 
 @dataclass
@@ -30,6 +28,7 @@ class MatchConfig:
     w_motion: float = float
     w_pose: float = float
     w_app: float = float
+    pose_core: list = list
 
     save_log: bool = bool
 
@@ -57,24 +56,25 @@ def _pose_distance(
     cfg: MatchConfig,
 ) -> float:
     """
-    Fallback pose distance based on keypoints.
-    Returns mean Euclidean distance over joints that are:
-      - finite in both track and det
-      - conf >= min_kp_conf in both
+    Pose similarity (cosine) computed only on cfg.pose_core joints.
+
+    Returns cosine similarity in [-1..1].
     If nothing usable -> returns 0.0
     """
+
     if track_keypoints is None or det_keypoints is None:
-        return cfg.large_cost
+        return 0.0
 
     kpt_t = np.asarray(track_keypoints, dtype=float)
     kpt_d = np.asarray(det_keypoints, dtype=float)
 
     if kpt_t.ndim != 2 or kpt_d.ndim != 2 or kpt_t.shape[1] < 2 or kpt_d.shape[1] < 2:
-        return cfg.large_cost
+        return 0.0
     if kpt_t.shape[0] != kpt_d.shape[0]:
-        return cfg.large_cost
+        return 0.0
 
     n_k = kpt_t.shape[0]
+
     conf_t = (
         np.asarray(track_kp_conf, dtype=float).reshape(-1)
         if track_kp_conf is not None else np.ones((n_k,), dtype=float)
@@ -84,17 +84,44 @@ def _pose_distance(
         if det_kp_conf is not None else np.ones((n_k,), dtype=float)
     )
     if conf_t.shape[0] != n_k or conf_d.shape[0] != n_k:
-        return cfg.large_cost
+        return 0.0
 
-    good_t = np.isfinite(kpt_t).all(axis=1) & (conf_t >= cfg.min_kp_conf)
-    good_d = np.isfinite(kpt_d).all(axis=1) & (conf_d >= cfg.min_kp_conf)
+    # --- use only pose_core joints ---
+    core = np.asarray(cfg.pose_core, dtype=int).reshape(-1) if getattr(cfg, "pose_core", None) is not None else None
+    if core is None or core.size == 0:
+        return 0.0
+
+    # keep only valid indices
+    core = core[(core >= 0) & (core < n_k)]
+    if core.size == 0:
+        return 0.0
+
+    # validity only on core joints
+    good_t = np.isfinite(kpt_t[core, :2]).all(axis=1) & (conf_t[core] >= cfg.min_kp_conf)
+    good_d = np.isfinite(kpt_d[core, :2]).all(axis=1) & (conf_d[core] >= cfg.min_kp_conf)
     good = good_t & good_d
-    if not np.any(good):
-        return cfg.large_cost
 
-    diff = kpt_t[good, :2] - kpt_d[good, :2]
-    per = np.linalg.norm(diff, axis=1)
-    return float(per.mean()) if per.size > 0 else cfg.large_cost
+    core_good = core[good]
+    if core_good.size == 0:
+        return 0.0
+
+    # (optional but recommended) require at least 2 joints to be meaningful
+    if core_good.size < 2:
+        return 0.0
+
+    vt = kpt_t[core_good, :2].reshape(-1)
+    vd = kpt_d[core_good, :2].reshape(-1)
+
+    # Optional keypoint weighting (if provided)
+    if cfg.keypoint_weights is not None:
+        w = np.asarray(cfg.keypoint_weights, dtype=float).reshape(-1)
+        if w.shape[0] == n_k:
+            wg = w[core_good]
+            wg_xy = np.repeat(np.sqrt(np.clip(wg, 0.0, None)), 2)
+            vt = vt * wg_xy
+            vd = vd * wg_xy
+
+    return float(cosine_distance(vt, vd))
 
 
 def _prepare_pose_for_distance(
@@ -119,7 +146,9 @@ def _prepare_pose_for_distance(
         return None, None
 
     try:
-        norm_kpt, _, _ = normalize_pose_2d(kpt, eps=cfg.pose_scale_eps)
+        out = normalize_pose_2d(kpt, eps=cfg.pose_scale_eps)
+        norm_kpt = out[0] if isinstance(out, tuple) else out
+
     except Exception:
         return None, None
 
@@ -210,14 +239,15 @@ def build_cost_matrix(
                 d_app = 0.0
 
             d_app_norm = (1.0 - d_app) / 2.0
+            d_pose_norm = (1.0 - d_pose) / 2.0
 
             cost = (
                 cfg.w_motion * (g * d_motion_norm)
-                + cfg.w_pose * d_pose
+                + cfg.w_pose * d_pose_norm
                 + cfg.w_app * d_app_norm
             )
 
-            cell.d_pose = float(d_pose)
+            cell.d_pose = float(d_pose_norm)
             cell.d_app = float(d_app_norm)
             cell.cost = float(cost)
 
@@ -228,35 +258,12 @@ def build_cost_matrix(
 
     return C, log
 
-'''
-def linear_assignment_with_unmatched(C: np.ndarray, large_cost: float) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
-    if C.size == 0:
-        return [], list(range(C.shape[0])), list(range(C.shape[1]))
 
-    rows, cols = linear_sum_assignment(C)
-
-    matched: List[Tuple[int, int]] = []
-    used_tracks = set()
-    used_dets = set()
-
-    for r, c in zip(rows, cols):
-        if C[r, c] >= large_cost:
-            continue
-        matched.append((int(r), int(c)))
-        used_tracks.add(int(r))
-        used_dets.add(int(c))
-
-    n_tracks, n_dets = C.shape
-    unmatched_tracks = [i for i in range(n_tracks) if i not in used_tracks]
-    unmatched_dets = [j for j in range(n_dets) if j not in used_dets]
-
-    return matched, unmatched_tracks, unmatched_dets
-'''
 
 def linear_assignment_with_unmatched(
     C: np.ndarray,
     large_cost: float,
-    greedy_threshold: float = 1.8,
+    greedy_threshold: float = 2.8,
 ) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
     """
     Global greedy assignment:

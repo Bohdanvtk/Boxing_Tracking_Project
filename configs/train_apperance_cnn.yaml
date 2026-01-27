@@ -1,10 +1,18 @@
 seed: 42
 
 data:
-  train_root: "/home/bohdan/Документи/Samples/Images/boxing_tracker/fight_1/round_1_train/appearance_embedding"
-  val_root: "/home/bohdan/Документи/Samples/Images/boxing_tracker/fight_1/round_1_test/appearance_embedding"
-  image_size: [128, 128]
-  to_rgb: true   # true якщо твої кропи BGR з OpenCV
+  image_size: [ 128, 128 ]
+  to_rgb: true
+
+
+  train_roots:
+    - datasets/fight_1_1/train
+    - datasets/fight_1_2/train
+    - datasets/fight_2_1/train
+
+  val_roots:
+    - datasets/fight_val_1/train
+
 
 model:
   backbone: "mobilenetv3small"
