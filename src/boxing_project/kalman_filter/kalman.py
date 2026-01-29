@@ -172,6 +172,11 @@ class KalmanTracker:
         d2 = float(r.T @ S_inv @ r)
         return d2
 
+    def reset(self, z, p0: float = 1000.0) -> None:
+        z = _ensure_measurement(z).reshape(-1)
+        self.kf.x = np.array([z[0], z[1], 0.0, 0.0], dtype=float).reshape(4, 1)
+        self.kf.P = np.eye(4, dtype=float) * float(p0)
+
     def get_state(self) -> np.ndarray:
         """Поточний стан як (4,) [x, y, vx, vy]."""
         return self.kf.x.reshape(-1).copy()

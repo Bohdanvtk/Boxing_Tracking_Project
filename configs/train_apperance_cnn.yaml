@@ -1,30 +1,28 @@
-seed: 42
+seed: 42                      # Random seed for reproducibility
 
 data:
-  image_size: [ 128, 128 ]
-  to_rgb: true
+  image_size: [128, 128]      # Input image size for the network
+  to_rgb: true                # Convert input images to RGB
 
-
-  train_roots:
+  train_roots:                # Training dataset directories
     - datasets/fight_1_1/train
     - datasets/fight_1_2/train
     - datasets/fight_2_1/train
 
-  val_roots:
+  val_roots:                  # Validation dataset directories
     - datasets/fight_val_1/train
 
-
 model:
-  backbone: "mobilenetv3small"
-  embedding_dim: 128
-  dropout: 0.1
-  l2_reg: 0.0
-  train_backbone: true
+  backbone: "mobilenetv3small" # Feature extractor backbone
+  embedding_dim: 128           # Size of appearance embedding vector
+  dropout: 0.1                 # Dropout rate in embedding head
+  l2_reg: 0.0                  # L2 weight regularization
+  train_backbone: true         # Whether to fine-tune the backbone
 
 training:
-  batch_size: 64
-  learning_rate: 0.0003
-  epochs: 20
-  margin: 1.0
-  save_dir: "artifacts/models/apperance_cnn"
-  save_name: "apperance_encoder.keras"
+  batch_size: 64               # Training batch size
+  learning_rate: 0.0003        # Learning rate
+  epochs: 20                   # Number of training epochs
+  margin: 1.0                  # Margin for metric learning loss
+  save_dir: "artifacts/models/apperance_cnn" # Output directory for trained model
+  save_name: "apperance_encoder.keras"       # Saved model filename

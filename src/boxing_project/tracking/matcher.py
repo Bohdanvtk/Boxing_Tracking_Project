@@ -22,7 +22,8 @@ class MatchConfig:
     pose_scale_eps: float
     keypoint_weights: Optional[np.ndarray]
     min_kp_conf: float
-
+    greedy_threshold: float
+    greedy_reset_threshold: float
     emb_ema_alpha: float = 0.9
 
     w_motion: float = float
@@ -44,7 +45,7 @@ def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
     na = float(np.linalg.norm(a))
     nb = float(np.linalg.norm(b))
     if na < 1e-8 or nb < 1e-8:
-        return 1.0
+        return 0.0
     return float(np.dot(a, b) / (na * nb))
 
 
@@ -172,6 +173,7 @@ def _motion_cost_with_gating(track: Track, det: Detection, cfg: MatchConfig, gat
 def build_cost_matrix(
     tracks: List[Track],
     detections: List[Detection],
+    reset_mode: bool,
     cfg: MatchConfig,
     show: bool = True,
     sink: Optional[Callable[[str], None]] = None,
@@ -195,30 +197,44 @@ def build_cost_matrix(
 
     log.create_matrix(n_t, n_d)
 
-    gating = True
-
-    if g < 0.79:
-        g = g ** 3 # <= головне: low g => bigger motion cost
-        gating = False
+    if reset_mode:
+        track_pose = [(None, None) for _ in tracks]
+        det_pose = [(None, None) for _ in detections]
 
 
-    track_pose = [
-        _prepare_pose_for_distance(trk.last_keypoints, trk.last_kp_conf, cfg)
-        for trk in tracks
-    ]
-    det_pose = [
-        _prepare_pose_for_distance(det.keypoints, det.kp_conf, cfg)
-        for det in detections
-    ]
+    else:
+        track_pose = [
+            _prepare_pose_for_distance(trk.last_keypoints, trk.last_kp_conf, cfg)
+            for trk in tracks
+        ]
+        det_pose = [
+            _prepare_pose_for_distance(det.keypoints, det.kp_conf, cfg)
+            for det in detections
+        ]
+
 
     for i, trk in enumerate(tracks):
         for j, det in enumerate(detections):
             cell = log[i, j]
 
-            d_motion, allowed, d2 = _motion_cost_with_gating(trk, det, cfg, gating)
+            if reset_mode:
+                # ignore Kalman gating & motion
+                d2 = 0.0
+                allowed = True
+                d_motion_norm = 0.0
 
+                # ignore pose entirely (neutral)
+                d_pose_norm = 0.0
 
-            d_motion_norm = float(np.clip(d2 / max(cfg.chi2_gating, 1e-12), 0.0, 1.0))
+            else:
+                d_motion, allowed, d2 = _motion_cost_with_gating(trk, det, cfg, gating=True)
+                d_motion_norm = float(np.clip(d2 / max(cfg.chi2_gating, 1e-12), 0.0, 1.0))
+
+                trk_kps, trk_conf = track_pose[i]
+                det_kps, det_conf = det_pose[j]
+                d_pose = _pose_distance(trk_kps, trk_conf, det_kps, det_conf, cfg)
+                d_pose_norm = (1.0 - d_pose) / 2.0
+
             cell.d_motion = float(d_motion_norm)
             cell.allowed = bool(allowed)
             cell.d2 = float(d2)
@@ -228,29 +244,26 @@ def build_cost_matrix(
                 cell.cost = float(cfg.large_cost)
                 continue
 
-            trk_kps, trk_conf = track_pose[i]
-            det_kps, det_conf = det_pose[j]
-            d_pose = _pose_distance(trk_kps, trk_conf, det_kps, det_conf, cfg)
-
-            # appearance (embedding або 0)
+            # appearance (works always)
             if trk.app_emb_ema is not None and isinstance(det.meta, dict) and ("e_app" in det.meta):
                 d_app = cosine_distance(trk.app_emb_ema, det.meta["e_app"])
             else:
                 d_app = 0.0
 
             d_app_norm = (1.0 - d_app) / 2.0
-            d_pose_norm = (1.0 - d_pose) / 2.0
 
-            cost = (
-                cfg.w_motion * (g * d_motion_norm)
-                + cfg.w_pose * d_pose_norm
-                + cfg.w_app * d_app_norm
-            )
+            if reset_mode:
+                cost = cfg.w_app * d_app_norm
+            else:
+                cost = (
+                        cfg.w_motion * (g * d_motion_norm)
+                        + cfg.w_pose * d_pose_norm
+                        + cfg.w_app * d_app_norm
+                )
 
-            cell.d_pose = float(d_pose_norm)
+            cell.d_pose = float(d_pose_norm)  # або d_pose, як тобі зручніше логувати
             cell.d_app = float(d_app_norm)
             cell.cost = float(cost)
-
             C[i, j] = float(cost)
 
     if show or cfg.save_log:
@@ -263,7 +276,9 @@ def build_cost_matrix(
 def linear_assignment_with_unmatched(
     C: np.ndarray,
     large_cost: float,
+    reset_mode: bool,
     greedy_threshold: float = 2.8,
+    greedy_reset_threshold: float = 1.0,
 ) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
     """
     Global greedy assignment:
@@ -275,6 +290,9 @@ def linear_assignment_with_unmatched(
 
     This implements "smaller cost = higher priority" directly.
     """
+
+    thr = greedy_reset_threshold if reset_mode else greedy_threshold
+
 
     if C.size == 0:
         # Note: for empty cost matrix, shapes still matter
@@ -291,7 +309,7 @@ def linear_assignment_with_unmatched(
             if cost >= large_cost:
                 continue
             # Hard accept/reject threshold
-            if cost > greedy_threshold:
+            if cost > thr:
                 continue
             edges.append((cost, r, c))
 
@@ -326,14 +344,18 @@ def _load_match_config_from_yaml(config_path: Optional[Union[str, Path]] = None)
 def match_tracks_and_detections(
     tracks,
     detections,
+    reset_mode: bool,
     cfg=None,
     debug: bool = True,
     sink=None,
     config_path=None,
     g: float = 1.0,
+
 ):
     if cfg is None:
         cfg = _load_match_config_from_yaml(config_path)
+
+
 
     C, log = build_cost_matrix(
         tracks=tracks,
@@ -342,6 +364,12 @@ def match_tracks_and_detections(
         show=debug,
         sink=sink,
         g=g,
+        reset_mode=reset_mode
     )
-    matches, um_tr, um_dt = linear_assignment_with_unmatched(C, cfg.large_cost)
+
+    greedy_threshold = cfg.greedy_threshold
+    greedy_reset_threshold = cfg.greedy_reset_threshold
+
+    matches, um_tr, um_dt = linear_assignment_with_unmatched(C, large_cost=cfg.large_cost,
+        greedy_threshold=greedy_threshold,greedy_reset_threshold=greedy_reset_threshold, reset_mode=reset_mode)
     return matches, um_tr, um_dt, C, log

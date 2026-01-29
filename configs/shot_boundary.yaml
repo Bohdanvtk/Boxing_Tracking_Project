@@ -1,6 +1,8 @@
 shot_boundary:
-  resize: [160, 90]
-  grid: [4, 4]
-  ema_alpha: 0.2
-  cut_threshold: 0.45
-  min_frames_between_cuts: 8
+  resize: [160, 90]           # Frame resize before SSIM computation.
+                              # Smaller → faster, less detailed
+  grid: [4, 4]                # Block grid (rows, cols) for blockwise SSIM.
+                              # More blocks → more sensitive to local changes
+  ema_alpha: 0.8              # EMA smoothing factor for g:
+                              # g = (1-a)*prev + a*current
+                              # Higher → faster reaction and faster recovery

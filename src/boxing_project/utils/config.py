@@ -29,6 +29,8 @@ def make_match_config(cfg: dict) -> MatchConfig:
     chi2_gating = float(_get(cfg, "tracking.matching.chi2_gating", 9.21))
     large_cost = float(_get(cfg, "tracking.matching.large_cost", 1e6))
     min_kp_conf = float(_get(cfg, "tracking.matching.min_kp_conf", 0.05))
+    greedy_threshold = float(_get(cfg, "tracking.matching.greedy_threshold", 2.8))
+    greedy_reset_threshold = float(_get(cfg, "tracking.matching.greedy_reset_threshold", 1))
     keypoint_weights = _get(cfg, "tracking.matching.keypoint_weights", None)
     w_motion = _get(cfg, "tracking.matching.w_motion", 3)
     w_pose = _get(cfg, "tracking.matching.w_pose", 5)
@@ -50,11 +52,14 @@ def make_match_config(cfg: dict) -> MatchConfig:
         min_kp_conf=min_kp_conf,
         keypoint_weights=keypoint_weights,
         w_motion=w_motion,
+        greedy_threshold=greedy_threshold,
+        greedy_reset_threshold=greedy_reset_threshold,
         w_pose=w_pose,
         w_app=w_app,
         pose_scale_eps=pose_scale_eps,
         save_log=save_log,
         pose_core=pose_core
+
     )
 
 def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
@@ -75,6 +80,7 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
     max_age = int(_get(cfg, "tracking.tracker.max_age", 10))
     min_hits = int(_get(cfg, "tracking.tracker.min_hits", 3))
     min_kp_conf = float(_get(cfg, "tracking.tracker.min_kp_conf", 0.05))
+    reset_g_threshold = float(_get(cfg, "tracking.tracker.reset_g_threshold", 0.7))
 
 
     return TrackerConfig(
@@ -86,6 +92,7 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
         min_hits=min_hits,
         match=match_cfg,
         min_kp_conf=min_kp_conf,
+        reset_g_threshold=reset_g_threshold,
         debug=debug,
         save_log=save_log
 

@@ -24,6 +24,7 @@ class TrackerConfig:
     min_hits: int
     match: MatchConfig
     min_kp_conf: float
+    reset_g_threshold: float
     debug: bool
     save_log: bool
 
@@ -157,7 +158,7 @@ class MultiObjectTracker:
         self.tracks = [t for t in self.tracks if not t.is_dead(self.cfg.max_age)]
 
 
-    def update(self, detections: List[Detection], g: float = 1.0) -> Dict[str, Any]:
+    def update(self, detections: List[Detection], reset_mode: bool, g: float = 1.0) -> Dict[str, Any]:
         # 1) predict
         for trk in self.tracks:
             trk.predict()
@@ -173,6 +174,7 @@ class MultiObjectTracker:
             cfg=self.cfg.match,
             debug=self.debug,
             g=g,
+            reset_mode=reset_mode,
         )
 
 
@@ -181,12 +183,24 @@ class MultiObjectTracker:
         for i_track, j_det in matches_idx:
             trk = self.tracks[i_track]
             det = detections[j_det]
+
+            if reset_mode:
+                # 1) HARD reset Kalman: починаємо motion "з нуля" від поточної det.center
+                trk.kf.reset(np.asarray(det.center, dtype=float), p0=float(self.cfg.p0))
+
+                trk.last_keypoints = None
+                trk.last_kp_conf = None
+
+
             trk.update(det, ema_alpha=self.cfg.match.emb_ema_alpha)
+
             id_pairs.append((trk.track_id, j_det))
 
         # 4) spawn new tracks
         for j in um_det_idx:
-            self.tracks.append(self._new_track(detections[j]))
+
+            if not reset_mode:
+                self.tracks.append(self._new_track(detections[j]))
 
         # 5) remove dead
         self._remove_dead()

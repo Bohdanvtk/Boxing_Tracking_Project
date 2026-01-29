@@ -1,23 +1,46 @@
 tracking:
-  debug: true                       #  false=off, true=on
-  save_log: true                      #  false=don't save, true=save |won't work if debug isn't true
-  fps: 30                         # frames per seconds
+  debug: true                 # Enable console debug output (cost matrix, per-pair breakdown)
+  save_log: true              # Save debug logs to disk (only works if debug=true)
+  fps: 30                     # Video FPS (used for time-related interpretations)
+
   kalman:
-    process_var: 3.2e6               # σ_a^2 — dispersion of accelerating
-    measure_var: 1.5e4               # noise of detection
-    p0: 1000.0                      # start covariation
+    process_var: 3.2e6        # Process noise variance (acceleration noise).
+                              # Higher → Kalman trusts predictions less, adapts faster
+    measure_var: 1.5e4        # Measurement noise variance (detection noise).
+                              # Higher → Kalman trusts detections less
+    p0: 1000.0                # Initial covariance for new tracks or Kalman reset.
+                              # Higher → more uncertainty, easier re-alignment
+
   matching:
-    alpha: 0.8                      # ration coordinates to pose
-    chi2_gating: 9.21             # χ²(2, 0.99)
-    pose_scale_eps: 1.0e-6          # min value to avoid dividing by zero
-    large_cost: 880.0               # threshold to  C[i,j]
-    min_kp_conf: 0.05               # min conf to joint
-    w_motion: 3.0
-    w_pose: 5
-    w_app: 10.0
-    pose_core: [1, 2, 3, 5, 6, 8, 9, 10, 12, 13]
+    alpha: 0.8                # (Legacy/optional) blending factor if pose/motion are mixed elsewhere
+    chi2_gating: 9.21         # Chi-square gating threshold for Kalman distance.
+                              # Lower → stricter gating, fewer candidates
+    pose_scale_eps: 1.0e-6    # Small epsilon to avoid division by zero in pose normalization
+    greedy_threshold: 2.8     # Cost threshold for accepting matches in normal mode
+    greedy_reset_threshold: 1.0
+                              # Stricter threshold used in reset_mode (appearance-only matching)
+    large_cost: 880.0         # Sentinel value for invalid / gated-out matches
+    min_kp_conf: 0.05         # Minimum confidence for a keypoint to be considered valid
+
+    w_motion: 3.0             # Weight of motion (Kalman distance) in total cost
+    w_pose: 5                 # Weight of pose similarity in total cost
+    w_app: 10.0               # Weight of appearance similarity (highest → most important)
+
+    pose_core:                # BODY_25 keypoint indices used for pose comparison
+      - 1   # Neck
+      - 2   # Right Shoulder
+      - 3   # Right Elbow
+      - 5   # Left Shoulder
+      - 6   # Left Elbow
+      - 8   # MidHip
+      - 9   # Right Hip
+      - 10  # Right Knee
+      - 12  # Left Hip
+      - 13  # Left Knee
 
   tracker:
-    max_age: 50                     # how long we can use track without update
-    min_hits: 10                     # from what updating we can mark track as a reliable
-    min_kp_conf: 0.05               # min conf to joint while update
+    max_age: 50               # How many frames a track can survive without matching
+    min_hits: 10              # Number of successful matches required to confirm a track
+    min_kp_conf: 0.05         # Minimum keypoint confidence when updating track pose
+    reset_g_threshold: 0.5    # If g < this value → reset_mode is activated
+                              # (ignore motion & pose, match only by appearance)

@@ -78,6 +78,7 @@ class Track:
     age: int = 0
     hits: int = 0
     time_since_update: int = 0
+    reset_g_threshold: float = 0.70
     confirmed: bool = False
 
     last_keypoints: Optional[np.ndarray] = None

@@ -180,7 +180,7 @@ def _save_matched_det(
     np.savez_compressed(str(track_dir / "kps.npz"), kps=kps4)
 
 
-def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, frame_idx: int
+def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, frame_idx: int, reset_mode: bool
                   , save_dir: Path | None, save_log: bool):
     """
     Convert OpenPose output to tracker input, compute embeddings, update tracker, draw results.
@@ -230,7 +230,7 @@ def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, 
                 det.meta["e_app_error"] = str(e)
 
     # 6) update tracker using detections (now they contain embeddings)
-    log = tracker.update(detections, g=g)
+    log = tracker.update(detections, g=g, reset_mode=reset_mode)
 
     # dump matched detections (crop + kps) for this frame
 
@@ -375,6 +375,8 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
         result, img = preprocess_image(opWrapper, path, save_width, return_img=True)
         g = float(sb.update(img))
 
+        reset_mode = (g < float(tracker.cfg.reset_g_threshold))
+
         frame, log = process_frame(
             result, tracker, img,
             tracker.cfg.min_kp_conf,
@@ -382,6 +384,7 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
             g=g, frame_idx=frame_idx,
             save_dir=save_dir,
             save_log=save_log,
+            reset_mode=reset_mode
         )
 
         if debug:
