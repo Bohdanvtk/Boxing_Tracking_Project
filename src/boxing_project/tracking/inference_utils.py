@@ -332,8 +332,17 @@ def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, 
 
     return frame, log
 
-def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, save_width, merge_n,
-                    save_dir: Path | None):
+def visualize_sequence(
+    opWrapper,
+    tracker,
+    app_emb_path,
+    sb_cfg: dict,
+    images,
+    save_width,
+    merge_n,
+    save_dir: Path | None,
+    show_pose_extended: bool = False,
+):
 
 
     debug = tracker.cfg.debug
@@ -388,7 +397,7 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
         )
 
         if debug:
-            print_tracking_results(log, frame_idx)
+            print_tracking_results(log, frame_idx, show_pose_extended=show_pose_extended)
 
 
         if show_merge:

@@ -49,6 +49,7 @@ class DebugLog:
 
     buffer: List[str] = field(default_factory=list)
     meta: Dict[str, Any] = field(default_factory=dict)
+    pairs: List[Dict[str, Any]] = field(default_factory=list)
 
     n_rows: int = 0
     n_cols: int = 0
@@ -72,6 +73,7 @@ class DebugLog:
         self.n_rows = int(n_rows)
         self.n_cols = int(n_cols)
         self.matrix = [[MatrixCell() for _ in range(self.n_cols)] for _ in range(self.n_rows)]
+        self.pairs = []
 
     def reset_matrix(self) -> None:
         self.n_rows = 0
@@ -266,6 +268,50 @@ class DebugLog:
             self.line(f"Track#{i:02d} " + " ".join(row_vals))
 
         # -----------------------------------------
+        # 4) Presence/centers diagnostics (if any)
+        # -----------------------------------------
+        if self.pairs:
+            self.section("=" * 80)
+            self.line("PAIR DIAGNOSTICS (pose presence / motion centers)")
+            self.line("=" * 80)
+            for pair in self.pairs:
+                track_id = pair.get("track_id", "N/A")
+                det_id = pair.get("det_id", "N/A")
+                self.line("")
+                self.line(f"Pair track_id={track_id} det_id={det_id}")
+
+                pose_presence = pair.get("pose_presence")
+                if isinstance(pose_presence, dict):
+                    self.line(
+                        "  Track presence: "
+                        f"K_track={pose_presence.get('K_track')} "
+                        f"present={pose_presence.get('present_count_track')} "
+                        f"idx={pose_presence.get('present_idx_track')}"
+                    )
+                    self.line(
+                        "  Det presence: "
+                        f"K_det={pose_presence.get('K_det')} "
+                        f"present={pose_presence.get('present_count_det')} "
+                        f"idx={pose_presence.get('present_idx_det')}"
+                    )
+                    core_info = pose_presence.get("core")
+                    if isinstance(core_info, dict):
+                        self.line(
+                            "  Core presence: "
+                            f"track={core_info.get('core_present_track')} "
+                            f"det={core_info.get('core_present_det')}"
+                        )
+
+                motion_centers = pair.get("motion_centers")
+                if isinstance(motion_centers, dict):
+                    self.line(
+                        "  Motion centers: "
+                        f"kalman_pred={motion_centers.get('kalman_pred_center')} "
+                        f"det={motion_centers.get('det_center')} "
+                        f"residual={motion_centers.get('residual')}"
+                    )
+
+        # -----------------------------------------
         # Persist into GENERAL_LOG for saving
         # -----------------------------------------
         frame_header(FRAME_IDX)
@@ -274,6 +320,9 @@ class DebugLog:
 
         self.reset_matrix()
 
+    def add_pair(self, pair_obj: Dict[str, Any]) -> None:
+        self.pairs.append(pair_obj)
+
 
 def print_pre_tracking_results(frame_idx: int) -> None:
     print("\n" + "=" * 80)
@@ -281,7 +330,7 @@ def print_pre_tracking_results(frame_idx: int) -> None:
     print("=" * 80 + "\n")
 
 
-def print_tracking_results(log: dict, iteration: int, show_pose_tables: bool = False) -> None:
+def print_tracking_results(log: dict, iteration: int, show_pose_extended: bool = False) -> None:
     print("\n" + "=" * 80)
     print(f"TRACKING RESULTS: frame={iteration}")
     print("=" * 80)
@@ -291,3 +340,44 @@ def print_tracking_results(log: dict, iteration: int, show_pose_tables: bool = F
         tid = t.get("track_id", "N/A") if isinstance(t, dict) else getattr(t, "track_id", "N/A")
         pos = t.get("pos", None) if isinstance(t, dict) else getattr(t, "pos", None)
         print(f"  - Track {tid} pos={pos}")
+
+    if show_pose_extended:
+        frame_log = log.get("frame_log", None)
+        pairs = getattr(frame_log, "pairs", []) if frame_log is not None else []
+        if pairs:
+            print("\n[pair-debug] Pose presence / motion centers:")
+        for pair in pairs:
+            track_id = pair.get("track_id", "N/A")
+            det_id = pair.get("det_id", "N/A")
+            print(f"\nPair track_id={track_id} det_id={det_id}")
+
+            pose_presence = pair.get("pose_presence")
+            if isinstance(pose_presence, dict):
+                print(
+                    "  Track presence: "
+                    f"K_track={pose_presence.get('K_track')} "
+                    f"present={pose_presence.get('present_count_track')} "
+                    f"idx={pose_presence.get('present_idx_track')}"
+                )
+                print(
+                    "  Det presence: "
+                    f"K_det={pose_presence.get('K_det')} "
+                    f"present={pose_presence.get('present_count_det')} "
+                    f"idx={pose_presence.get('present_idx_det')}"
+                )
+                core_info = pose_presence.get("core")
+                if isinstance(core_info, dict):
+                    print(
+                        "  Core presence: "
+                        f"track={core_info.get('core_present_track')} "
+                        f"det={core_info.get('core_present_det')}"
+                    )
+
+            motion_centers = pair.get("motion_centers")
+            if isinstance(motion_centers, dict):
+                print(
+                    "  Motion centers: "
+                    f"kalman_pred={motion_centers.get('kalman_pred_center')} "
+                    f"det={motion_centers.get('det_center')} "
+                    f"residual={motion_centers.get('residual')}"
+                )

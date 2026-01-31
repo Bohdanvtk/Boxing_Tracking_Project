@@ -64,6 +64,13 @@ class InferRunner:
 
         tracker = MultiObjectTracker(config_path=str(tracking_cfg_path))
 
+        match_cfg = cfg.get("match", {}) if isinstance(cfg.get("match", {}), dict) else {}
+        if match_cfg:
+            if "debug_pose_presence" in match_cfg:
+                tracker.cfg.match.debug_pose_presence = bool(match_cfg.get("debug_pose_presence"))
+            if "debug_motion_centers" in match_cfg:
+                tracker.cfg.match.debug_motion_centers = bool(match_cfg.get("debug_motion_centers"))
+
         # ---------- Data / Images ----------
         data_cfg = cfg.get("data", {})
         images = load_inference_images(data_cfg, pr)
@@ -107,4 +114,8 @@ class InferRunner:
             save_width=save_width,
             merge_n=merge_n,
             save_dir=save_dir,
+            show_pose_extended=bool(
+                match_cfg.get("debug_pose_presence", False)
+                or match_cfg.get("debug_motion_centers", False)
+            ),
         )
