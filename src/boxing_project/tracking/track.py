@@ -103,7 +103,7 @@ class Track:
         self.time_since_update += 1
         return self.kf.predict()
 
-    def update(self, det: Detection, ema_alpha: float = 0.9):
+    def update(self, det: Detection, ema_alpha: float = 0.9, update_app: bool = True):
         """
         Оновлює трек за matched детекцією.
 
@@ -115,6 +115,7 @@ class Track:
         Args:
             det: Detection, який Hungarian приписав цьому треку.
             ema_alpha: коеф. EMA (чим ближче до 1, тим повільніше змінюється памʼять треку).
+            update_app: чи оновлювати EMA appearance embedding для цієї детекції.
         """
         state, cov = self.kf.update(np.asarray(det.center, dtype=float))
         self.time_since_update = 0
@@ -126,13 +127,14 @@ class Track:
         self.last_keypoints = None if det.keypoints is None else np.asarray(det.keypoints, dtype=float)
         self.last_kp_conf = None if det.kp_conf is None else np.asarray(det.kp_conf, dtype=float)
 
-        e_app = det.meta.get("e_app", None)
-        if e_app is not None:
-            e_app = np.asarray(e_app, dtype=np.float32)
-            if self.app_emb_ema is None:
-                self.app_emb_ema = e_app
-            else:
-                self.app_emb_ema = ema_alpha * self.app_emb_ema + (1.0 - ema_alpha) * e_app
+        if update_app:
+            e_app = det.meta.get("e_app", None)
+            if e_app is not None:
+                e_app = np.asarray(e_app, dtype=np.float32)
+                if self.app_emb_ema is None:
+                    self.app_emb_ema = e_app
+                else:
+                    self.app_emb_ema = ema_alpha * self.app_emb_ema + (1.0 - ema_alpha) * e_app
 
         return state, cov
 
