@@ -2,6 +2,7 @@ from gc import callbacks
 from pathlib import Path
 import yaml
 import tensorflow as tf
+from datetime import datetime
 
 from src.boxing_project.utils.config import set_seed
 from src.boxing_project.apperance_embedding.dataset import FolderPairsConfig, CropPairsFolder
@@ -121,9 +122,23 @@ def main():
     )
 
     # ---------- SAVE ----------
+
+
     save_dir = project_root / Path(train_cfg.get("save_dir", "artifacts/models/apperance_cnn"))
     save_dir.mkdir(parents=True, exist_ok=True)
-    save_path = save_dir / train_cfg.get("save_name", "apperance_encoder.keras")
+
+    # дата: місяць-день
+    date_tag = datetime.now().strftime("%m_%d")
+
+    # backbone
+    bb = cnn_cfg.backbone.lower()
+
+    # base name (без розширення)
+    base_name = train_cfg.get("save_name", "apperance_encoder")
+    base_name = Path(base_name).stem  # відрізаємо будь-яке розширення
+
+    final_name = f"{base_name}_{date_tag}_{bb}.keras"
+    save_path = save_dir / final_name
 
     encoder.save(save_path)
     print(f"\nSaved appearance encoder to: {save_path}")

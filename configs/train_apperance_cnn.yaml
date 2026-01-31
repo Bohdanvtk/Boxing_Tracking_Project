@@ -5,15 +5,14 @@ data:
   to_rgb: true                # Convert input images to RGB
 
   train_roots:                # Training dataset directories
-    - datasets/fight_1_1/train
-    - datasets/fight_1_2/train
-    - datasets/fight_2_1/train
+    - /home/bohdan/Документи/Samples/Images/boxing_tracker/fight_1_1/round_1_train/appearance_embedding
+    - /home/bohdan/Документи/Samples/Images/boxing_tracker/fight_1_2/round_merged_train_only/train/
 
   val_roots:                  # Validation dataset directories
-    - datasets/fight_val_1/train
+    - /home/bohdan/Документи/Samples/Images/boxing_tracker/fight_1_1/round_1_test/appearance_embedding
 
 model:
-  backbone: "mobilenetv3small" # Feature extractor backbone
+  backbone: "mobilenetv3large" # Feature extractor backbone
   embedding_dim: 128           # Size of appearance embedding vector
   dropout: 0.1                 # Dropout rate in embedding head
   l2_reg: 0.0                  # L2 weight regularization
@@ -25,4 +24,4 @@ training:
   epochs: 20                   # Number of training epochs
   margin: 1.0                  # Margin for metric learning loss
   save_dir: "artifacts/models/apperance_cnn" # Output directory for trained model
-  save_name: "apperance_encoder.keras"       # Saved model filename
+  save_name: "apperance_encoder"       # Saved model filename
