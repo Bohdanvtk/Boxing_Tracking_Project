@@ -151,11 +151,30 @@ class MultiObjectTracker:
         )
         trk = Track(track_id=self._next_id, kf=kf, min_hits=self.cfg.min_hits)
         self._next_id += 1
-        trk.update(det, ema_alpha=self.cfg.match.emb_ema_alpha)
+        trk.update(
+            det,
+            ema_alpha=self.cfg.match.emb_ema_alpha,
+            update_app=self._has_base_keypoints(det),
+        )
         return trk
 
     def _remove_dead(self):
         self.tracks = [t for t in self.tracks if not t.is_dead(self.cfg.max_age)]
+
+    def _has_base_keypoints(self, det: Detection) -> bool:
+        core = np.asarray(self.cfg.match.pose_core, dtype=int).reshape(-1) if self.cfg.match.pose_core is not None else None
+        if core is None or core.size == 0:
+            return True
+        if det.keypoints is None:
+            return False
+        kps = np.asarray(det.keypoints, dtype=float)
+        if kps.ndim != 2 or kps.shape[1] < 2:
+            return False
+        n_k = kps.shape[0]
+        core = core[(core >= 0) & (core < n_k)]
+        if core.size == 0:
+            return False
+        return bool(np.isfinite(kps[core, :2]).all(axis=1).all())
 
 
     def update(self, detections: List[Detection], reset_mode: bool, g: float = 1.0) -> Dict[str, Any]:
@@ -191,8 +210,11 @@ class MultiObjectTracker:
                 trk.last_keypoints = None
                 trk.last_kp_conf = None
 
-
-            trk.update(det, ema_alpha=self.cfg.match.emb_ema_alpha)
+            trk.update(
+                det,
+                ema_alpha=self.cfg.match.emb_ema_alpha,
+                update_app=self._has_base_keypoints(det),
+            )
 
             id_pairs.append((trk.track_id, j_det))
 
