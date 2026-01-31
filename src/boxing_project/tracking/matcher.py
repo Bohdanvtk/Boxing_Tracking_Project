@@ -31,8 +31,8 @@ class MatchConfig:
     w_app: float = float
     pose_core: Optional[List[int]] = None
 
-    debug_pose_extended: bool = False
-    debug_pose_print_table: bool = False
+    debug_pose_presence: bool = False
+    debug_motion_centers: bool = False
 
     save_log: bool = bool
 
@@ -58,9 +58,7 @@ def _pose_distance(
     det_keypoints: Optional[np.ndarray],
     det_kp_conf: Optional[np.ndarray],
     cfg: MatchConfig,
-    log: Optional[DebugLog] = None,
-    pair_tag: str = "",
-) -> Tuple[float, Optional[Dict[str, Any]]]:
+) -> float:
     """
     Pose similarity (cosine) computed only on cfg.pose_core joints.
 
@@ -69,15 +67,15 @@ def _pose_distance(
     """
 
     if track_keypoints is None or det_keypoints is None:
-        return 0.0, None
+        return 0.0
 
     kpt_t = np.asarray(track_keypoints, dtype=float)
     kpt_d = np.asarray(det_keypoints, dtype=float)
 
     if kpt_t.ndim != 2 or kpt_d.ndim != 2 or kpt_t.shape[1] < 2 or kpt_d.shape[1] < 2:
-        return 0.0, None
+        return 0.0
     if kpt_t.shape[0] != kpt_d.shape[0]:
-        return 0.0, None
+        return 0.0
 
     n_k = kpt_t.shape[0]
 
@@ -90,78 +88,7 @@ def _pose_distance(
         if det_kp_conf is not None else np.ones((n_k,), dtype=float)
     )
     if conf_t.shape[0] != n_k or conf_d.shape[0] != n_k:
-        return 0.0, None
-
-    trk_present = np.isfinite(kpt_t[:, :2]).all(axis=1) & (conf_t >= cfg.min_kp_conf)
-    det_present = np.isfinite(kpt_d[:, :2]).all(axis=1) & (conf_d >= cfg.min_kp_conf)
-    used_mask = trk_present & det_present
-
-    dx = np.full((n_k,), np.nan, dtype=float)
-    dy = np.full((n_k,), np.nan, dtype=float)
-    norm = np.full((n_k,), np.nan, dtype=float)
-    valid_idx = np.where(used_mask)[0]
-    if valid_idx.size > 0:
-        delta = kpt_d[valid_idx, :2] - kpt_t[valid_idx, :2]
-        dx[valid_idx] = delta[:, 0]
-        dy[valid_idx] = delta[:, 1]
-        norm[valid_idx] = np.linalg.norm(delta, axis=1)
-
-    used_idx = valid_idx.tolist()
-    used_count = int(len(used_idx))
-    d_pose_mean = float(np.nanmean(norm[used_mask])) if used_count > 0 else 0.0
-
-    pose_dict: Optional[Dict[str, Any]] = None
-    if cfg.debug_pose_extended:
-        pose_dict = {
-            "trk_xy": kpt_t[:, :2].tolist(),
-            "det_xy": kpt_d[:, :2].tolist(),
-            "trk_conf": conf_t.tolist(),
-            "det_conf": conf_d.tolist(),
-            "trk_present": trk_present.tolist(),
-            "det_present": det_present.tolist(),
-            "used_mask": used_mask.tolist(),
-            "dx": dx.tolist(),
-            "dy": dy.tolist(),
-            "norm": norm.tolist(),
-            "used_idx": used_idx,
-            "used_count": used_count,
-            "D_pose": d_pose_mean,
-        }
-
-        core = np.asarray(cfg.pose_core, dtype=int).reshape(-1) if cfg.pose_core is not None else None
-        if core is not None and core.size > 0:
-            core = core[(core >= 0) & (core < n_k)]
-            if core.size > 0:
-                core_present = trk_present[core] & det_present[core]
-                core_present_idx = core[core_present].tolist()
-                core_present_count = int(len(core_present_idx))
-                core_total = int(core.size)
-                core_ratio = core_present_count / core_total if core_total > 0 else None
-                pose_dict.update(
-                    {
-                        "core_present_idx": core_present_idx,
-                        "core_present_count": core_present_count,
-                        "core_total": core_total,
-                        "core_ratio": core_ratio,
-                    }
-                )
-
-        if cfg.debug_pose_print_table and log is not None and log.enabled_print:
-            header = f"[pose-debug] {pair_tag}" if pair_tag else "[pose-debug]"
-            log.sink(header)
-            log.sink(
-                "k | trk_x trk_y | det_x det_y | conf_t conf_d | trk_ok det_ok used | dx dy | ||d||"
-            )
-            for k in range(n_k):
-                log.sink(
-                    f"{k:02d} | "
-                    f"{kpt_t[k, 0]:.4f} {kpt_t[k, 1]:.4f} | "
-                    f"{kpt_d[k, 0]:.4f} {kpt_d[k, 1]:.4f} | "
-                    f"{conf_t[k]:.3f} {conf_d[k]:.3f} | "
-                    f"{int(trk_present[k])} {int(det_present[k])} {int(used_mask[k])} | "
-                    f"{dx[k]:.4f} {dy[k]:.4f} | "
-                    f"{norm[k]:.4f}"
-                )
+        return 0.0
 
     pose_similarity = 0.0
     core = np.asarray(cfg.pose_core, dtype=int).reshape(-1) if cfg.pose_core is not None else None
@@ -184,7 +111,87 @@ def _pose_distance(
                         vd = vd * wg_xy
                 pose_similarity = float(cosine_distance(vt, vd))
 
-    return pose_similarity, pose_dict
+    return pose_similarity
+
+
+def _pose_presence_summary(
+    track_keypoints: Optional[np.ndarray],
+    track_kp_conf: Optional[np.ndarray],
+    det_keypoints: Optional[np.ndarray],
+    det_kp_conf: Optional[np.ndarray],
+    cfg: MatchConfig,
+) -> Dict[str, Any]:
+    k_track = int(track_keypoints.shape[0]) if track_keypoints is not None else 0
+    k_det = int(det_keypoints.shape[0]) if det_keypoints is not None else 0
+
+    if track_keypoints is not None and k_track > 0:
+        kpt_t = np.asarray(track_keypoints, dtype=float)
+        finite_track = np.isfinite(kpt_t[:, :2]).all(axis=1)
+    else:
+        kpt_t = None
+        finite_track = np.zeros((k_track,), dtype=bool)
+
+    if det_keypoints is not None and k_det > 0:
+        kpt_d = np.asarray(det_keypoints, dtype=float)
+        finite_det = np.isfinite(kpt_d[:, :2]).all(axis=1)
+    else:
+        kpt_d = None
+        finite_det = np.zeros((k_det,), dtype=bool)
+
+    if track_kp_conf is not None and k_track > 0:
+        conf_t = np.asarray(track_kp_conf, dtype=float).reshape(-1)
+        conf_t = conf_t if conf_t.shape[0] == k_track else None
+    else:
+        conf_t = None
+
+    if det_kp_conf is not None and k_det > 0:
+        conf_d = np.asarray(det_kp_conf, dtype=float).reshape(-1)
+        conf_d = conf_d if conf_d.shape[0] == k_det else None
+    else:
+        conf_d = None
+
+    has_conf_track = conf_t is not None
+    has_conf_det = conf_d is not None
+
+    conf_mask_track = (conf_t >= cfg.min_kp_conf) if has_conf_track else np.ones((k_track,), dtype=bool)
+    conf_mask_det = (conf_d >= cfg.min_kp_conf) if has_conf_det else np.ones((k_det,), dtype=bool)
+
+    present_track = finite_track & conf_mask_track if k_track > 0 else np.zeros((0,), dtype=bool)
+    present_det = finite_det & conf_mask_det if k_det > 0 else np.zeros((0,), dtype=bool)
+
+    present_idx_track = np.where(present_track)[0].tolist()
+    present_idx_det = np.where(present_det)[0].tolist()
+
+    presence: Dict[str, Any] = {
+        "K_track": k_track,
+        "K_det": k_det,
+        "present_count_track": int(len(present_idx_track)),
+        "present_count_det": int(len(present_idx_det)),
+        "present_idx_track": present_idx_track,
+        "present_idx_det": present_idx_det,
+        "min_kp_conf": float(cfg.min_kp_conf),
+        "has_conf_track": bool(has_conf_track),
+        "has_conf_det": bool(has_conf_det),
+    }
+
+    core = np.asarray(cfg.pose_core, dtype=int).reshape(-1) if cfg.pose_core is not None else None
+    if core is not None and core.size > 0:
+        core_idx = core.tolist()
+        core_present_track = [
+            int(k) for k in core_idx if k < k_track and k >= 0 and present_track[k]
+        ]
+        core_present_det = [
+            int(k) for k in core_idx if k < k_det and k >= 0 and present_det[k]
+        ]
+        presence["core"] = {
+            "core_idx": core_idx,
+            "core_present_track": core_present_track,
+            "core_present_det": core_present_det,
+            "core_present_count_track": int(len(core_present_track)),
+            "core_present_count_det": int(len(core_present_det)),
+        }
+
+    return presence
 
 
 def _prepare_pose_for_distance(
@@ -287,7 +294,6 @@ def build_cost_matrix(
 
                 # ignore pose entirely (neutral)
                 d_pose = 0.0
-                pose_dict = None
                 d_pose_norm = 0.0
 
             else:
@@ -296,15 +302,12 @@ def build_cost_matrix(
 
                 trk_kps, trk_conf = track_pose[i]
                 det_kps, det_conf = det_pose[j]
-                pair_tag = f"Track#{i} (track_id={trk.track_id}) vs Det#{j}"
-                d_pose, pose_dict = _pose_distance(
+                d_pose = _pose_distance(
                     trk_kps,
                     trk_conf,
                     det_kps,
                     det_conf,
                     cfg,
-                    log=log,
-                    pair_tag=pair_tag,
                 )
                 d_pose_norm = (1.0 - d_pose) / 2.0
 
@@ -312,14 +315,66 @@ def build_cost_matrix(
             cell.allowed = bool(allowed)
             cell.d2 = float(d2)
 
-            if cfg.debug_pose_extended:
-                pair_obj = {
+            if cfg.debug_pose_presence or cfg.debug_motion_centers:
+                pair_obj: Dict[str, Any] = {
                     "track_index": i,
                     "det_index": j,
                     "track_id": trk.track_id,
                     "det_id": j,
-                    "pose": pose_dict,
                 }
+
+                if cfg.debug_pose_presence:
+                    pose_presence = _pose_presence_summary(
+                        trk.last_keypoints,
+                        trk.last_kp_conf,
+                        det.keypoints,
+                        det.kp_conf,
+                        cfg,
+                    )
+                    pair_obj["pose_presence"] = pose_presence
+
+                    if log.enabled_print:
+                        log.sink(
+                            f"[pose-presence] Track#{i} (track_id={trk.track_id}) vs Det#{j}: "
+                            f"K_track={pose_presence['K_track']} "
+                            f"present={pose_presence['present_count_track']} "
+                            f"idx={pose_presence['present_idx_track']}"
+                        )
+                        log.sink(
+                            f"[pose-presence] Det#{j}: "
+                            f"K_det={pose_presence['K_det']} "
+                            f"present={pose_presence['present_count_det']} "
+                            f"idx={pose_presence['present_idx_det']}"
+                        )
+                        core_info = pose_presence.get("core")
+                        if isinstance(core_info, dict):
+                            log.sink(
+                                "[pose-presence] core_present_track="
+                                f"{core_info.get('core_present_track', [])} "
+                                "core_present_det="
+                                f"{core_info.get('core_present_det', [])}"
+                            )
+
+                if cfg.debug_motion_centers:
+                    trk_pred = trk.pos()
+                    det_center = det.center
+                    motion_centers = {
+                        "trk_pred_center": [float(trk_pred[0]), float(trk_pred[1])],
+                        "det_center": [float(det_center[0]), float(det_center[1])],
+                        "residual": [
+                            float(det_center[0] - trk_pred[0]),
+                            float(det_center[1] - trk_pred[1]),
+                        ],
+                    }
+                    pair_obj["motion_centers"] = motion_centers
+                    if log.enabled_print:
+                        log.sink(
+                            "[motion-centers] Track#{i} (track_id={trk.track_id}) vs Det#{j}: "
+                            f"pred={motion_centers['trk_pred_center']} "
+                            f"det={motion_centers['det_center']} "
+                            f"residual={motion_centers['residual']}"
+                        )
+
                 log.add_pair(pair_obj)
 
             if not allowed:

@@ -268,69 +268,48 @@ class DebugLog:
             self.line(f"Track#{i:02d} " + " ".join(row_vals))
 
         # -----------------------------------------
-        # 4) Extended pose diagnostics (if any)
+        # 4) Presence/centers diagnostics (if any)
         # -----------------------------------------
         if self.pairs:
             self.section("=" * 80)
-            self.line("POSE DEBUG (extended per-pair diagnostics)")
+            self.line("PAIR DIAGNOSTICS (pose presence / motion centers)")
             self.line("=" * 80)
             for pair in self.pairs:
-                pose = pair.get("pose")
-                if not isinstance(pose, dict):
-                    continue
                 track_id = pair.get("track_id", "N/A")
                 det_id = pair.get("det_id", "N/A")
                 self.line("")
                 self.line(f"Pair track_id={track_id} det_id={det_id}")
-                used_idx = pose.get("used_idx", [])
-                used_count = pose.get("used_count", 0)
-                d_pose = pose.get("D_pose", 0.0)
-                self.line(f"  used_idx: {used_idx}")
-                self.line(f"  used_count: {used_count}")
-                self.line(f"  D_pose: {d_pose}")
-                if "core_present_count" in pose and "core_total" in pose:
-                    core_present_count = pose.get("core_present_count", 0)
-                    core_total = pose.get("core_total", 0)
-                    core_ratio = pose.get("core_ratio", None)
-                    self.line(f"  core_present: {core_present_count}/{core_total} (ratio={core_ratio})")
 
-                trk_xy = pose.get("trk_xy", [])
-                det_xy = pose.get("det_xy", [])
-                trk_conf = pose.get("trk_conf", [])
-                det_conf = pose.get("det_conf", [])
-                trk_present = pose.get("trk_present", [])
-                det_present = pose.get("det_present", [])
-                used_mask = pose.get("used_mask", [])
-                dx = pose.get("dx", [])
-                dy = pose.get("dy", [])
-                norm = pose.get("norm", [])
-
-                if trk_xy and det_xy:
+                pose_presence = pair.get("pose_presence")
+                if isinstance(pose_presence, dict):
                     self.line(
-                        "k | trk_x trk_y | det_x det_y | conf_t conf_d | trk_ok det_ok used | dx dy | ||d||"
+                        "  Track presence: "
+                        f"K_track={pose_presence.get('K_track')} "
+                        f"present={pose_presence.get('present_count_track')} "
+                        f"idx={pose_presence.get('present_idx_track')}"
                     )
-                    n_k = min(
-                        len(trk_xy),
-                        len(det_xy),
-                        len(trk_conf),
-                        len(det_conf),
-                        len(trk_present),
-                        len(det_present),
-                        len(used_mask),
-                        len(dx),
-                        len(dy),
-                        len(norm),
+                    self.line(
+                        "  Det presence: "
+                        f"K_det={pose_presence.get('K_det')} "
+                        f"present={pose_presence.get('present_count_det')} "
+                        f"idx={pose_presence.get('present_idx_det')}"
                     )
-                    for k in range(n_k):
+                    core_info = pose_presence.get("core")
+                    if isinstance(core_info, dict):
                         self.line(
-                            f"{k:02d} | "
-                            f"{trk_xy[k][0]:.4f} {trk_xy[k][1]:.4f} | "
-                            f"{det_xy[k][0]:.4f} {det_xy[k][1]:.4f} | "
-                            f"{trk_conf[k]:.3f} {det_conf[k]:.3f} | "
-                            f"{int(trk_present[k])} {int(det_present[k])} {int(used_mask[k])} | "
-                            f"{dx[k]:.4f} {dy[k]:.4f} | "
-                            f"{norm[k]:.4f}"
+                            "  Core presence: "
+                            f"track={core_info.get('core_present_track')} "
+                            f"det={core_info.get('core_present_det')}"
                         )
+
+                motion_centers = pair.get("motion_centers")
+                if isinstance(motion_centers, dict):
+                    self.line(
+                        "  Motion centers: "
+                        f"pred={motion_centers.get('trk_pred_center')} "
+                        f"det={motion_centers.get('det_center')} "
+                        f"residual={motion_centers.get('residual')}"
+                    )
 
         # -----------------------------------------
         # Persist into GENERAL_LOG for saving
@@ -366,58 +345,39 @@ def print_tracking_results(log: dict, iteration: int, show_pose_extended: bool =
         frame_log = log.get("frame_log", None)
         pairs = getattr(frame_log, "pairs", []) if frame_log is not None else []
         if pairs:
-            print("\n[pose-debug] Extended pose diagnostics:")
+            print("\n[pair-debug] Pose presence / motion centers:")
         for pair in pairs:
-            pose = pair.get("pose")
-            if not isinstance(pose, dict):
-                continue
             track_id = pair.get("track_id", "N/A")
             det_id = pair.get("det_id", "N/A")
             print(f"\nPair track_id={track_id} det_id={det_id}")
-            used_idx = pose.get("used_idx", [])
-            used_count = pose.get("used_count", 0)
-            d_pose = pose.get("D_pose", 0.0)
-            print(f"  used_idx: {used_idx}")
-            print(f"  used_count: {used_count}")
-            print(f"  D_pose: {d_pose}")
-            if "core_present_count" in pose and "core_total" in pose:
-                core_present_count = pose.get("core_present_count", 0)
-                core_total = pose.get("core_total", 0)
-                core_ratio = pose.get("core_ratio", None)
-                print(f"  core_present: {core_present_count}/{core_total} (ratio={core_ratio})")
 
-            trk_xy = pose.get("trk_xy", [])
-            det_xy = pose.get("det_xy", [])
-            trk_conf = pose.get("trk_conf", [])
-            det_conf = pose.get("det_conf", [])
-            trk_present = pose.get("trk_present", [])
-            det_present = pose.get("det_present", [])
-            used_mask = pose.get("used_mask", [])
-            dx = pose.get("dx", [])
-            dy = pose.get("dy", [])
-            norm = pose.get("norm", [])
-
-            if trk_xy and det_xy:
-                print("k | trk_x trk_y | det_x det_y | conf_t conf_d | trk_ok det_ok used | dx dy | ||d||")
-                n_k = min(
-                    len(trk_xy),
-                    len(det_xy),
-                    len(trk_conf),
-                    len(det_conf),
-                    len(trk_present),
-                    len(det_present),
-                    len(used_mask),
-                    len(dx),
-                    len(dy),
-                    len(norm),
+            pose_presence = pair.get("pose_presence")
+            if isinstance(pose_presence, dict):
+                print(
+                    "  Track presence: "
+                    f"K_track={pose_presence.get('K_track')} "
+                    f"present={pose_presence.get('present_count_track')} "
+                    f"idx={pose_presence.get('present_idx_track')}"
                 )
-                for k in range(n_k):
+                print(
+                    "  Det presence: "
+                    f"K_det={pose_presence.get('K_det')} "
+                    f"present={pose_presence.get('present_count_det')} "
+                    f"idx={pose_presence.get('present_idx_det')}"
+                )
+                core_info = pose_presence.get("core")
+                if isinstance(core_info, dict):
                     print(
-                        f"{k:02d} | "
-                        f"{trk_xy[k][0]:.4f} {trk_xy[k][1]:.4f} | "
-                        f"{det_xy[k][0]:.4f} {det_xy[k][1]:.4f} | "
-                        f"{trk_conf[k]:.3f} {det_conf[k]:.3f} | "
-                        f"{int(trk_present[k])} {int(det_present[k])} {int(used_mask[k])} | "
-                        f"{dx[k]:.4f} {dy[k]:.4f} | "
-                        f"{norm[k]:.4f}"
+                        "  Core presence: "
+                        f"track={core_info.get('core_present_track')} "
+                        f"det={core_info.get('core_present_det')}"
                     )
+
+            motion_centers = pair.get("motion_centers")
+            if isinstance(motion_centers, dict):
+                print(
+                    "  Motion centers: "
+                    f"pred={motion_centers.get('trk_pred_center')} "
+                    f"det={motion_centers.get('det_center')} "
+                    f"residual={motion_centers.get('residual')}"
+                )

@@ -24,8 +24,10 @@ tracking:
   apperance_embedding_model_path: "/home/bohdan/PycharmProjects/Boxing_Tracking_Project/artifacts/models/apperance_cnn/apperance_encoder_0129_mobilenetv3large.keras"
 
 match:
-  debug_pose_extended: true
-  debug_pose_print_table: false
+  debug_pose_presence: true
+  debug_motion_centers: true
+  min_kp_conf: 0.05
+  pose_core: [1,2,3,5,6,8,9,10,12,13]
 
 shot_boundary:
   config_path: "/home/bohdan/PycharmProjects/Boxing_Tracking_Project/configs/shot_boundary.yaml"
