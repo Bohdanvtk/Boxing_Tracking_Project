@@ -35,7 +35,9 @@ def make_match_config(cfg: dict) -> MatchConfig:
     w_motion = _get(cfg, "tracking.matching.w_motion", 3)
     w_pose = _get(cfg, "tracking.matching.w_pose", 5)
     w_app = _get(cfg, "tracking.matching.w_app", 10)
-    pose_core = _get(cfg, "tracking.matching.pose_core", [1, 2, 5, 8, 9, 12] )
+    pose_core = _get(cfg, "tracking.matching.pose_core", None)
+    debug_pose_extended = bool(_get(cfg, "tracking.matching.debug_pose_extended", False))
+    debug_pose_print_table = bool(_get(cfg, "tracking.matching.debug_pose_print_table", False))
 
     save_log = bool(_get(cfg, "tracking.save_log", True))
 
@@ -58,7 +60,9 @@ def make_match_config(cfg: dict) -> MatchConfig:
         w_app=w_app,
         pose_scale_eps=pose_scale_eps,
         save_log=save_log,
-        pose_core=pose_core
+        pose_core=pose_core,
+        debug_pose_extended=debug_pose_extended,
+        debug_pose_print_table=debug_pose_print_table,
 
     )
 
@@ -104,5 +108,4 @@ def load_tracking_config(path: str):
     match_cfg = make_match_config(cfg)
     tracker_cfg = make_tracker_config(cfg, match_cfg)
     return tracker_cfg, match_cfg, cfg
-
 

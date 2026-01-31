@@ -49,6 +49,7 @@ class DebugLog:
 
     buffer: List[str] = field(default_factory=list)
     meta: Dict[str, Any] = field(default_factory=dict)
+    pairs: List[Dict[str, Any]] = field(default_factory=list)
 
     n_rows: int = 0
     n_cols: int = 0
@@ -72,6 +73,7 @@ class DebugLog:
         self.n_rows = int(n_rows)
         self.n_cols = int(n_cols)
         self.matrix = [[MatrixCell() for _ in range(self.n_cols)] for _ in range(self.n_rows)]
+        self.pairs = []
 
     def reset_matrix(self) -> None:
         self.n_rows = 0
@@ -274,6 +276,9 @@ class DebugLog:
 
         self.reset_matrix()
 
+    def add_pair(self, pair_obj: Dict[str, Any]) -> None:
+        self.pairs.append(pair_obj)
+
 
 def print_pre_tracking_results(frame_idx: int) -> None:
     print("\n" + "=" * 80)
@@ -281,7 +286,7 @@ def print_pre_tracking_results(frame_idx: int) -> None:
     print("=" * 80 + "\n")
 
 
-def print_tracking_results(log: dict, iteration: int, show_pose_tables: bool = False) -> None:
+def print_tracking_results(log: dict, iteration: int, show_pose_extended: bool = False) -> None:
     print("\n" + "=" * 80)
     print(f"TRACKING RESULTS: frame={iteration}")
     print("=" * 80)
@@ -291,3 +296,63 @@ def print_tracking_results(log: dict, iteration: int, show_pose_tables: bool = F
         tid = t.get("track_id", "N/A") if isinstance(t, dict) else getattr(t, "track_id", "N/A")
         pos = t.get("pos", None) if isinstance(t, dict) else getattr(t, "pos", None)
         print(f"  - Track {tid} pos={pos}")
+
+    if show_pose_extended:
+        frame_log = log.get("frame_log", None)
+        pairs = getattr(frame_log, "pairs", []) if frame_log is not None else []
+        if pairs:
+            print("\n[pose-debug] Extended pose diagnostics:")
+        for pair in pairs:
+            pose = pair.get("pose")
+            if not isinstance(pose, dict):
+                continue
+            track_id = pair.get("track_id", "N/A")
+            det_id = pair.get("det_id", "N/A")
+            print(f"\nPair track_id={track_id} det_id={det_id}")
+            used_idx = pose.get("used_idx", [])
+            used_count = pose.get("used_count", 0)
+            d_pose = pose.get("D_pose", 0.0)
+            print(f"  used_idx: {used_idx}")
+            print(f"  used_count: {used_count}")
+            print(f"  D_pose: {d_pose}")
+            if "core_present_count" in pose and "core_total" in pose:
+                core_present_count = pose.get("core_present_count", 0)
+                core_total = pose.get("core_total", 0)
+                core_ratio = pose.get("core_ratio", None)
+                print(f"  core_present: {core_present_count}/{core_total} (ratio={core_ratio})")
+
+            trk_xy = pose.get("trk_xy", [])
+            det_xy = pose.get("det_xy", [])
+            trk_conf = pose.get("trk_conf", [])
+            det_conf = pose.get("det_conf", [])
+            trk_present = pose.get("trk_present", [])
+            det_present = pose.get("det_present", [])
+            used_mask = pose.get("used_mask", [])
+            dx = pose.get("dx", [])
+            dy = pose.get("dy", [])
+            norm = pose.get("norm", [])
+
+            if trk_xy and det_xy:
+                print("k | trk_x trk_y | det_x det_y | conf_t conf_d | trk_ok det_ok used | dx dy | ||d||")
+                n_k = min(
+                    len(trk_xy),
+                    len(det_xy),
+                    len(trk_conf),
+                    len(det_conf),
+                    len(trk_present),
+                    len(det_present),
+                    len(used_mask),
+                    len(dx),
+                    len(dy),
+                    len(norm),
+                )
+                for k in range(n_k):
+                    print(
+                        f"{k:02d} | "
+                        f"{trk_xy[k][0]:.4f} {trk_xy[k][1]:.4f} | "
+                        f"{det_xy[k][0]:.4f} {det_xy[k][1]:.4f} | "
+                        f"{trk_conf[k]:.3f} {det_conf[k]:.3f} | "
+                        f"{int(trk_present[k])} {int(det_present[k])} {int(used_mask[k])} | "
+                        f"{dx[k]:.4f} {dy[k]:.4f} | "
+                        f"{norm[k]:.4f}"
+                    )
