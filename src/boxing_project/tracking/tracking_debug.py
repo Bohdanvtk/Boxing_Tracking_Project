@@ -306,7 +306,7 @@ class DebugLog:
                 if isinstance(motion_centers, dict):
                     self.line(
                         "  Motion centers: "
-                        f"pred={motion_centers.get('trk_pred_center')} "
+                        f"kalman_pred={motion_centers.get('kalman_pred_center')} "
                         f"det={motion_centers.get('det_center')} "
                         f"residual={motion_centers.get('residual')}"
                     )
@@ -377,7 +377,7 @@ def print_tracking_results(log: dict, iteration: int, show_pose_extended: bool =
             if isinstance(motion_centers, dict):
                 print(
                     "  Motion centers: "
-                    f"pred={motion_centers.get('trk_pred_center')} "
+                    f"kalman_pred={motion_centers.get('kalman_pred_center')} "
                     f"det={motion_centers.get('det_center')} "
                     f"residual={motion_centers.get('residual')}"
                 )

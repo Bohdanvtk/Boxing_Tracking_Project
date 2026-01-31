@@ -359,7 +359,7 @@ def build_cost_matrix(
                     trk_pred = trk.pos()
                     det_center = det.center
                     motion_centers = {
-                        "trk_pred_center": [float(trk_pred[0]), float(trk_pred[1])],
+                        "kalman_pred_center": [float(trk_pred[0]), float(trk_pred[1])],
                         "det_center": [float(det_center[0]), float(det_center[1])],
                         "residual": [
                             float(det_center[0] - trk_pred[0]),
@@ -370,7 +370,7 @@ def build_cost_matrix(
                     if log.enabled_print:
                         log.sink(
                             "[motion-centers] Track#{i} (track_id={trk.track_id}) vs Det#{j}: "
-                            f"pred={motion_centers['trk_pred_center']} "
+                            f"kalman_pred={motion_centers['kalman_pred_center']} "
                             f"det={motion_centers['det_center']} "
                             f"residual={motion_centers['residual']}"
                         )
