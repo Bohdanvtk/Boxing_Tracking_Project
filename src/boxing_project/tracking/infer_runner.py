@@ -70,10 +70,6 @@ class InferRunner:
                 tracker.cfg.match.debug_pose_presence = bool(match_cfg.get("debug_pose_presence"))
             if "debug_motion_centers" in match_cfg:
                 tracker.cfg.match.debug_motion_centers = bool(match_cfg.get("debug_motion_centers"))
-            if "min_kp_conf" in match_cfg:
-                tracker.cfg.match.min_kp_conf = float(match_cfg.get("min_kp_conf"))
-            if "pose_core" in match_cfg:
-                tracker.cfg.match.pose_core = match_cfg.get("pose_core")
 
         # ---------- Data / Images ----------
         data_cfg = cfg.get("data", {})
