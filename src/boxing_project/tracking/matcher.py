@@ -10,7 +10,7 @@ import numpy as np
 from .track import Track, Detection
 from . import DEFAULT_TRACKING_CONFIG_PATH
 from .tracking_debug import DebugLog
-from boxing_project.tracking.normalization import normalize_pose_2d
+from boxing_project.tracking.normalization import bones_vector, mirror_invariant, normalize_pose_2d
 
 
 @dataclass
@@ -35,11 +35,13 @@ class MatchConfig:
     save_log: bool = bool
 
 
-def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
+def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """
-    vector similarity [-1:1]
-        -1: not similar
-         1: similar
+    Cosine similarity in [-1, 1].
+
+    -1: opposite direction
+     0: weak/random similarity
+     1: identical direction
     """
     a = np.asarray(a, dtype=np.float32).reshape(-1)
     b = np.asarray(b, dtype=np.float32).reshape(-1)
@@ -117,10 +119,10 @@ def _pose_distance(
     cfg: MatchConfig,
 ) -> float:
     """
-    Pose similarity (cosine) computed only on cfg.pose_core joints.
+    Pose cosine similarity from BODY_25 bone direction vectors.
+    Uses left/right label-swap mirror invariance for OpenPose robustness.
 
-    Returns cosine similarity in [-1..1].
-    If nothing usable -> returns 0.0
+    Returns similarity in [-1, 1].
     """
 
     if track_keypoints is None or det_keypoints is None:
@@ -147,27 +149,47 @@ def _pose_distance(
     if conf_t.shape[0] != n_k or conf_d.shape[0] != n_k:
         return 0.0
 
-    # --- use only pose_core joints ---
-
-    core_good = get_common_valid_joints(
-        kpt_t,
-        kpt_d,
-        conf_t,
-        conf_d,
-        cfg.pose_core,
-        cfg.min_kp_conf,
+    bones = np.asarray(
+        [(8, 1), (1, 2), (1, 5), (8, 9), (8, 12), (2, 3), (5, 6), (9, 10), (12, 13)],
+        dtype=int,
     )
 
-    if core_good.size < 2:
+    def _similarity_for_detection(kpt_det: np.ndarray, conf_det: np.ndarray) -> Optional[float]:
+        core_good = get_common_valid_joints(
+            kpt_t,
+            kpt_det,
+            conf_t,
+            conf_det,
+            cfg.pose_core,
+            cfg.min_kp_conf,
+        )
+        if core_good is None or core_good.size < 2:
+            return None
+
+        core_set = set(np.asarray(core_good, dtype=int).tolist())
+        bones_good = [tuple(b) for b in bones.tolist() if b[0] in core_set and b[1] in core_set]
+        if not bones_good:
+            return None
+
+        vt_dirs = bones_vector(kpt_t, bones_good)[0]
+        vd_dirs = bones_vector(kpt_det, bones_good)[0]
+        return float(cosine_similarity(vt_dirs.reshape(-1), vd_dirs.reshape(-1)))
+
+    sims = []
+
+    sim_normal = _similarity_for_detection(kpt_d, conf_d)
+    if sim_normal is not None:
+        sims.append(sim_normal)
+
+    kpt_d_m, conf_d_m = mirror_invariant(kpt_d, conf_d)
+    sim_mirror = _similarity_for_detection(kpt_d_m, conf_d_m)
+    if sim_mirror is not None:
+        sims.append(sim_mirror)
+
+    if not sims:
         return 0.0
 
-    # shaping vectors which will go through cosine_funnction
-
-    vt = kpt_t[core_good, :2].reshape(-1)
-    vd = kpt_d[core_good, :2].reshape(-1)
-
-
-    return float(cosine_distance(vt, vd))
+    return float(max(sims))
 
 
 def _prepare_pose_for_distance(keypoints, kp_conf, cfg):
@@ -258,8 +280,8 @@ def build_cost_matrix(
                 allowed = True
                 d_motion_norm = 0.0
 
-                # ignore pose entirely (neutral)
-                d_pose_norm = 0.0
+                # ignore pose entirely (neutral similarity cost)
+                pose_cost = 0.0
 
             else:
                 d_motion, allowed, d2 = _motion_cost_with_gating(trk, det, cfg, gating=True)
@@ -280,8 +302,8 @@ def build_cost_matrix(
                 if root_idx is not None:
                     trk_kps = normalize_pose_2d(trk_kps, root_idx)
                     det_kps = normalize_pose_2d(det_kps, root_idx)
-                d_pose = _pose_distance(trk_kps, trk_conf, det_kps, det_conf, cfg)
-                d_pose_norm = (1.0 - d_pose) / 2.0
+                sim_pose = _pose_distance(trk_kps, trk_conf, det_kps, det_conf, cfg)
+                pose_cost = (1.0 - sim_pose) / 2.0
 
             cell.d_motion = float(d_motion_norm)
             cell.allowed = bool(allowed)
@@ -294,23 +316,23 @@ def build_cost_matrix(
 
             # appearance (works always)
             if trk.app_emb_ema is not None and isinstance(det.meta, dict) and ("e_app" in det.meta):
-                d_app = cosine_distance(trk.app_emb_ema, det.meta["e_app"])
+                sim_app = cosine_similarity(trk.app_emb_ema, det.meta["e_app"])
             else:
-                d_app = 0.0
+                sim_app = 0.0
 
-            d_app_norm = (1.0 - d_app) / 2.0
+            app_cost = (1.0 - sim_app) / 2.0
 
             if reset_mode:
-                cost = cfg.w_app * d_app_norm
+                cost = cfg.w_app * app_cost
             else:
                 cost = (
                         cfg.w_motion * (g * d_motion_norm)
-                        + cfg.w_pose * d_pose_norm
-                        + cfg.w_app * d_app_norm
+                        + cfg.w_pose * pose_cost
+                        + cfg.w_app * app_cost
                 )
 
-            cell.d_pose = float(d_pose_norm)  # або d_pose, як тобі зручніше логувати
-            cell.d_app = float(d_app_norm)
+            cell.d_pose = float(pose_cost)
+            cell.d_app = float(app_cost)
             cell.cost = float(cost)
             C[i, j] = float(cost)
 
