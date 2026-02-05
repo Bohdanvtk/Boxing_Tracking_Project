@@ -30,6 +30,7 @@ class MatchConfig:
     w_pose: float = float
     w_app: float = float
     pose_core: list = list
+    pose_center: list = list
 
     save_log: bool = bool
 
@@ -47,6 +48,65 @@ def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
     if na < 1e-8 or nb < 1e-8:
         return 0.0
     return float(np.dot(a, b) / (na * nb))
+
+
+
+def get_common_valid_joints(
+    kpt_t: np.ndarray,
+    kpt_d: np.ndarray,
+    conf_t: Optional[np.ndarray],
+    conf_d: Optional[np.ndarray],
+    pose_core: np.ndarray,
+    min_kp_conf: float,
+):
+    """
+    Returns indices of pose_core joints that are valid in BOTH track and detection.
+    """
+    # basic checks
+    if kpt_t is None or kpt_d is None:
+        return None
+    if kpt_t.ndim != 2 or kpt_d.ndim != 2 or kpt_t.shape[1] < 2 or kpt_d.shape[1] < 2:
+        return None
+    if kpt_t.shape[0] != kpt_d.shape[0]:
+        return None
+
+    n_k = kpt_t.shape[0]
+
+    # confidence fallback
+    if conf_t is None:
+        conf_t = np.ones((n_k,), dtype=float)
+    if conf_d is None:
+        conf_d = np.ones((n_k,), dtype=float)
+
+    conf_t = np.asarray(conf_t, dtype=float).reshape(-1)
+    conf_d = np.asarray(conf_d, dtype=float).reshape(-1)
+    if conf_t.shape[0] != n_k or conf_d.shape[0] != n_k:
+        return None
+
+    # pose_core sanity
+    core = np.asarray(pose_core, dtype=int).reshape(-1)
+    core = core[(core >= 0) & (core < n_k)]
+    if core.size == 0:
+        return None
+
+    # validity mask on core joints
+    good_t = np.isfinite(kpt_t[core, :2]).all(axis=1) & (conf_t[core] >= min_kp_conf)
+    good_d = np.isfinite(kpt_d[core, :2]).all(axis=1) & (conf_d[core] >= min_kp_conf)
+
+    return core[good_t & good_d]
+
+
+def pick_shared_root(kpt_t, kpt_d, conf_t, conf_d, pose_center, min_kp_conf):
+    # returns first common index which exist in pose_center if there are no one returns none
+    for idx in pose_center:
+        if (
+            np.isfinite(kpt_t[idx, :2]).all()
+            and np.isfinite(kpt_d[idx, :2]).all()
+            and conf_t[idx] >= min_kp_conf
+            and conf_d[idx] >= min_kp_conf
+        ):
+            return idx
+    return None
 
 
 def _pose_distance(
@@ -88,48 +148,29 @@ def _pose_distance(
         return 0.0
 
     # --- use only pose_core joints ---
-    core = np.asarray(cfg.pose_core, dtype=int).reshape(-1) if getattr(cfg, "pose_core", None) is not None else None
-    if core is None or core.size == 0:
-        return 0.0
 
-    # keep only valid indices
-    core = core[(core >= 0) & (core < n_k)]
-    if core.size == 0:
-        return 0.0
+    core_good = get_common_valid_joints(
+        kpt_t,
+        kpt_d,
+        conf_t,
+        conf_d,
+        cfg.pose_core,
+        cfg.min_kp_conf,
+    )
 
-    # validity only on core joints
-    good_t = np.isfinite(kpt_t[core, :2]).all(axis=1) & (conf_t[core] >= cfg.min_kp_conf)
-    good_d = np.isfinite(kpt_d[core, :2]).all(axis=1) & (conf_d[core] >= cfg.min_kp_conf)
-    good = good_t & good_d
-
-    core_good = core[good]
-    if core_good.size == 0:
-        return 0.0
-
-    # (optional but recommended) require at least 2 joints to be meaningful
     if core_good.size < 2:
         return 0.0
+
+    # shaping vectors which will go through cosine_funnction
 
     vt = kpt_t[core_good, :2].reshape(-1)
     vd = kpt_d[core_good, :2].reshape(-1)
 
-    # Optional keypoint weighting (if provided)
-    if cfg.keypoint_weights is not None:
-        w = np.asarray(cfg.keypoint_weights, dtype=float).reshape(-1)
-        if w.shape[0] == n_k:
-            wg = w[core_good]
-            wg_xy = np.repeat(np.sqrt(np.clip(wg, 0.0, None)), 2)
-            vt = vt * wg_xy
-            vd = vd * wg_xy
 
     return float(cosine_distance(vt, vd))
 
 
-def _prepare_pose_for_distance(
-    keypoints: Optional[np.ndarray],
-    kp_conf: Optional[np.ndarray],
-    cfg: MatchConfig,
-) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+def _prepare_pose_for_distance(keypoints, kp_conf, cfg):
     if keypoints is None:
         return None, None
 
@@ -139,6 +180,7 @@ def _prepare_pose_for_distance(
 
     kpt = kpt[:, :2]
     n_k = kpt.shape[0]
+
     conf = (
         np.asarray(kp_conf, dtype=float).reshape(-1)
         if kp_conf is not None else np.ones((n_k,), dtype=float)
@@ -146,17 +188,9 @@ def _prepare_pose_for_distance(
     if conf.shape[0] != n_k:
         return None, None
 
-    try:
-        out = normalize_pose_2d(kpt, eps=cfg.pose_scale_eps)
-        norm_kpt = out[0] if isinstance(out, tuple) else out
+    conf[conf < cfg.min_kp_conf] = np.nan
+    return kpt, conf
 
-    except Exception:
-        return None, None
-
-    conf_filtered = conf.copy()
-    conf_filtered[conf_filtered < cfg.min_kp_conf] = 0.0
-
-    return norm_kpt, conf_filtered
 
 
 
@@ -213,6 +247,7 @@ def build_cost_matrix(
         ]
 
 
+
     for i, trk in enumerate(tracks):
         for j, det in enumerate(detections):
             cell = log[i, j]
@@ -232,6 +267,19 @@ def build_cost_matrix(
 
                 trk_kps, trk_conf = track_pose[i]
                 det_kps, det_conf = det_pose[j]
+
+                #picking common root index and normilize
+
+                root_idx = pick_shared_root(
+                    trk_kps, det_kps,
+                    trk_conf, det_conf,
+                    cfg.pose_center,
+                    cfg.min_kp_conf,
+                )
+
+                if root_idx is not None:
+                    trk_kps = normalize_pose_2d(trk_kps, root_idx)
+                    det_kps = normalize_pose_2d(det_kps, root_idx)
                 d_pose = _pose_distance(trk_kps, trk_conf, det_kps, det_conf, cfg)
                 d_pose_norm = (1.0 - d_pose) / 2.0
 

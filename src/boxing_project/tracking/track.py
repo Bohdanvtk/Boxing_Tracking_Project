@@ -198,3 +198,7 @@ class Track:
               Innovation covariance matrix.
         """
         return self.kf.project()
+
+
+    def return_available_kps(self, keypoints):
+        pass

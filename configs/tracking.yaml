@@ -38,6 +38,15 @@ tracking:
       - 12  # Left Hip
       - 13  # Left Knee
 
+
+    pose_center:      # BODY_25 keypoints used for pose centering (priority order)
+      - 8    # MidHip        (primary root, most stable)
+      - 1    # Neck          (fallback if MidHip is missing)
+      - 9    # Right Hip     (pelvis fallback)
+      - 12   # Left Hip      (pelvis fallback)
+      - 2    # Right Shoulder
+      - 5    # Left Shoulder
+
   tracker:
     max_age: 50               # How many frames a track can survive without matching
     min_hits: 10              # Number of successful matches required to confirm a track

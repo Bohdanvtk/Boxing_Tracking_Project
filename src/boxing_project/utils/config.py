@@ -36,10 +36,12 @@ def make_match_config(cfg: dict) -> MatchConfig:
     w_pose = _get(cfg, "tracking.matching.w_pose", 5)
     w_app = _get(cfg, "tracking.matching.w_app", 10)
     pose_core = _get(cfg, "tracking.matching.pose_core", [1, 2, 5, 8, 9, 12] )
+    pose_center = _get(cfg, "tracking.matching.pose_center", [8, 1, 9, 12, 5, 2])
 
     save_log = bool(_get(cfg, "tracking.save_log", True))
 
     pose_scale_eps = float(_get(cfg, "tracking.matching.pose_scale_eps", 1e-6))
+
 
     if keypoint_weights is not None and not isinstance(keypoint_weights, (list, tuple)):
         raise ValueError("keypoint_weights має бути списком чисел або None")
@@ -58,7 +60,8 @@ def make_match_config(cfg: dict) -> MatchConfig:
         w_app=w_app,
         pose_scale_eps=pose_scale_eps,
         save_log=save_log,
-        pose_core=pose_core
+        pose_core=pose_core,
+        pose_center=pose_center
 
     )
 
@@ -94,7 +97,8 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
         min_kp_conf=min_kp_conf,
         reset_g_threshold=reset_g_threshold,
         debug=debug,
-        save_log=save_log
+        save_log=save_log,
+
 
     )
 
