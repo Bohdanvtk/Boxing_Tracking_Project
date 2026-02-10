@@ -23,7 +23,6 @@ class MatrixCell:
     Stores all components you compute for a pair (track_i, det_j).
     """
     d_motion: float = 0.0
-    d_pose: float = 0.0
     d_app: float = 0.0
     cost: float = 0.0
 
@@ -224,7 +223,6 @@ class DebugLog:
 
                 self.line(f"  Det#{j} (det_id={did}):")
                 self.line(f"    d_motion = {cell.d_motion:.{precision}f}")
-                self.line(f"    d_pose   = {cell.d_pose:.{precision}f}")
                 self.line(f"    d_app    = {cell.d_app:.{precision}f}")
                 self.line(f"    cost     = {cell.cost:.{precision}f}{gated}{marker}")
 

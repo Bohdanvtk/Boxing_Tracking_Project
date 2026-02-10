@@ -100,7 +100,6 @@ def build_cost_matrix(
             else:
                 cost = cfg.w_motion * (g * d_motion_norm) + cfg.w_app * app_cost
 
-            cell.d_pose = 0.0
             cell.d_app = float(app_cost)
             cell.cost = float(cost)
             C[i, j] = float(cost)
