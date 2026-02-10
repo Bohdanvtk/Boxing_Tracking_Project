@@ -4,12 +4,15 @@ data:
   image_size: [128, 128]      # Input image size for the network
   to_rgb: true                # Convert input images to RGB
 
-  train_roots:                # Training dataset directories
+  train_roots:    # Training dataset directories
+    - /home/bohdan/Документи/Samples/Images/boxing_tracker/fight_2_1/round_merged_train_only/train
+    - /home/bohdan/Документи/Samples/Images/boxing_tracker/fight_2_2/round_merged_train_only/train
     - /home/bohdan/Документи/Samples/Images/boxing_tracker/fight_1_1/round_1_train/appearance_embedding
     - /home/bohdan/Документи/Samples/Images/boxing_tracker/fight_1_2/round_merged_train_only/train/
 
-  val_roots:                  # Validation dataset directories
-    - /home/bohdan/Документи/Samples/Images/boxing_tracker/fight_1_1/round_1_test/appearance_embedding
+  val_root: "/home/bohdan/Документи/Samples/Images/boxing_tracker/fight_1_1/round_1_test/appearance_embedding"
+  # Validation dataset directories
+
 
 model:
   backbone: "mobilenetv3large" # Feature extractor backbone

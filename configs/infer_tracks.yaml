@@ -13,7 +13,7 @@ openpose:
   disable_multi_thread: true
 
 data:
-  input_dir: "/home/bohdan/test_video_oo.mp4"
+  input_dir: "/home/bohdan/test_video.mp4"
   save_width: 800
   save_dir: "/home/bohdan/Документи/Samples/Images/boxing_tracker/test"
 
@@ -21,7 +21,7 @@ data:
 tracking:
   config_path: "configs/tracking.yaml"
   num_frames_merge: 0      # how many pictures at one time will appear if it's 0, NO pictures will appear
-  apperance_embedding_model_path: "/home/bohdan/PycharmProjects/Boxing_Tracking_Project/artifacts/models/apperance_cnn/apperance_encoder_0129_mobilenetv3large.keras"
+  apperance_embedding_model_path: "/home/bohdan/PycharmProjects/Boxing_Tracking_Project/artifacts/models/apperance_cnn/apperance_encoder_02_09_mobilenetv3large.keras"
 
 shot_boundary:
   config_path: "/home/bohdan/PycharmProjects/Boxing_Tracking_Project/configs/shot_boundary.yaml"

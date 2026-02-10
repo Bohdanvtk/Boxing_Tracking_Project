@@ -1,4 +1,3 @@
-from gc import callbacks
 from pathlib import Path
 import yaml
 import tensorflow as tf
@@ -43,18 +42,9 @@ def main():
     else:
         train_roots = [project_root / Path(data_cfg["train_root"])]
 
-    if "val_roots" in data_cfg:
-        val_roots = [project_root / Path(p) for p in data_cfg["val_roots"]]
-    else:
-        val_roots = [project_root / Path(data_cfg["val_root"])]
 
-    # ---- build list of datasets ----
-    train_datasets = [build_one_ds(r, shuffle=True) for r in train_roots]
-    val_datasets = [build_one_ds(r, shuffle=False) for r in val_roots]
+    val_root = project_root / Path(data_cfg["val_root"])
 
-    # ---- mix them into one dataset ----
-    train_ds_raw = tf.data.Dataset.sample_from_datasets(train_datasets, seed=seed)
-    val_ds_raw = tf.data.Dataset.sample_from_datasets(val_datasets, seed=seed)
 
 
     # preprocessing тепер тут, централізовано
@@ -67,15 +57,28 @@ def main():
 
         return (img_a, img_b), y
 
-    train_ds = train_ds_raw.map(preprocess_pair, num_parallel_calls=tf.data.AUTOTUNE).prefetch(tf.data.AUTOTUNE)
-    val_ds = val_ds_raw.map(preprocess_pair, num_parallel_calls=tf.data.AUTOTUNE).prefetch(tf.data.AUTOTUNE)
+    # ---- build ONE val dataset (shared) ----
+    val_ds = (
+        build_one_ds(val_root, shuffle=False)
+        .map(preprocess_pair, num_parallel_calls=tf.data.AUTOTUNE)
+        .prefetch(tf.data.AUTOTUNE)
+    )
+
+    # ---- build train datasets list (each fight separately) ----
+    train_datasets = [
+        build_one_ds(r, shuffle=True)
+        .map(preprocess_pair, num_parallel_calls=tf.data.AUTOTUNE)
+        .prefetch(tf.data.AUTOTUNE)
+        for r in train_roots
+    ]
+
 
     # ---------- MODEL ----------
     model_cfg = cfg["model"]
     cnn_cfg = AppearanceCNNConfig(
         image_size=image_size,
         embedding_dim=int(model_cfg.get("embedding_dim", 128)),
-        backbone=str(model_cfg.get("backbone", "mobilenetv3small")),
+        backbone=str(model_cfg.get("backbone", "mobilenetv3large")),
         dropout=float(model_cfg.get("dropout", 0.0)),
         l2_reg=float(model_cfg.get("l2_reg", 0.0)),
         train_backbone=bool(model_cfg.get("train_backbone", True)),
@@ -99,43 +102,51 @@ def main():
     train_cfg = cfg["training"]
     lr = float(train_cfg["learning_rate"])
     margin = float(train_cfg.get("margin", 1.0))
+    epochs = int(train_cfg["epochs"])
 
-    early_stop = tf.keras.callbacks.EarlyStopping(
-        monitor="val_loss",
-        patience=3,
-        min_delta=0.0,
-        restore_best_weights=True,
-        verbose=1,
-    )
+    loss_fn = contrastive_loss(margin=margin)
 
+    for stage_idx, (train_ds, root) in enumerate(zip(train_datasets, train_roots), start=1):
+        print(f"\n=== Stage {stage_idx}/{len(train_datasets)}: training on {root} ===")
 
-    siamese.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
-        loss=contrastive_loss(margin=margin),
-    )
+        is_fight1 = "fight_1" in str(root)
 
-    siamese.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=int(train_cfg["epochs"]),
-        callbacks=[early_stop],
-    )
+        # learning rate
+        lr_stage = lr * 0.3 if is_fight1 else lr
+
+        # early stopping params
+        patience_stage = 1 if is_fight1 else 3
+        restore_best = False if is_fight1 else True
+
+        siamese.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=lr_stage),
+            loss=loss_fn,
+        )
+
+        early_stop_stage = tf.keras.callbacks.EarlyStopping(
+            monitor="val_loss",
+            patience=patience_stage,
+            min_delta=0.0,
+            restore_best_weights=restore_best,
+            verbose=1,
+        )
+
+        siamese.fit(
+            train_ds,
+            validation_data=val_ds,
+            epochs=epochs,
+            callbacks=[early_stop_stage],
+        )
 
     # ---------- SAVE ----------
-
-
     save_dir = project_root / Path(train_cfg.get("save_dir", "artifacts/models/apperance_cnn"))
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # дата: місяць-день
     date_tag = datetime.now().strftime("%m_%d")
-
-    # backbone
     bb = cnn_cfg.backbone.lower()
 
-    # base name (без розширення)
     base_name = train_cfg.get("save_name", "apperance_encoder")
-    base_name = Path(base_name).stem  # відрізаємо будь-яке розширення
+    base_name = Path(base_name).stem
 
     final_name = f"{base_name}_{date_tag}_{bb}.keras"
     save_path = save_dir / final_name

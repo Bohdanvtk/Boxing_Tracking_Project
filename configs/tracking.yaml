@@ -4,9 +4,9 @@ tracking:
   fps: 30                     # Video FPS (used for time-related interpretations)
 
   kalman:
-    process_var: 3.2e6        # Process noise variance (acceleration noise).
+    process_var: 1e6        # Process noise variance (acceleration noise).
                               # Higher → Kalman trusts predictions less, adapts faster
-    measure_var: 1.5e4        # Measurement noise variance (detection noise).
+    measure_var: 200       # Measurement noise variance (detection noise).
                               # Higher → Kalman trusts detections less
     p0: 1000.0                # Initial covariance for new tracks or Kalman reset.
                               # Higher → more uncertainty, easier re-alignment
@@ -48,8 +48,8 @@ tracking:
       - 5    # Left Shoulder
 
   tracker:
-    max_age: 50               # How many frames a track can survive without matching
+    max_age: 25               # How many frames a track can survive without matching
     min_hits: 10              # Number of successful matches required to confirm a track
     min_kp_conf: 0.05         # Minimum keypoint confidence when updating track pose
-    reset_g_threshold: 0.5    # If g < this value → reset_mode is activated
+    reset_g_threshold: 0.4    # If g < this value → reset_mode is activated
                               # (ignore motion & pose, match only by appearance)
