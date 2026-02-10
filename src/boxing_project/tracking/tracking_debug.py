@@ -281,7 +281,7 @@ def print_pre_tracking_results(frame_idx: int) -> None:
     print("=" * 80 + "\n")
 
 
-def print_tracking_results(log: dict, iteration: int, show_pose_tables: bool = False) -> None:
+def print_tracking_results(log: dict, iteration: int, show_detail_tables: bool = False) -> None:
     print("\n" + "=" * 80)
     print(f"TRACKING RESULTS: frame={iteration}")
     print("=" * 80)

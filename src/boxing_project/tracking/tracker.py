@@ -4,14 +4,15 @@ import copy
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Tuple, Dict, Any, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
 from boxing_project.kalman_filter.kalman import KalmanTracker
-from .track import Track, Detection
-from .matcher import MatchConfig, match_tracks_and_detections
+
 from . import DEFAULT_TRACKING_CONFIG_PATH
+from .matcher import MatchConfig, match_tracks_and_detections
+from .track import Detection, Track
 
 
 @dataclass
@@ -23,79 +24,15 @@ class TrackerConfig:
     max_age: int
     min_hits: int
     match: MatchConfig
-    min_kp_conf: float
     reset_g_threshold: float
     debug: bool
     save_log: bool
 
 
-def openpose_people_to_detections(
-    people: List[Dict[str, Any]],
-    min_kp_conf: float = 0.05,
-) -> List[Detection]:
-    dets: List[Detection] = []
-    for person in people:
-        kps: Optional[np.ndarray] = None
-
-        if 'pose_keypoints_2d' in person and isinstance(person['pose_keypoints_2d'], (list, tuple)):
-            arr = np.asarray(person['pose_keypoints_2d'], dtype=float).reshape(-1)
-            if arr.size % 3 != 0:
-                continue
-            K = arr.size // 3
-            kps = arr.reshape(K, 3)
-
-        elif 'keypoints' in person:
-            arr = np.asarray(person['keypoints'], dtype=float)
-            if arr.ndim == 2 and arr.shape[1] >= 2:
-                if arr.shape[1] == 2:
-                    arr = np.concatenate([arr, np.ones((arr.shape[0], 1), dtype=float)], axis=1)
-                kps = arr[:, :3]
-
-        elif 'pose' in person:
-            arr = np.asarray(person['pose'], dtype=float)
-            if arr.ndim == 2 and arr.shape[1] >= 2:
-                if arr.shape[1] == 2:
-                    arr = np.concatenate([arr, np.ones((arr.shape[0], 1), dtype=float)], axis=1)
-                kps = arr[:, :3]
-
-        elif 'pose_2d' in person:
-            p = person['pose_2d']
-            xs = np.asarray(p.get('x', []), dtype=float).reshape(-1, 1)
-            ys = np.asarray(p.get('y', []), dtype=float).reshape(-1, 1)
-            cs = np.asarray(p.get('conf', []), dtype=float).reshape(-1, 1)
-            if xs.shape == ys.shape == cs.shape and xs.size > 0:
-                kps = np.concatenate([xs, ys, cs], axis=1)
-
-        if kps is None:
-            continue
-
-        good = kps[:, 2] >= float(min_kp_conf)
-        xy = kps[:, :2].copy()
-        xy[~good] = np.nan
-        if np.all(~good):
-            continue
-
-        TORSO = [1, 8]  # Neck, MidHip (BODY_25)
-        txy = xy[TORSO]
-        if np.all(np.isnan(txy)):
-            txy = xy
-        cx, cy = np.nanmedian(txy, axis=0)
-
-        dets.append(
-            Detection(
-                center=(float(cx), float(cy)),
-                keypoints=xy,
-                kp_conf=kps[:, 2],
-                meta={'raw': person}
-            )
-        )
-
-    return dets
-
-
 @lru_cache(maxsize=None)
 def _cached_tracking_config(path: str):
     from boxing_project.utils.config import load_tracking_config
+
     return load_tracking_config(path)
 
 
@@ -122,9 +59,7 @@ class MultiObjectTracker:
             cfg_loaded, raw_cfg = _load_tracker_config_from_yaml(config_path)
             self.cfg = cfg_loaded
             self._raw_config = raw_cfg
-            self.config_path: Optional[Path] = (
-                Path(config_path) if config_path is not None else DEFAULT_TRACKING_CONFIG_PATH
-            )
+            self.config_path: Optional[Path] = Path(config_path) if config_path is not None else DEFAULT_TRACKING_CONFIG_PATH
         else:
             self.cfg = copy.deepcopy(cfg)
             self._raw_config = None
@@ -132,7 +67,6 @@ class MultiObjectTracker:
 
         self.tracks: List[Track] = []
         self._next_id: int = 1
-
         raw = self.get_config_dict() or {}
         self.debug: bool = bool(raw.get("tracking", {}).get("debug", False))
 
@@ -151,42 +85,19 @@ class MultiObjectTracker:
         )
         trk = Track(track_id=self._next_id, kf=kf, min_hits=self.cfg.min_hits)
         self._next_id += 1
-        trk.update(
-            det,
-            ema_alpha=self.cfg.match.emb_ema_alpha,
-            update_app=self._has_base_keypoints(det),
-        )
+        trk.update(det, ema_alpha=self.cfg.match.emb_ema_alpha, update_app=True)
         return trk
 
     def _remove_dead(self):
         self.tracks = [t for t in self.tracks if not t.is_dead(self.cfg.max_age)]
 
-    def _has_base_keypoints(self, det: Detection) -> bool:
-        core = np.asarray(self.cfg.match.pose_core, dtype=int).reshape(-1) if self.cfg.match.pose_core is not None else None
-        if core is None or core.size == 0:
-            return True
-        if det.keypoints is None:
-            return False
-        kps = np.asarray(det.keypoints, dtype=float)
-        if kps.ndim != 2 or kps.shape[1] < 2:
-            return False
-        n_k = kps.shape[0]
-        core = core[(core >= 0) & (core < n_k)]
-        if core.size == 0:
-            return False
-        return bool(np.isfinite(kps[core, :2]).all(axis=1).all())
-
-
     def update(self, detections: List[Detection], reset_mode: bool, g: float = 1.0) -> Dict[str, Any]:
-        # 1) predict
         for trk in self.tracks:
             trk.predict()
 
-        # snapshot: row index -> track_id
         idx2tid = {i: t.track_id for i, t in enumerate(self.tracks)}
         row_track_ids = [idx2tid[i] for i in range(len(self.tracks))]
 
-        # 2) match (returns DebugLog as last element)
         matches_idx, um_tr_idx, um_det_idx, C, log = match_tracks_and_detections(
             tracks=self.tracks,
             detections=detections,
@@ -196,35 +107,21 @@ class MultiObjectTracker:
             reset_mode=reset_mode,
         )
 
-
-        # 3) update matched
         id_pairs: List[Tuple[int, int]] = []
         for i_track, j_det in matches_idx:
             trk = self.tracks[i_track]
             det = detections[j_det]
 
             if reset_mode:
-                # 1) HARD reset Kalman: починаємо motion "з нуля" від поточної det.center
                 trk.kf.reset(np.asarray(det.center, dtype=float), p0=float(self.cfg.p0))
 
-                trk.last_keypoints = None
-                trk.last_kp_conf = None
-
-            trk.update(
-                det,
-                ema_alpha=self.cfg.match.emb_ema_alpha,
-                update_app=self._has_base_keypoints(det),
-            )
-
+            trk.update(det, ema_alpha=self.cfg.match.emb_ema_alpha, update_app=True)
             id_pairs.append((trk.track_id, j_det))
 
-        # 4) spawn new tracks
         for j in um_det_idx:
-
             if not reset_mode:
                 self.tracks.append(self._new_track(detections[j]))
 
-        # 5) remove dead
         self._remove_dead()
 
         unmatched_track_ids = [idx2tid[i] for i in um_tr_idx if i in idx2tid]
@@ -243,14 +140,13 @@ class MultiObjectTracker:
             if not t.is_dead(self.cfg.max_age)
         ]
 
-        # return consistent structure
         return {
             "matches": id_pairs,
             "unmatched_track_ids": unmatched_track_ids,
             "unmatched_det_indices": um_det_idx,
             "cost_matrix": C,
             "active_tracks": active_tracks_summary,
-            "frame_log": log,           # DebugLog (matrix-based)
+            "frame_log": log,
             "row_track_ids": row_track_ids,
         }
 
@@ -258,7 +154,3 @@ class MultiObjectTracker:
         if confirmed_only:
             return [t for t in self.tracks if t.confirmed and not t.is_dead(self.cfg.max_age)]
         return [t for t in self.tracks if not t.is_dead(self.cfg.max_age)]
-
-    def reset(self):
-        self.tracks.clear()
-        self._next_id = 1
