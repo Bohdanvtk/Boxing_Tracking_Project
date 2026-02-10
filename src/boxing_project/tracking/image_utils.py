@@ -1,19 +1,6 @@
 import cv2
 import numpy as np
 
-def keypoints_to_bbox(kps, conf_th=0.1):
-    """
-    Compute bounding box over keypoints with confidence > conf_th.
-    Returns None if no valid keypoints found.
-    """
-    valid = kps[:, 2] > conf_th
-    if not valid.any():
-        return None
-
-    xs, ys = kps[valid, 0], kps[valid, 1]
-    return int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
-
-
 
 def _rects_intersect(r1, r2) -> bool:
     x1, y1, x2, y2 = r1

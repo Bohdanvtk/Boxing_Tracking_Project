@@ -1,55 +1,24 @@
 tracking:
-  debug: true                 # Enable console debug output (cost matrix, per-pair breakdown)
-  save_log: true              # Save debug logs to disk (only works if debug=true)
-  fps: 30                     # Video FPS (used for time-related interpretations)
+  debug: true
+  save_log: true
+  fps: 30
 
   kalman:
-    process_var: 1e6        # Process noise variance (acceleration noise).
-                              # Higher → Kalman trusts predictions less, adapts faster
-    measure_var: 200       # Measurement noise variance (detection noise).
-                              # Higher → Kalman trusts detections less
-    p0: 1000.0                # Initial covariance for new tracks or Kalman reset.
-                              # Higher → more uncertainty, easier re-alignment
+    process_var: 1e6
+    measure_var: 200
+    p0: 1000.0
 
   matching:
-    alpha: 0.8                # (Legacy/optional) blending factor if pose/motion are mixed elsewhere
-    chi2_gating: 9.21         # Chi-square gating threshold for Kalman distance.
-                              # Lower → stricter gating, fewer candidates
-    pose_scale_eps: 1.0e-6    # Small epsilon to avoid division by zero in pose normalization
-    greedy_threshold: 2.8     # Cost threshold for accepting matches in normal mode
+    alpha: 0.8
+    chi2_gating: 9.21
+    greedy_threshold: 2.8
     greedy_reset_threshold: 1.0
-                              # Stricter threshold used in reset_mode (appearance-only matching)
-    large_cost: 880.0         # Sentinel value for invalid / gated-out matches
-    min_kp_conf: 0.05         # Minimum confidence for a keypoint to be considered valid
+    large_cost: 880.0
 
-    w_motion: 3.0             # Weight of motion (Kalman distance) in total cost
-    w_pose: 5                 # Weight of pose similarity in total cost
-    w_app: 10.0               # Weight of appearance similarity (highest → most important)
-
-    pose_core:                # BODY_25 keypoint indices used for pose comparison
-      - 1   # Neck
-      - 2   # Right Shoulder
-      - 3   # Right Elbow
-      - 5   # Left Shoulder
-      - 6   # Left Elbow
-      - 8   # MidHip
-      - 9   # Right Hip
-      - 10  # Right Knee
-      - 12  # Left Hip
-      - 13  # Left Knee
-
-
-    pose_center:      # BODY_25 keypoints used for pose centering (priority order)
-      - 8    # MidHip        (primary root, most stable)
-      - 1    # Neck          (fallback if MidHip is missing)
-      - 9    # Right Hip     (pelvis fallback)
-      - 12   # Left Hip      (pelvis fallback)
-      - 2    # Right Shoulder
-      - 5    # Left Shoulder
+    w_motion: 3.0
+    w_app: 10.0
 
   tracker:
-    max_age: 25               # How many frames a track can survive without matching
-    min_hits: 10              # Number of successful matches required to confirm a track
-    min_kp_conf: 0.05         # Minimum keypoint confidence when updating track pose
-    reset_g_threshold: 0.4    # If g < this value → reset_mode is activated
-                              # (ignore motion & pose, match only by appearance)
+    max_age: 25
+    min_hits: 10
+    reset_g_threshold: 0.4

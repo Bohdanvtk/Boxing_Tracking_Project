@@ -23,7 +23,6 @@ class MatrixCell:
     Stores all components you compute for a pair (track_i, det_j).
     """
     d_motion: float = 0.0
-    d_pose: float = 0.0
     d_app: float = 0.0
     cost: float = 0.0
 
@@ -224,7 +223,6 @@ class DebugLog:
 
                 self.line(f"  Det#{j} (det_id={did}):")
                 self.line(f"    d_motion = {cell.d_motion:.{precision}f}")
-                self.line(f"    d_pose   = {cell.d_pose:.{precision}f}")
                 self.line(f"    d_app    = {cell.d_app:.{precision}f}")
                 self.line(f"    cost     = {cell.cost:.{precision}f}{gated}{marker}")
 
@@ -281,7 +279,7 @@ def print_pre_tracking_results(frame_idx: int) -> None:
     print("=" * 80 + "\n")
 
 
-def print_tracking_results(log: dict, iteration: int, show_pose_tables: bool = False) -> None:
+def print_tracking_results(log: dict, iteration: int, show_detail_tables: bool = False) -> None:
     print("\n" + "=" * 80)
     print(f"TRACKING RESULTS: frame={iteration}")
     print("=" * 80)

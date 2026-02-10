@@ -1,27 +1,20 @@
 #configs/infer_tracks.yaml
 
-openpose:
-  root: "/home/bohdan/openpose"   # path to openpose root
-  hand: false
-  face: false
-  net_resolution: "-1x256"
-  num_gpu: 1
-  num_gpu_start: 0
-  render_pose: 0
-  disable_blending: true
-  number_people_max: 5
-  disable_multi_thread: true
+yolo:
+  model_path: "artifacts/models/yolov8l.onnx"
+  img_size: 640
+  conf_thres: 0.35
+  iou_thres: 0.50
 
 data:
   input_dir: "/home/bohdan/test_video.mp4"
   save_width: 800
   save_dir: "/home/bohdan/Документи/Samples/Images/boxing_tracker/test"
 
-
 tracking:
   config_path: "configs/tracking.yaml"
-  num_frames_merge: 0      # how many pictures at one time will appear if it's 0, NO pictures will appear
-  apperance_embedding_model_path: "/home/bohdan/PycharmProjects/Boxing_Tracking_Project/artifacts/models/apperance_cnn/apperance_encoder_02_09_mobilenetv3large.keras"
+  num_frames_merge: 0
+  apperance_embedding_model_path: "artifacts/models/apperance_cnn/apperance_encoder_02_09_mobilenetv3large.keras"
 
 shot_boundary:
-  config_path: "/home/bohdan/PycharmProjects/Boxing_Tracking_Project/configs/shot_boundary.yaml"
+  config_path: "configs/shot_boundary.yaml"
