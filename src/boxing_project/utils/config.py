@@ -84,7 +84,7 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
     min_hits = int(_get(cfg, "tracking.tracker.min_hits", 3))
     min_kp_conf = float(_get(cfg, "tracking.tracker.min_kp_conf", 0.05))
     reset_g_threshold = float(_get(cfg, "tracking.tracker.reset_g_threshold", 0.7))
-
+    bad_kp_patience =  int(_get(cfg, "tracking.tracker.bad_kp_patience", 3))
 
     return TrackerConfig(
         dt=dt,
@@ -98,6 +98,8 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
         reset_g_threshold=reset_g_threshold,
         debug=debug,
         save_log=save_log,
+        bad_kp_patience=bad_kp_patience,
+
 
 
     )

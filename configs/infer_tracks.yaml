@@ -9,7 +9,7 @@ openpose:
   num_gpu_start: 0
   render_pose: 0
   disable_blending: true
-  number_people_max: 5
+  number_people_max: 3
   disable_multi_thread: true
 
 data:

@@ -25,6 +25,7 @@ class TrackerConfig:
     match: MatchConfig
     min_kp_conf: float
     reset_g_threshold: float
+    bad_kp_patience: int
     debug: bool
     save_log: bool
 
@@ -177,6 +178,7 @@ class MultiObjectTracker:
         return bool(np.isfinite(kps[core, :2]).all(axis=1).all())
 
 
+
     def update(self, detections: List[Detection], reset_mode: bool, g: float = 1.0) -> Dict[str, Any]:
         # 1) predict
         for trk in self.tracks:
@@ -204,17 +206,44 @@ class MultiObjectTracker:
             det = detections[j_det]
 
             if reset_mode:
-                # 1) HARD reset Kalman: починаємо motion "з нуля" від поточної det.center
+                # Hard reset of motion state
                 trk.kf.reset(np.asarray(det.center, dtype=float), p0=float(self.cfg.p0))
-
                 trk.last_keypoints = None
                 trk.last_kp_conf = None
+                trk.post_reset_mode = True
+                trk.bad_kp_streak = 0
 
-            trk.update(
-                det,
-                ema_alpha=self.cfg.match.emb_ema_alpha,
-                update_app=self._has_base_keypoints(det),
-            )
+            has_core = self._has_base_keypoints(det)
+
+            if not trk.post_reset_mode:
+                # Normal behavior before any reset
+                trk.update(
+                    det,
+                    ema_alpha=self.cfg.match.emb_ema_alpha,
+                    update_app=True,
+                )
+            else:
+                # After reset, apply core-keypoint gating with patience
+                if has_core:
+                    trk.bad_kp_streak = 0
+                    trk.update(
+                        det,
+                        ema_alpha=self.cfg.match.emb_ema_alpha,
+                        update_app=True,
+                    )
+                else:
+                    trk.bad_kp_streak += 1
+
+                    if trk.bad_kp_streak <= int(self.cfg.bad_kp_patience):
+                        # Skip state update but keep track active
+                        trk.time_since_update = 0
+                    else:
+                        # Force update after exceeding patience
+                        trk.update(
+                            det,
+                            ema_alpha=self.cfg.match.emb_ema_alpha,
+                            update_app=True,
+                        )
 
             id_pairs.append((trk.track_id, j_det))
 

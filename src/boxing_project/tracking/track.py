@@ -80,6 +80,8 @@ class Track:
     time_since_update: int = 0
     reset_g_threshold: float = 0.70
     confirmed: bool = False
+    bad_kp_streak: int = 0
+    post_reset_mode: bool = False
 
     last_keypoints: Optional[np.ndarray] = None
     last_kp_conf: Optional[np.ndarray] = None

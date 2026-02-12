@@ -99,7 +99,20 @@ def get_common_valid_joints(
 
 
 def pick_shared_root(kpt_t, kpt_d, conf_t, conf_d, pose_center, min_kp_conf):
-    # returns first common index which exist in pose_center if there are no one returns none
+    """
+    Returns the first common valid index from pose_center.
+    If no valid shared keypoint exists, returns None.
+    Safe against None inputs.
+    """
+
+    if (
+        kpt_t is None
+        or kpt_d is None
+        or conf_t is None
+        or conf_d is None
+    ):
+        return None
+
     for idx in pose_center:
         if (
             np.isfinite(kpt_t[idx, :2]).all()
@@ -108,7 +121,9 @@ def pick_shared_root(kpt_t, kpt_d, conf_t, conf_d, pose_center, min_kp_conf):
             and conf_d[idx] >= min_kp_conf
         ):
             return idx
+
     return None
+
 
 
 def _pose_distance(
