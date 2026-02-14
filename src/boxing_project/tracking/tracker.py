@@ -21,6 +21,7 @@ class TrackerConfig:
     measure_var: float
     p0: float
     max_age: int
+    post_reset_max_age: int
     min_hits: int
     match: MatchConfig
     min_kp_conf: float
@@ -150,7 +151,7 @@ class MultiObjectTracker:
             measure_var=self.cfg.measure_var,
             p0=self.cfg.p0,
         )
-        trk = Track(track_id=self._next_id, kf=kf, min_hits=self.cfg.min_hits)
+        trk = Track(track_id=self._next_id, kf=kf, min_hits=self.cfg.min_hits, post_reset_max_age=self.cfg.post_reset_max_age)
         self._next_id += 1
         trk.update(
             det,
@@ -162,33 +163,73 @@ class MultiObjectTracker:
     def _remove_dead(self):
         self.tracks = [t for t in self.tracks if not t.is_dead(self.cfg.max_age)]
 
-    def _has_base_keypoints(self, det: Detection) -> bool:
-        core = np.asarray(self.cfg.match.pose_core, dtype=int).reshape(-1) if self.cfg.match.pose_core is not None else None
-        if core is None or core.size == 0:
+    def _has_base_keypoints(self, det: Detection, min_core_kps: Optional[int] = None) -> bool:
+        """
+        Check whether a detection contains enough valid keypoints from the configured core set.
+
+        Modes:
+          - Strict (min_core_kps is None): require ALL core keypoints to be valid.
+          - Relaxed (min_core_kps is int): require at least `min_core_kps` valid core keypoints.
+
+        A keypoint is considered valid if its (x, y) coordinates are finite.
+
+        Returns:
+            True  -> requirement satisfied
+            False -> not satisfied
+        """
+
+        core = self.cfg.match.pose_core
+        if not core:
+            # No core configured => accept by default
             return True
+
         if det.keypoints is None:
+            # No keypoints => cannot satisfy core requirement
             return False
+
         kps = np.asarray(det.keypoints, dtype=float)
         if kps.ndim != 2 or kps.shape[1] < 2:
+            # Expect shape (K, >=2)
             return False
-        n_k = kps.shape[0]
-        core = core[(core >= 0) & (core < n_k)]
+
+        # Keep only core indices that exist in this detection's keypoint array
+        core = np.asarray(core, dtype=int).ravel()
+        core = core[(0 <= core) & (core < kps.shape[0])]
         if core.size == 0:
             return False
-        return bool(np.isfinite(kps[core, :2]).all(axis=1).all())
 
+        # Count valid core keypoints (finite x,y)
+        valid_count = int(np.isfinite(kps[core, :2]).all(axis=1).sum())
 
+        # Default behavior: strict mode (require all core keypoints)
+        required = int(core.size) if min_core_kps is None else int(min_core_kps)
+
+        return valid_count >= required
 
     def update(self, detections: List[Detection], reset_mode: bool, g: float = 1.0) -> Dict[str, Any]:
-        # 1) predict
+        # 0) Enter post-reset mode for all tracks when a global reset is triggered
+        if reset_mode:
+            for trk in self.tracks:
+                trk.post_reset_mode = True
+                trk.post_reset_age = 0
+                trk.bad_kp_streak = 0
+
+        # 1) Predict step
+        # - In post-reset mode we do not run Kalman prediction to avoid motion-gating bias
+        # - We still advance bookkeeping counters
         for trk in self.tracks:
-            trk.predict()
+            if trk.post_reset_mode:
+                trk.age += 1
+                trk.time_since_update += 1
+                trk.post_reset_age += 1
+            else:
+                trk.predict()
 
         # snapshot: row index -> track_id
         idx2tid = {i: t.track_id for i, t in enumerate(self.tracks)}
         row_track_ids = [idx2tid[i] for i in range(len(self.tracks))]
 
-        # 2) match (returns DebugLog as last element)
+        # 2) Match
         matches_idx, um_tr_idx, um_det_idx, C, log = match_tracks_and_detections(
             tracks=self.tracks,
             detections=detections,
@@ -198,62 +239,54 @@ class MultiObjectTracker:
             reset_mode=reset_mode,
         )
 
-
-        # 3) update matched
+        # 3) Update matched
         id_pairs: List[Tuple[int, int]] = []
         for i_track, j_det in matches_idx:
             trk = self.tracks[i_track]
             det = detections[j_det]
 
-            if reset_mode:
-                # Hard reset of motion state
-                trk.kf.reset(np.asarray(det.center, dtype=float), p0=float(self.cfg.p0))
-                trk.last_keypoints = None
-                trk.last_kp_conf = None
-                trk.post_reset_mode = True
-                trk.bad_kp_streak = 0
-
-            has_core = self._has_base_keypoints(det)
+            has_core = self._has_base_keypoints(det, self.cfg.match.min_core_kps)
 
             if not trk.post_reset_mode:
-                # Normal behavior before any reset
-                trk.update(
-                    det,
-                    ema_alpha=self.cfg.match.emb_ema_alpha,
-                    update_app=True,
-                )
+                # Normal tracking update
+                trk.update(det, ema_alpha=self.cfg.match.emb_ema_alpha, update_app=True)
+
             else:
-                # After reset, apply core-keypoint gating with patience
+                # Post-reset warmup:
+                # - attach motion model only when keypoints are reliable
+                # - otherwise keep the track alive up to a patience limit
                 if has_core:
                     trk.bad_kp_streak = 0
-                    trk.update(
-                        det,
-                        ema_alpha=self.cfg.match.emb_ema_alpha,
-                        update_app=True,
-                    )
+
+                    # Attach Kalman state to the current observation
+                    trk.kf.reset(np.asarray(det.center, dtype=float), p0=float(self.cfg.p0))
+
+                    # Update stored pose/app state from this detection
+                    trk.update(det, ema_alpha=self.cfg.match.emb_ema_alpha, update_app=True)
+
+                    # Exit post-reset mode after the first reliable observation
+                    trk.post_reset_mode = False
+
                 else:
                     trk.bad_kp_streak += 1
 
                     if trk.bad_kp_streak <= int(self.cfg.bad_kp_patience):
-                        # Skip state update but keep track active
+                        # Keep track alive but do not update Kalman/pose/app
                         trk.time_since_update = 0
                     else:
-                        # Force update after exceeding patience
-                        trk.update(
-                            det,
-                            ema_alpha=self.cfg.match.emb_ema_alpha,
-                            update_app=True,
-                        )
+                        # Patience exceeded: force attachment and exit post-reset mode
+                        trk.kf.reset(np.asarray(det.center, dtype=float), p0=float(self.cfg.p0))
+                        trk.update(det, ema_alpha=self.cfg.match.emb_ema_alpha, update_app=True)
+                        trk.post_reset_mode = False
 
             id_pairs.append((trk.track_id, j_det))
 
-        # 4) spawn new tracks
+        # 4) Spawn new tracks (unchanged)
         for j in um_det_idx:
-
             if not reset_mode:
                 self.tracks.append(self._new_track(detections[j]))
 
-        # 5) remove dead
+        # 5) Remove dead (unchanged)
         self._remove_dead()
 
         unmatched_track_ids = [idx2tid[i] for i in um_tr_idx if i in idx2tid]
@@ -272,14 +305,13 @@ class MultiObjectTracker:
             if not t.is_dead(self.cfg.max_age)
         ]
 
-        # return consistent structure
         return {
             "matches": id_pairs,
             "unmatched_track_ids": unmatched_track_ids,
             "unmatched_det_indices": um_det_idx,
             "cost_matrix": C,
             "active_tracks": active_tracks_summary,
-            "frame_log": log,           # DebugLog (matrix-based)
+            "frame_log": log,
             "row_track_ids": row_track_ids,
         }
 

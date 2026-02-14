@@ -24,11 +24,11 @@ class MatchConfig:
     min_kp_conf: float
     greedy_threshold: float
     greedy_reset_threshold: float
-    emb_ema_alpha: float = 0.9
-
-    w_motion: float = float
-    w_pose: float = float
-    w_app: float = float
+    emb_ema_alpha: float
+    w_motion: float
+    w_pose: float
+    w_app: float
+    min_core_kps: int
     pose_core: list = list
     pose_center: list = list
 
@@ -289,7 +289,7 @@ def build_cost_matrix(
         for j, det in enumerate(detections):
             cell = log[i, j]
 
-            if reset_mode:
+            if reset_mode or trk.post_reset_mode:
                 # ignore Kalman gating & motion
                 d2 = 0.0
                 allowed = True
@@ -337,8 +337,9 @@ def build_cost_matrix(
 
             app_cost = (1.0 - sim_app) / 2.0
 
-            if reset_mode:
-                cost = cfg.w_app * app_cost
+            if reset_mode or trk.post_reset_mode:
+                # cost is just app_cost because is easier to adjust reset_threshold
+                cost =  app_cost
             else:
                 cost = (
                         cfg.w_motion * (g * d_motion_norm)
@@ -361,41 +362,55 @@ def build_cost_matrix(
 def linear_assignment_with_unmatched(
     C: np.ndarray,
     large_cost: float,
-    reset_mode: bool,
-    greedy_threshold: float = 2.8,
-    greedy_reset_threshold: float = 1.0,
+    greedy_threshold: float,
+    greedy_reset_threshold: float,
+    track_post_reset: List[bool],
 ) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
     """
-    Global greedy assignment:
-    - build list of all (track, det, cost) where cost < greedy_threshold
-      (and also skip large_cost if you still use it as "invalid match")
-    - sort by cost ascending
-    - take smallest edges while keeping one-to-one constraint
-    - return matched pairs + unmatched tracks/dets
+    Per-track greedy assignment:
 
-    This implements "smaller cost = higher priority" directly.
+    - For each track (row), choose its own acceptance threshold:
+        * greedy_reset_threshold  if track_post_reset[r] == True
+        * greedy_threshold        otherwise
+    - Build list of all (track, det, cost) where:
+        * cost < large_cost (not gated)
+        * cost <= per-track threshold
+    - Sort edges by ascending cost
+    - Greedily pick smallest edges while enforcing one-to-one constraint
+    - Return matched pairs + unmatched tracks/detections
+
+    This implements "smaller cost = higher priority" with
+    track-specific thresholds.
     """
 
-    thr = greedy_reset_threshold if reset_mode else greedy_threshold
-
-
     if C.size == 0:
-        # Note: for empty cost matrix, shapes still matter
+        # For empty cost matrix, still return valid index ranges
         return [], list(range(C.shape[0])), list(range(C.shape[1]))
 
     n_tracks, n_dets = C.shape
 
+    if len(track_post_reset) != n_tracks:
+        raise ValueError("track_post_reset must match number of tracks")
+
     # Collect all candidate edges
     edges: List[Tuple[float, int, int]] = []
+
     for r in range(n_tracks):
+
+        # Select threshold individually per track
+        thr = greedy_reset_threshold if track_post_reset[r] else greedy_threshold
+
         for c in range(n_dets):
             cost = float(C[r, c])
+
             # Skip invalid / gated entries
             if cost >= large_cost:
                 continue
-            # Hard accept/reject threshold
+
+            # Apply per-track acceptance threshold
             if cost > thr:
                 continue
+
             edges.append((cost, r, c))
 
     # Sort by increasing cost (best matches first)
@@ -405,10 +420,11 @@ def linear_assignment_with_unmatched(
     used_tracks = set()
     used_dets = set()
 
-    # Greedy pick
+    # Greedy selection with one-to-one constraint
     for cost, r, c in edges:
         if r in used_tracks or c in used_dets:
             continue
+
         matched.append((int(r), int(c)))
         used_tracks.add(r)
         used_dets.add(c)
@@ -417,6 +433,7 @@ def linear_assignment_with_unmatched(
     unmatched_dets = [j for j in range(n_dets) if j not in used_dets]
 
     return matched, unmatched_tracks, unmatched_dets
+
 
 
 def _load_match_config_from_yaml(config_path: Optional[Union[str, Path]] = None) -> MatchConfig:
@@ -452,9 +469,16 @@ def match_tracks_and_detections(
         reset_mode=reset_mode
     )
 
-    greedy_threshold = cfg.greedy_threshold
-    greedy_reset_threshold = cfg.greedy_reset_threshold
 
-    matches, um_tr, um_dt = linear_assignment_with_unmatched(C, large_cost=cfg.large_cost,
-        greedy_threshold=greedy_threshold,greedy_reset_threshold=greedy_reset_threshold, reset_mode=reset_mode)
+    #Cheking whether track has a post_reset_mode
+    track_post_reset = [t.post_reset_mode for t in tracks]
+
+    matches, um_tr, um_dt = linear_assignment_with_unmatched(
+        C=C,
+        large_cost=cfg.large_cost,
+        greedy_threshold=cfg.greedy_threshold,
+        greedy_reset_threshold=cfg.greedy_reset_threshold,
+        track_post_reset=track_post_reset,
+    )
+
     return matches, um_tr, um_dt, C, log

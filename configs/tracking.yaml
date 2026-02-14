@@ -6,7 +6,7 @@ tracking:
   kalman:
     process_var: 1e6        # Process noise variance (acceleration noise).
                               # Higher → Kalman trusts predictions less, adapts faster
-    measure_var: 300       # Measurement noise variance (detection noise).
+    measure_var: 2000       # Measurement noise variance (detection noise).
                               # Higher → Kalman trusts detections less
     p0: 1000.0                # Initial covariance for new tracks or Kalman reset.
                               # Higher → more uncertainty, easier re-alignment
@@ -16,15 +16,19 @@ tracking:
     chi2_gating: 9.21         # Chi-square gating threshold for Kalman distance.
                               # Lower → stricter gating, fewer candidates
     pose_scale_eps: 1.0e-6    # Small epsilon to avoid division by zero in pose normalization
-    greedy_threshold: 2.8     # Cost threshold for accepting matches in normal mode
-    greedy_reset_threshold: 1.0  # Stricter threshold used in reset_mode (appearance-only matching)
-    bad_kp_patience: 10         # how much time algorithm should wait to update ema, kalman and pose
+    greedy_threshold: 1.6     # Cost threshold for accepting matches in normal mode
+    greedy_reset_threshold: 0.002026  # Stricter threshold used in reset_mode (appearance-only matching)
+    emb_ema_alpha: 0.9        # Ema param which corresponds to speed of acquisition of a new information
+    bad_kp_patience: 50         # how much time algorithm should wait to update ema, kalman and pose
     large_cost: 880.0         # Sentinel value for invalid / gated-out matches
     min_kp_conf: 0.05         # Minimum confidence for a keypoint to be considered valid
 
     w_motion: 3.0             # Weight of motion (Kalman distance) in total cost
     w_pose: 5                 # Weight of pose similarity in total cost
     w_app: 10.0               # Weight of appearance similarity (highest → most important)
+
+
+    min_core_kps: 7           # How many of kps points should be in det to consider it good for matching
 
     pose_core:                # BODY_25 keypoint indices used for pose comparison
       - 1   # Neck
@@ -49,7 +53,8 @@ tracking:
 
   tracker:
     max_age: 25               # How many frames a track can survive without matching
-    min_hits: 10              # Number of successful matches required to confirm a track
+    post_reset_max_age: 100   # How many frames a track can survive without matching in post_reset_mode
+    min_hits: 200             # Number of successful matches required to confirm a track
     min_kp_conf: 0.05         # Minimum keypoint confidence when updating track pose
     reset_g_threshold: 0.32    # If g < this value → reset_mode is activated
                               # (ignore motion & pose, match only by appearance)

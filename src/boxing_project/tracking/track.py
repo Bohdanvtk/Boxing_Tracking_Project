@@ -74,11 +74,13 @@ class Track:
     track_id: int
     kf: KalmanTracker
     min_hits: int
+    post_reset_max_age: int
 
     age: int = 0
+    post_reset_age: int = 0
+
     hits: int = 0
     time_since_update: int = 0
-    reset_g_threshold: float = 0.70
     confirmed: bool = False
     bad_kp_streak: int = 0
     post_reset_mode: bool = False
@@ -151,18 +153,29 @@ class Track:
 
     def is_dead(self, max_age: int) -> bool:
         """
-        Decide whether this track should be removed.
+        Determine whether this track should be removed.
 
-        A track is considered 'dead' if it has not been updated for more than
-        max_age frames.
+        A track is normally considered dead if it has not received
+        an update for more than `max_age` frames.
+
+        Exception:
+            Confirmed tracks that are currently in post-reset mode
+            are kept alive if post_reset_age > post_reset_max_age`.
 
         Parameters:
-          max_age : int
-              Maximum allowed time_since_update before removal.
+            max_age : int
+                Maximum allowed number of frames without update.
 
         Returns:
-          bool : True if the track should be removed.
+            bool
+                True if the track should be removed.
         """
+
+        # Confirmed tracks are temporarily protected during post-reset phase
+        if self.confirmed and self.post_reset_mode:
+            return self.post_reset_age > self.post_reset_max_age
+
+        # Standard removal rule
         return self.time_since_update > max_age
 
     @property
