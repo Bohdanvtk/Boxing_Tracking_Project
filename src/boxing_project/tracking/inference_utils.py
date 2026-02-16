@@ -1,4 +1,5 @@
 import os
+import json
 import sys
 import cv2
 import numpy as np
@@ -221,6 +222,65 @@ def _save_frame_extra(
         cv2.imwrite(str(extra_dir / f"det_{det_idx:03d}.jpg"), crop)
 
 
+
+def _save_frame_debug(
+    *,
+    save_dir: Path,
+    frame_idx: int,
+    detections,
+    tracker,
+    log: dict,
+) -> None:
+    """Save per-detection debug info into frame_XXXXXX/debug/ as separate files."""
+    if save_dir is None:
+        return
+
+    frame_dir = Path(save_dir) / f"frame_{frame_idx:06d}"
+    debug_dir = frame_dir / "debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+
+    matches = {int(det_idx): int(track_id) for track_id, det_idx in log.get("matches", [])}
+    tracks_by_id = {int(t.track_id): t for t in tracker.tracks}
+
+    for det_idx, det in enumerate(detections):
+        raw = det.meta.get("raw", {}) if isinstance(det.meta, dict) else {}
+        bbox = raw.get("bbox", None)
+        track_id = matches.get(det_idx)
+        trk = tracks_by_id.get(track_id) if track_id is not None else None
+
+        rec = {
+            "frame_idx": int(frame_idx),
+            "det_idx": int(det_idx),
+            "bbox_xyxy": list(map(float, bbox)) if bbox is not None else None,
+            "det_center": list(map(float, det.center)) if det.center is not None else None,
+            "has_e_app": bool(det.meta.get("e_app") is not None),
+            "e_app_error": det.meta.get("e_app_error", None) if isinstance(det.meta, dict) else None,
+            "matched_track_id": int(track_id) if track_id is not None else None,
+            "track": None,
+        }
+
+        if trk is not None:
+            rec["track"] = {
+                "track_id": int(trk.track_id),
+                "confirmed": bool(trk.confirmed),
+                "age": int(trk.age),
+                "hits": int(trk.hits),
+                "time_since_update": int(trk.time_since_update),
+                "post_reset_mode": bool(trk.post_reset_mode),
+                "post_reset_age": int(trk.post_reset_age),
+                "bad_kp_streak": int(trk.bad_kp_streak),
+                "center": [float(x) for x in trk.pos()],
+                "state": np.asarray(trk.state, dtype=float).tolist(),
+                "last_det_center": [float(x) for x in trk.last_det_center] if trk.last_det_center is not None else None,
+                "previous_kps": None if trk.last_keypoints is None else np.asarray(trk.last_keypoints, dtype=float).tolist(),
+                "previous_kp_conf": None if trk.last_kp_conf is None else np.asarray(trk.last_kp_conf, dtype=float).tolist(),
+            }
+
+        (debug_dir / f"det_{det_idx:03d}.json").write_text(
+            json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+
 def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, frame_idx: int, reset_mode: bool
                   , save_dir: Path | None, save_log: bool):
     """
@@ -356,6 +416,15 @@ def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, 
             unprocessed_frame=original_img,
             detections=detections,
         )
+
+        if tracker.cfg.debug:
+            _save_frame_debug(
+                save_dir=save_dir,
+                frame_idx=frame_idx,
+                detections=detections,
+                tracker=tracker,
+                log=log,
+            )
 
     if save_dir is not None:
         for track_id, det_idx in log.get("matches", []):
