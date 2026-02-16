@@ -81,12 +81,33 @@ def _save_frame_extra(*, frame_dir: Path, unprocessed_frame: np.ndarray, detecti
         cv2.imwrite(str(extra_dir / f"det_{det_idx:03d}.jpg"), crop)
 
 
+
+
+def _save_frame_debug_txt(*, debug_dir: Path, frame_idx: int, frame_log) -> None:
+    """Save textual matrix debug from tracking_debug.DebugLog buffer."""
+    if frame_log is None or not hasattr(frame_log, "buffer"):
+        return
+
+    lines = list(getattr(frame_log, "buffer", []) or [])
+    if not lines:
+        return
+
+    txt = "\n".join([f"FRAME {int(frame_idx):06d}", "=" * 80, "", *lines, "", "=" * 80])
+    (debug_dir / "tracking_debug.txt").write_text(txt, encoding="utf-8")
+
+
 def _save_frame_debug(*, frame_dir: Path, detections, tracker, log: dict) -> None:
     debug_dir = frame_dir / "debug"
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     matches = {int(det_idx): int(track_id) for track_id, det_idx in log.get("matches", [])}
     tracks_by_id = {int(t.track_id): t for t in tracker.tracks}
+
+    _save_frame_debug_txt(
+        debug_dir=debug_dir,
+        frame_idx=int(log.get("frame_idx", -1)),
+        frame_log=log.get("frame_log", None),
+    )
 
     for det_idx, det in enumerate(detections):
         raw = det.meta.get("raw", {}) if isinstance(det.meta, dict) else {}
