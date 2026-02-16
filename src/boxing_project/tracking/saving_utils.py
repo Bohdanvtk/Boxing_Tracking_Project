@@ -8,6 +8,27 @@ import cv2
 import numpy as np
 
 
+def _json_safe(value):
+    """Convert numpy/NaN values to JSON-safe Python objects."""
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+
+    if isinstance(value, (np.floating, float)):
+        v = float(value)
+        return v if np.isfinite(v) else None
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+
+    return value
+
+
 def _clip_bbox_xyxy(bbox, w: int, h: int):
     if bbox is None:
         return None
@@ -143,7 +164,17 @@ def _save_frame_debug(*, frame_dir: Path, detections, tracker, log: dict) -> Non
                 "previous_kp_conf": None if trk.last_kp_conf is None else np.asarray(trk.last_kp_conf, dtype=float).tolist(),
             }
 
-        (debug_dir / f"det_{det_idx:03d}.json").write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
+        rec["det"] = {
+            "center": _json_safe(det.center),
+            "keypoints": _json_safe(det.keypoints),
+            "kp_conf": _json_safe(det.kp_conf),
+        }
+
+        rec = _json_safe(rec)
+        (debug_dir / f"det_{det_idx:03d}.json").write_text(
+            json.dumps(rec, ensure_ascii=False, indent=2, allow_nan=False),
+            encoding="utf-8",
+        )
 
 
 def save_tracking_outputs(
