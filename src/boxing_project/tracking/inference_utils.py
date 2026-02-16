@@ -5,7 +5,7 @@ import numpy as np
 from pathlib import Path
 from boxing_project.tracking.tracker import openpose_people_to_detections
 from boxing_project.shot_boundary.inference import ShotBoundaryInferencer, ShotBoundaryInferConfig
-from boxing_project.tracking.image_utils import keypoints_to_bbox, draw_frame_index, draw_matched_tracks
+from boxing_project.tracking.image_utils import keypoints_to_bbox, expand_bbox_xyxy, render_tracking_overlays
 from boxing_project.tracking.saving_utils import save_tracking_outputs
 
 
@@ -95,49 +95,10 @@ def preprocess_image(opWrapper, img_path: Path, save_width: int, return_img=Fals
 
 
 
-def _expand_bbox_xyxy(
-    bbox,
-    img_w: int,
-    img_h: int,
-    width_ratio: float = 0.10,
-    height_ratio: float = 0.15,
-):
-    """Expand bbox around its center: +10% width and +15% height by default."""
-    if bbox is None:
-        return None
-
-    x1, y1, x2, y2 = bbox
-    bw = float(x2 - x1)
-    bh = float(y2 - y1)
-    if bw <= 0.0 or bh <= 0.0:
-        return None
-
-    cx = (float(x1) + float(x2)) * 0.5
-    cy = (float(y1) + float(y2)) * 0.5
-
-    new_w = bw * (1.0 + float(width_ratio))
-    new_h = bh * (1.0 + float(height_ratio))
-
-    nx1 = int(round(cx - new_w * 0.5))
-    nx2 = int(round(cx + new_w * 0.5))
-    ny1 = int(round(cy - new_h * 0.5))
-    ny2 = int(round(cy + new_h * 0.5))
-
-    nx1 = max(0, min(nx1, img_w - 1))
-    nx2 = max(0, min(nx2, img_w))
-    ny1 = max(0, min(ny1, img_h - 1))
-    ny2 = max(0, min(ny2, img_h))
-
-    if nx2 <= nx1 or ny2 <= ny1:
-        return None
-
-    return (nx1, ny1, nx2, ny2)
-
-
 
 
 def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, frame_idx: int, reset_mode: bool
-                  , save_dir: Path | None, save_log: bool):
+                  , save_dir: Path | None):
     """
     Convert OpenPose output to tracker input, compute embeddings, update tracker, draw results.
     Returns processed_frame, log_dict.
@@ -163,7 +124,7 @@ def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, 
     bboxes = []
     for i in range(n_people):
         bb = keypoints_to_bbox(kps[i], conf_th)
-        bb = _expand_bbox_xyxy(bb, img_w=w, img_h=h, width_ratio=0.10, height_ratio=0.15)
+        bb = expand_bbox_xyxy(bb, img_w=w, img_h=h, width_ratio=0.10, height_ratio=0.15)
         bboxes.append(bb)
 
     # 3) attach bbox to raw person so it survives into det.meta["raw"]
@@ -193,8 +154,7 @@ def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, 
     # 6) update tracker using detections (now they contain embeddings)
     log = tracker.update(detections, g=g, reset_mode=reset_mode)
 
-    draw_matched_tracks(frame=frame, detections=detections, matches=log.get("matches", []))
-    draw_frame_index(frame, frame_idx)
+    render_tracking_overlays(frame=frame, detections=detections, matches=log.get("matches", []), frame_idx=frame_idx)
 
     if save_dir is not None:
         save_tracking_outputs(
@@ -205,8 +165,6 @@ def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, 
             detections=detections,
             log=log,
             conf_th=conf_th,
-            save_log=save_log,
-            debug_enabled=bool(tracker.cfg.debug),
             tracker=tracker,
         )
 
@@ -263,7 +221,6 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
             app_embedder,
             g=g, frame_idx=frame_idx,
             save_dir=save_dir,
-            save_log=save_log,
             reset_mode=reset_mode
         )
 

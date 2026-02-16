@@ -134,8 +134,6 @@ def save_tracking_outputs(
     detections,
     log: dict,
     conf_th: float,
-    save_log: bool,
-    debug_enabled: bool,
     tracker,
 ) -> None:
     frame_dir = Path(save_dir) / f"frame_{frame_idx:06d}"
@@ -145,14 +143,14 @@ def save_tracking_outputs(
     if processed_frame is not None and not vis_path.exists():
         cv2.imwrite(str(vis_path), processed_frame)
 
-    if save_log:
+    if bool(tracker.cfg.save_log):
         from boxing_project.tracking.tracking_debug import GENERAL_LOG
 
         (Path(save_dir) / "debug_log.txt").write_text("\n".join(GENERAL_LOG), encoding="utf-8")
 
     _save_frame_extra(frame_dir=frame_dir, unprocessed_frame=original_frame, detections=detections)
 
-    if debug_enabled:
+    if bool(tracker.cfg.debug):
         debug_log = dict(log)
         debug_log["frame_idx"] = int(frame_idx)
         _save_frame_debug(frame_dir=frame_dir, detections=detections, tracker=tracker, log=debug_log)
