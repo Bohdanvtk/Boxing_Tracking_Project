@@ -180,6 +180,47 @@ def _save_matched_det(
     np.savez_compressed(str(track_dir / "kps.npz"), kps=kps4)
 
 
+def _save_frame_extra(
+    *,
+    save_dir: Path,
+    frame_idx: int,
+    unprocessed_frame: np.ndarray,
+    detections,
+) -> None:
+    """
+    Saves extra debug artifacts for a frame:
+      save_dir/frame_000001/extra/unprocessed_image.jpg
+      save_dir/frame_000001/extra/det_000.jpg ... det_NNN.jpg
+    """
+    if save_dir is None:
+        return
+
+    h, w = unprocessed_frame.shape[:2]
+    frame_dir = Path(save_dir) / f"frame_{frame_idx:06d}"
+    extra_dir = frame_dir / "extra"
+    extra_dir.mkdir(parents=True, exist_ok=True)
+
+    cv2.imwrite(str(extra_dir / "unprocessed_image.jpg"), unprocessed_frame)
+
+    for det_idx, det in enumerate(detections):
+        raw = det.meta.get("raw", {})
+        bbox = raw.get("bbox", None)
+        if bbox is None:
+            continue
+
+        x1, y1, x2, y2 = bbox
+        x1 = max(0, min(int(x1), w - 1))
+        x2 = max(0, min(int(x2), w))
+        y1 = max(0, min(int(y1), h - 1))
+        y2 = max(0, min(int(y2), h))
+
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        crop = unprocessed_frame[y1:y2, x1:x2]
+        cv2.imwrite(str(extra_dir / f"det_{det_idx:03d}.jpg"), crop)
+
+
 def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, frame_idx: int, reset_mode: bool
                   , save_dir: Path | None, save_log: bool):
     """
@@ -307,6 +348,14 @@ def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, 
         )
 
     draw_frame_index(frame, frame_idx)
+
+    if save_dir is not None:
+        _save_frame_extra(
+            save_dir=save_dir,
+            frame_idx=frame_idx,
+            unprocessed_frame=original_img,
+            detections=detections,
+        )
 
     if save_dir is not None:
         for track_id, det_idx in log.get("matches", []):
