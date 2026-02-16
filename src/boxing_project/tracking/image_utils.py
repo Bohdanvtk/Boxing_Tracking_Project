@@ -99,3 +99,83 @@ def draw_frame_index(frame: np.ndarray, frame_idx: int,
         thickness,
         cv2.LINE_AA,
     )
+
+def clip_bbox_xyxy(bbox, img_w: int, img_h: int):
+    if bbox is None:
+        return None
+    x1, y1, x2, y2 = bbox
+    x1 = max(0, min(int(x1), img_w - 1))
+    x2 = max(0, min(int(x2), img_w))
+    y1 = max(0, min(int(y1), img_h - 1))
+    y2 = max(0, min(int(y2), img_h))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def draw_track_label(frame: np.ndarray, *, x_text: int, ty: int, x1: int, y1: int, track_id: int, det_idx: int, label_height: int = 18) -> None:
+    cv2.putText(
+        frame,
+        f"ID {track_id}  Det {det_idx}",
+        (x_text, ty),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (36, 255, 12),
+        2,
+        cv2.LINE_AA,
+    )
+
+    cv2.line(
+        frame,
+        (x_text, ty - label_height // 2),
+        (x1, y1),
+        (255, 255, 255),
+        1,
+        cv2.LINE_AA,
+    )
+
+
+def draw_matched_tracks(frame: np.ndarray, detections, matches) -> None:
+    """Draw matched bboxes + labels in-place."""
+    h, w = frame.shape[:2]
+
+    label_rects = []
+    label_height = 18
+    label_width_est_id = 60
+    step = label_height + 4
+    min_y = label_height + 2
+
+    for track_id, det_idx in matches:
+        if det_idx < 0 or det_idx >= len(detections):
+            continue
+
+        raw = detections[det_idx].meta.get("raw", {})
+        bb = clip_bbox_xyxy(raw.get("bbox", None), img_w=w, img_h=h)
+        if bb is None:
+            continue
+
+        x1, y1, x2, y2 = bb
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
+
+        label_width_est = int(label_width_est_id * 1.6)
+        x_text, ty = _find_label_position(
+            base_x=x1,
+            base_ty=y1 - 5,
+            label_width=label_width_est,
+            label_height=label_height,
+            img_w=w,
+            label_rects=label_rects,
+            step=step,
+            min_y=min_y,
+        )
+
+        draw_track_label(
+            frame,
+            x_text=x_text,
+            ty=ty,
+            x1=x1,
+            y1=y1,
+            track_id=int(track_id),
+            det_idx=int(det_idx),
+            label_height=label_height,
+        )
