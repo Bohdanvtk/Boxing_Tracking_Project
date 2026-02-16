@@ -93,6 +93,47 @@ def preprocess_image(opWrapper, img_path: Path, save_width: int, return_img=Fals
 
 
 
+
+
+def _expand_bbox_xyxy(
+    bbox,
+    img_w: int,
+    img_h: int,
+    width_ratio: float = 0.10,
+    height_ratio: float = 0.15,
+):
+    """Expand bbox around its center: +10% width and +15% height by default."""
+    if bbox is None:
+        return None
+
+    x1, y1, x2, y2 = bbox
+    bw = float(x2 - x1)
+    bh = float(y2 - y1)
+    if bw <= 0.0 or bh <= 0.0:
+        return None
+
+    cx = (float(x1) + float(x2)) * 0.5
+    cy = (float(y1) + float(y2)) * 0.5
+
+    new_w = bw * (1.0 + float(width_ratio))
+    new_h = bh * (1.0 + float(height_ratio))
+
+    nx1 = int(round(cx - new_w * 0.5))
+    nx2 = int(round(cx + new_w * 0.5))
+    ny1 = int(round(cy - new_h * 0.5))
+    ny2 = int(round(cy + new_h * 0.5))
+
+    nx1 = max(0, min(nx1, img_w - 1))
+    nx2 = max(0, min(nx2, img_w))
+    ny1 = max(0, min(ny1, img_h - 1))
+    ny2 = max(0, min(ny2, img_h))
+
+    if nx2 <= nx1 or ny2 <= ny1:
+        return None
+
+    return (nx1, ny1, nx2, ny2)
+
+
 def _save_matched_det(
     *,
     save_dir: Path,
@@ -304,7 +345,12 @@ def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, 
     people = [{"keypoints": kps[i]} for i in range(n_people)]
 
     # 2) bbox list (index == OpenPose person index)
-    bboxes = [keypoints_to_bbox(kps[i], conf_th) for i in range(n_people)]
+    # expand slightly for ReID crops: +10% width, +15% height
+    bboxes = []
+    for i in range(n_people):
+        bb = keypoints_to_bbox(kps[i], conf_th)
+        bb = _expand_bbox_xyxy(bb, img_w=w, img_h=h, width_ratio=0.10, height_ratio=0.15)
+        bboxes.append(bb)
 
     # 3) attach bbox to raw person so it survives into det.meta["raw"]
     for i in range(n_people):
