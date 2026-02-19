@@ -133,6 +133,7 @@ class MultiObjectTracker:
         self.tracks: List[Track] = []
         self._segment_tracks: Dict[int, Track] = {}
         self._next_id: int = 1
+        self._was_reset_mode: bool = False
 
         raw = self.get_config_dict() or {}
         self.debug: bool = bool(raw.get("tracking", {}).get("debug", False))
@@ -207,9 +208,9 @@ class MultiObjectTracker:
         return valid_count >= required
 
     def update(self, detections: List[Detection], reset_mode: bool, g: float = 1.0) -> Dict[str, Any]:
-        # Hard reset: when reset_mode is triggered, all current tracks are dropped,
-        # matching starts from scratch, and no old IDs are reused.
-        if reset_mode:
+        # Hard reset only on reset edge (False -> True).
+        # This avoids clearing tracks on every frame while reset_mode stays True.
+        if reset_mode and not self._was_reset_mode:
             self.reset()
 
         # 1) Predict step
@@ -260,6 +261,8 @@ class MultiObjectTracker:
             for t in self.tracks
             if not t.is_dead(self.cfg.max_age)
         ]
+
+        self._was_reset_mode = bool(reset_mode)
 
         return {
             "matches": id_pairs,

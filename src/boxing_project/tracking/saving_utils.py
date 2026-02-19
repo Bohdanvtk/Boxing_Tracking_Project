@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -226,7 +227,13 @@ class FragmentExporter:
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.min_hits = int(min_hits)
-        self.fragment_idx = 0
+
+        max_idx = 0
+        for p in self.base_dir.glob("fragment_*"):
+            m = re.match(r"fragment_(\d+)$", p.name)
+            if m:
+                max_idx = max(max_idx, int(m.group(1)))
+        self.fragment_idx = max_idx
 
     def next_fragment(self) -> Path:
         self.fragment_idx += 1
