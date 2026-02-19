@@ -154,9 +154,6 @@ def _save_frame_debug(*, frame_dir: Path, detections, tracker, log: dict) -> Non
                 "age": int(trk.age),
                 "hits": int(trk.hits),
                 "time_since_update": int(trk.time_since_update),
-                "post_reset_mode": bool(trk.post_reset_mode),
-                "post_reset_age": int(trk.post_reset_age),
-                "bad_kp_streak": int(trk.bad_kp_streak),
                 "center": [float(x) for x in trk.pos()],
                 "state": np.asarray(trk.state, dtype=float).tolist(),
                 "last_det_center": [float(x) for x in trk.last_det_center] if trk.last_det_center is not None else None,
@@ -222,3 +219,37 @@ def save_tracking_outputs(
             kp_conf=det.kp_conf,
             conf_th=conf_th,
         )
+
+
+class FragmentExporter:
+    def __init__(self, base_dir: Path, min_hits: int):
+        self.base_dir = Path(base_dir)
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.min_hits = int(min_hits)
+        self.fragment_idx = 0
+
+    def next_fragment(self) -> Path:
+        self.fragment_idx += 1
+        fragment_dir = self.base_dir / f"fragment_{self.fragment_idx}"
+        fragment_dir.mkdir(parents=True, exist_ok=True)
+        return fragment_dir
+
+    def save_tracks(self, tracks, frame_idx: int) -> Path | None:
+        eligible = [t for t in tracks if int(t.hits) > self.min_hits]
+        if not eligible:
+            return None
+
+        fragment_dir = self.next_fragment()
+        for trk in eligible:
+            emb_history = list(getattr(trk, "app_emb_history", []) or [])
+            if not emb_history:
+                continue
+
+            track_dir = fragment_dir / f"Track_{int(trk.track_id)}"
+            track_dir.mkdir(parents=True, exist_ok=True)
+
+            for emb_idx, emb in enumerate(emb_history):
+                out_name = f"crop_emb_{emb_idx:06d}.npy"
+                np.save(track_dir / out_name, np.asarray(emb, dtype=np.float32))
+
+        return fragment_dir

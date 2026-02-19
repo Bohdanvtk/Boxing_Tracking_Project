@@ -74,22 +74,19 @@ class Track:
     track_id: int
     kf: KalmanTracker
     min_hits: int
-    post_reset_max_age: int
 
     age: int = 0
-    post_reset_age: int = 0
 
     hits: int = 0
     time_since_update: int = 0
     confirmed: bool = False
-    bad_kp_streak: int = 0
-    post_reset_mode: bool = False
 
     last_keypoints: Optional[np.ndarray] = None
     last_kp_conf: Optional[np.ndarray] = None
     last_det_center: Optional[Tuple[float, float]] = None
 
     app_emb_ema: Optional[np.ndarray] = None
+    app_emb_history: list[np.ndarray] = field(default_factory=list)
 
     def predict(self) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -139,6 +136,7 @@ class Track:
                     self.app_emb_ema = e_app
                 else:
                     self.app_emb_ema = ema_alpha * self.app_emb_ema + (1.0 - ema_alpha) * e_app
+                self.app_emb_history.append(e_app.copy())
 
         return state, cov
 
@@ -158,10 +156,6 @@ class Track:
         A track is normally considered dead if it has not received
         an update for more than `max_age` frames.
 
-        Exception:
-            Confirmed tracks that are currently in post-reset mode
-            are kept alive if post_reset_age > post_reset_max_age`.
-
         Parameters:
             max_age : int
                 Maximum allowed number of frames without update.
@@ -170,12 +164,6 @@ class Track:
             bool
                 True if the track should be removed.
         """
-
-        # Confirmed tracks are temporarily protected during post-reset phase
-        if self.confirmed and self.post_reset_mode:
-            return self.post_reset_age > self.post_reset_max_age
-
-        # Standard removal rule
         return self.time_since_update > max_age
 
     @property

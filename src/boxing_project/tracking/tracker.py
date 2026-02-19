@@ -21,12 +21,10 @@ class TrackerConfig:
     measure_var: float
     p0: float
     max_age: int
-    post_reset_max_age: int
     min_hits: int
     match: MatchConfig
     min_kp_conf: float
     reset_g_threshold: float
-    bad_kp_patience: int
     debug: bool
     save_log: bool
 
@@ -151,7 +149,7 @@ class MultiObjectTracker:
             measure_var=self.cfg.measure_var,
             p0=self.cfg.p0,
         )
-        trk = Track(track_id=self._next_id, kf=kf, min_hits=self.cfg.min_hits, post_reset_max_age=self.cfg.post_reset_max_age)
+        trk = Track(track_id=self._next_id, kf=kf, min_hits=self.cfg.min_hits)
         self._next_id += 1
         trk.update(
             det,
@@ -207,23 +205,14 @@ class MultiObjectTracker:
         return valid_count >= required
 
     def update(self, detections: List[Detection], reset_mode: bool, g: float = 1.0) -> Dict[str, Any]:
-        # 0) Enter post-reset mode for all tracks when a global reset is triggered
+        # Hard reset: when reset_mode is triggered, all current tracks are dropped,
+        # matching starts from scratch, and no old IDs are reused.
         if reset_mode:
-            for trk in self.tracks:
-                trk.post_reset_mode = True
-                trk.post_reset_age = 0
-                trk.bad_kp_streak = 0
+            self.reset()
 
         # 1) Predict step
-        # - In post-reset mode we do not run Kalman prediction to avoid motion-gating bias
-        # - We still advance bookkeeping counters
         for trk in self.tracks:
-            if trk.post_reset_mode:
-                trk.age += 1
-                trk.time_since_update += 1
-                trk.post_reset_age += 1
-            else:
-                trk.predict()
+            trk.predict()
 
         # snapshot: row index -> track_id
         idx2tid = {i: t.track_id for i, t in enumerate(self.tracks)}
@@ -244,49 +233,14 @@ class MultiObjectTracker:
         for i_track, j_det in matches_idx:
             trk = self.tracks[i_track]
             det = detections[j_det]
-
-            has_core = self._has_base_keypoints(det, self.cfg.match.min_core_kps)
-
-            if not trk.post_reset_mode:
-                # Normal tracking update
-                trk.update(det, ema_alpha=self.cfg.match.emb_ema_alpha, update_app=True)
-
-            else:
-                # Post-reset warmup:
-                # - attach motion model only when keypoints are reliable
-                # - otherwise keep the track alive up to a patience limit
-                if has_core:
-                    trk.bad_kp_streak = 0
-
-                    # Attach Kalman state to the current observation
-                    trk.kf.reset(np.asarray(det.center, dtype=float), p0=float(self.cfg.p0))
-
-                    # Update stored pose/app state from this detection
-                    trk.update(det, ema_alpha=self.cfg.match.emb_ema_alpha, update_app=True)
-
-                    # Exit post-reset mode after the first reliable observation
-                    trk.post_reset_mode = False
-
-                else:
-                    trk.bad_kp_streak += 1
-
-                    if trk.bad_kp_streak <= int(self.cfg.bad_kp_patience):
-                        # Keep track alive but do not update Kalman/pose/app
-                        trk.time_since_update = 0
-                    else:
-                        # Patience exceeded: force attachment and exit post-reset mode
-                        trk.kf.reset(np.asarray(det.center, dtype=float), p0=float(self.cfg.p0))
-                        trk.update(det, ema_alpha=self.cfg.match.emb_ema_alpha, update_app=True)
-                        trk.post_reset_mode = False
-
+            trk.update(det, ema_alpha=self.cfg.match.emb_ema_alpha, update_app=True)
             id_pairs.append((trk.track_id, j_det))
 
-        # 4) Spawn new tracks (unchanged)
+        # 4) Spawn new tracks
         for j in um_det_idx:
-            if not reset_mode:
-                self.tracks.append(self._new_track(detections[j]))
+            self.tracks.append(self._new_track(detections[j]))
 
-        # 5) Remove dead (unchanged)
+        # 5) Remove dead
         self._remove_dead()
 
         unmatched_track_ids = [idx2tid[i] for i in um_tr_idx if i in idx2tid]

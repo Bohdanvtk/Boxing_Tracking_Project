@@ -23,7 +23,6 @@ class MatchConfig:
     keypoint_weights: Optional[np.ndarray]
     min_kp_conf: float
     greedy_threshold: float
-    greedy_reset_threshold: float
     emb_ema_alpha: float
     w_motion: float
     w_pose: float
@@ -268,57 +267,40 @@ def build_cost_matrix(
 
     log.create_matrix(n_t, n_d)
 
-    if reset_mode:
-        track_pose = [(None, None) for _ in tracks]
-        det_pose = [(None, None) for _ in detections]
-
-
-    else:
-        track_pose = [
-            _prepare_pose_for_distance(trk.last_keypoints, trk.last_kp_conf, cfg)
-            for trk in tracks
-        ]
-        det_pose = [
-            _prepare_pose_for_distance(det.keypoints, det.kp_conf, cfg)
-            for det in detections
-        ]
-
+    track_pose = [
+        _prepare_pose_for_distance(trk.last_keypoints, trk.last_kp_conf, cfg)
+        for trk in tracks
+    ]
+    det_pose = [
+        _prepare_pose_for_distance(det.keypoints, det.kp_conf, cfg)
+        for det in detections
+    ]
 
 
     for i, trk in enumerate(tracks):
         for j, det in enumerate(detections):
             cell = log[i, j]
 
-            if reset_mode or trk.post_reset_mode:
-                # ignore Kalman gating & motion
-                d2 = 0.0
-                allowed = True
-                d_motion_norm = 0.0
+            d_motion, allowed, d2 = _motion_cost_with_gating(trk, det, cfg, gating=True)
+            d_motion_norm = float(np.clip(d2 / max(cfg.chi2_gating, 1e-12), 0.0, 1.0))
 
-                # ignore pose entirely (neutral similarity cost)
-                pose_cost = 0.0
+            trk_kps, trk_conf = track_pose[i]
+            det_kps, det_conf = det_pose[j]
 
-            else:
-                d_motion, allowed, d2 = _motion_cost_with_gating(trk, det, cfg, gating=True)
-                d_motion_norm = float(np.clip(d2 / max(cfg.chi2_gating, 1e-12), 0.0, 1.0))
+            #picking common root index and normilize
 
-                trk_kps, trk_conf = track_pose[i]
-                det_kps, det_conf = det_pose[j]
+            root_idx = pick_shared_root(
+                trk_kps, det_kps,
+                trk_conf, det_conf,
+                cfg.pose_center,
+                cfg.min_kp_conf,
+            )
 
-                #picking common root index and normilize
-
-                root_idx = pick_shared_root(
-                    trk_kps, det_kps,
-                    trk_conf, det_conf,
-                    cfg.pose_center,
-                    cfg.min_kp_conf,
-                )
-
-                if root_idx is not None:
-                    trk_kps = normalize_pose_2d(trk_kps, root_idx)
-                    det_kps = normalize_pose_2d(det_kps, root_idx)
-                sim_pose = _pose_distance(trk_kps, trk_conf, det_kps, det_conf, cfg)
-                pose_cost = (1.0 - sim_pose) / 2.0
+            if root_idx is not None:
+                trk_kps = normalize_pose_2d(trk_kps, root_idx)
+                det_kps = normalize_pose_2d(det_kps, root_idx)
+            sim_pose = _pose_distance(trk_kps, trk_conf, det_kps, det_conf, cfg)
+            pose_cost = (1.0 - sim_pose) / 2.0
 
             cell.d_motion = float(d_motion_norm)
             cell.allowed = bool(allowed)
@@ -337,15 +319,11 @@ def build_cost_matrix(
 
             app_cost = (1.0 - sim_app) / 2.0
 
-            if reset_mode or trk.post_reset_mode:
-                # cost is just app_cost because is easier to adjust reset_threshold
-                cost =  app_cost
-            else:
-                cost = (
-                        cfg.w_motion * (g * d_motion_norm)
-                        + cfg.w_pose * pose_cost
-                        + cfg.w_app * app_cost
-                )
+            cost = (
+                    cfg.w_motion * (g * d_motion_norm)
+                    + cfg.w_pose * pose_cost
+                    + cfg.w_app * app_cost
+            )
 
             cell.d_pose = float(pose_cost)
             cell.d_app = float(app_cost)
@@ -363,68 +341,31 @@ def linear_assignment_with_unmatched(
     C: np.ndarray,
     large_cost: float,
     greedy_threshold: float,
-    greedy_reset_threshold: float,
-    track_post_reset: List[bool],
 ) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
-    """
-    Per-track greedy assignment:
-
-    - For each track (row), choose its own acceptance threshold:
-        * greedy_reset_threshold  if track_post_reset[r] == True
-        * greedy_threshold        otherwise
-    - Build list of all (track, det, cost) where:
-        * cost < large_cost (not gated)
-        * cost <= per-track threshold
-    - Sort edges by ascending cost
-    - Greedily pick smallest edges while enforcing one-to-one constraint
-    - Return matched pairs + unmatched tracks/detections
-
-    This implements "smaller cost = higher priority" with
-    track-specific thresholds.
-    """
-
     if C.size == 0:
-        # For empty cost matrix, still return valid index ranges
         return [], list(range(C.shape[0])), list(range(C.shape[1]))
 
     n_tracks, n_dets = C.shape
 
-    if len(track_post_reset) != n_tracks:
-        raise ValueError("track_post_reset must match number of tracks")
-
-    # Collect all candidate edges
     edges: List[Tuple[float, int, int]] = []
-
     for r in range(n_tracks):
-
-        # Select threshold individually per track
-        thr = greedy_reset_threshold if track_post_reset[r] else greedy_threshold
-
         for c in range(n_dets):
             cost = float(C[r, c])
-
-            # Skip invalid / gated entries
             if cost >= large_cost:
                 continue
-
-            # Apply per-track acceptance threshold
-            if cost > thr:
+            if cost > greedy_threshold:
                 continue
-
             edges.append((cost, r, c))
 
-    # Sort by increasing cost (best matches first)
     edges.sort(key=lambda x: x[0])
 
     matched: List[Tuple[int, int]] = []
     used_tracks = set()
     used_dets = set()
 
-    # Greedy selection with one-to-one constraint
     for cost, r, c in edges:
         if r in used_tracks or c in used_dets:
             continue
-
         matched.append((int(r), int(c)))
         used_tracks.add(r)
         used_dets.add(c)
@@ -433,7 +374,6 @@ def linear_assignment_with_unmatched(
     unmatched_dets = [j for j in range(n_dets) if j not in used_dets]
 
     return matched, unmatched_tracks, unmatched_dets
-
 
 
 def _load_match_config_from_yaml(config_path: Optional[Union[str, Path]] = None) -> MatchConfig:
@@ -470,15 +410,10 @@ def match_tracks_and_detections(
     )
 
 
-    #Cheking whether track has a post_reset_mode
-    track_post_reset = [t.post_reset_mode for t in tracks]
-
     matches, um_tr, um_dt = linear_assignment_with_unmatched(
         C=C,
         large_cost=cfg.large_cost,
         greedy_threshold=cfg.greedy_threshold,
-        greedy_reset_threshold=cfg.greedy_reset_threshold,
-        track_post_reset=track_post_reset,
     )
 
     return matches, um_tr, um_dt, C, log

@@ -6,7 +6,7 @@ from pathlib import Path
 from boxing_project.tracking.tracker import openpose_people_to_detections
 from boxing_project.shot_boundary.inference import ShotBoundaryInferencer, ShotBoundaryInferConfig
 from boxing_project.tracking.image_utils import keypoints_to_bbox, expand_bbox_xyxy, render_tracking_overlays
-from boxing_project.tracking.saving_utils import save_tracking_outputs
+from boxing_project.tracking.saving_utils import FragmentExporter, save_tracking_outputs
 
 
 """
@@ -191,6 +191,10 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
 
     app_embedder = AppearanceEmbedder(AppearanceEmbedConfig(model_path=app_emb_path))
 
+    fragment_exporter = None
+    if save_dir is not None:
+        fragment_exporter = FragmentExporter(save_dir / "fragments", min_hits=tracker.cfg.min_hits)
+
     sb_cfg = sb_cfg.get("shot_boundary", sb_cfg)
 
     sb = ShotBoundaryInferencer(
@@ -214,6 +218,9 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
         g = float(sb.update(img))
 
         reset_mode = (g < float(tracker.cfg.reset_g_threshold))
+
+        if reset_mode and fragment_exporter is not None:
+            fragment_exporter.save_tracks(tracker.get_active_tracks(confirmed_only=False), frame_idx=frame_idx)
 
         frame, log = process_frame(
             result, tracker, img,
