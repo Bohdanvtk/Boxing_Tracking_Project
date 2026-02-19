@@ -197,6 +197,8 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
 
     sb_cfg = sb_cfg.get("shot_boundary", sb_cfg)
 
+    prev_reset_mode = False
+
     sb = ShotBoundaryInferencer(
         ShotBoundaryInferConfig(
             resize_w=sb_cfg["resize"][0],
@@ -219,8 +221,8 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
 
         reset_mode = (g < float(tracker.cfg.reset_g_threshold))
 
-        if reset_mode and fragment_exporter is not None:
-            fragment_exporter.save_tracks(tracker.get_active_tracks(confirmed_only=False), frame_idx=frame_idx)
+        if reset_mode and not prev_reset_mode and fragment_exporter is not None:
+            fragment_exporter.save_tracks(tracker.get_segment_tracks(), frame_idx=frame_idx)
 
         frame, log = process_frame(
             result, tracker, img,
@@ -234,6 +236,8 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
         if debug:
             print_tracking_results(log, frame_idx)
 
+
+        prev_reset_mode = reset_mode
 
         if show_merge:
             frames.append(frame)

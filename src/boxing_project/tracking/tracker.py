@@ -131,6 +131,7 @@ class MultiObjectTracker:
             self.config_path = Path(config_path) if config_path is not None else None
 
         self.tracks: List[Track] = []
+        self._segment_tracks: Dict[int, Track] = {}
         self._next_id: int = 1
 
         raw = self.get_config_dict() or {}
@@ -151,6 +152,7 @@ class MultiObjectTracker:
         )
         trk = Track(track_id=self._next_id, kf=kf, min_hits=self.cfg.min_hits)
         self._next_id += 1
+        self._segment_tracks[trk.track_id] = trk
         trk.update(
             det,
             ema_alpha=self.cfg.match.emb_ema_alpha,
@@ -274,6 +276,10 @@ class MultiObjectTracker:
             return [t for t in self.tracks if t.confirmed and not t.is_dead(self.cfg.max_age)]
         return [t for t in self.tracks if not t.is_dead(self.cfg.max_age)]
 
+    def get_segment_tracks(self) -> List[Track]:
+        return list(self._segment_tracks.values())
+
     def reset(self):
         self.tracks.clear()
+        self._segment_tracks.clear()
         self._next_id = 1

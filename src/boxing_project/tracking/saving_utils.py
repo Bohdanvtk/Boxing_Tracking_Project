@@ -234,12 +234,13 @@ class FragmentExporter:
         fragment_dir.mkdir(parents=True, exist_ok=True)
         return fragment_dir
 
-    def save_tracks(self, tracks, frame_idx: int) -> Path | None:
-        eligible = [t for t in tracks if int(t.hits) > self.min_hits]
-        if not eligible:
-            return None
+    def save_tracks(self, tracks, frame_idx: int) -> Path:
+        tracks = list(tracks or [])
+        eligible = [t for t in tracks if int(getattr(t, "hits", 0)) > self.min_hits]
 
         fragment_dir = self.next_fragment()
+        saved_tracks = 0
+
         for trk in eligible:
             emb_history = list(getattr(trk, "app_emb_history", []) or [])
             if not emb_history:
@@ -251,5 +252,19 @@ class FragmentExporter:
             for emb_idx, emb in enumerate(emb_history):
                 out_name = f"crop_emb_{emb_idx:06d}.npy"
                 np.save(track_dir / out_name, np.asarray(emb, dtype=np.float32))
+
+            saved_tracks += 1
+
+        manifest = {
+            "frame_idx": int(frame_idx),
+            "min_hits": int(self.min_hits),
+            "tracks_total": int(len(tracks)),
+            "tracks_eligible": int(len(eligible)),
+            "tracks_saved": int(saved_tracks),
+        }
+        (fragment_dir / "fragment_info.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
         return fragment_dir
