@@ -72,6 +72,7 @@ class Track:
 
 """
     track_id: int
+    global_id: int
     kf: KalmanTracker
     min_hits: int
 

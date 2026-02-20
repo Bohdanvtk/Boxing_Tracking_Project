@@ -134,6 +134,7 @@ class MultiObjectTracker:
         self.tracks: List[Track] = []
         self._segment_tracks: Dict[int, Track] = {}
         self._next_id: int = 1
+        self._next_global_id: int = 1
         self._was_reset_mode: bool = False
 
         raw = self.get_config_dict() or {}
@@ -152,8 +153,9 @@ class MultiObjectTracker:
             measure_var=self.cfg.measure_var,
             p0=self.cfg.p0,
         )
-        trk = Track(track_id=self._next_id, kf=kf, min_hits=self.cfg.min_hits)
+        trk = Track(track_id=self._next_id, global_id=self._next_global_id, kf=kf, min_hits=self.cfg.min_hits)
         self._next_id += 1
+        self._next_global_id += 1
         self._segment_tracks[trk.track_id] = trk
         trk.update(
             det,
@@ -238,7 +240,7 @@ class MultiObjectTracker:
             trk = self.tracks[i_track]
             det = detections[j_det]
             trk.update(det, ema_alpha=self.cfg.match.emb_ema_alpha, update_app=True)
-            id_pairs.append((trk.track_id, j_det))
+            id_pairs.append((trk.global_id, j_det))
 
         # 4) Spawn new tracks
         for j in um_det_idx:
@@ -252,6 +254,7 @@ class MultiObjectTracker:
         active_tracks_summary = [
             {
                 "track_id": t.track_id,
+                "global_id": t.global_id,
                 "confirmed": t.confirmed,
                 "age": t.age,
                 "hits": t.hits,
@@ -287,3 +290,9 @@ class MultiObjectTracker:
         self.tracks.clear()
         self._segment_tracks.clear()
         self._next_id = 1
+
+    def remap_segment_global_ids(self, local_to_global: Dict[int, int]) -> None:
+        for trk in self._segment_tracks.values():
+            gid = local_to_global.get(int(trk.track_id))
+            if gid is not None:
+                trk.global_id = int(gid)

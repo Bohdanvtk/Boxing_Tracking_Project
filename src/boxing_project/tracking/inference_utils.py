@@ -189,7 +189,11 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
 
     fragment_exporter = None
     if save_dir is not None:
-        fragment_exporter = FragmentExporter(save_dir / "fragments", min_hits=tracker.cfg.min_hits)
+        fragment_exporter = FragmentExporter(
+            save_dir / "fragments",
+            min_hits=tracker.cfg.min_hits,
+            app_match_threshold=float(tracker.cfg.match.greedy_threshold),
+        )
 
     sb_cfg = sb_cfg.get("shot_boundary", sb_cfg)
 
@@ -218,7 +222,8 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
         reset_mode = (g < float(tracker.cfg.reset_g_threshold))
 
         if reset_mode and not prev_reset_mode and fragment_exporter is not None:
-            fragment_exporter.save_tracks(tracker.get_segment_tracks(), frame_idx=frame_idx)
+            _, local_to_global = fragment_exporter.save_tracks(tracker.get_segment_tracks(), frame_idx=frame_idx)
+            tracker.remap_segment_global_ids(local_to_global)
 
         frame, log = process_frame(
             result, tracker, img,

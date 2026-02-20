@@ -8,6 +8,8 @@ from typing import Any
 import cv2
 import numpy as np
 
+from boxing_project.tracking.matcher import average_app_embedding, assign_segment_global_ids
+
 
 def _json_safe(value):
     """Convert numpy/NaN values to JSON-safe Python objects."""
@@ -123,7 +125,7 @@ def _save_frame_debug(*, frame_dir: Path, detections, tracker, log: dict) -> Non
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     matches = {int(det_idx): int(track_id) for track_id, det_idx in log.get("matches", [])}
-    tracks_by_id = {int(t.track_id): t for t in tracker.tracks}
+    tracks_by_id = {int(getattr(t, "global_id", t.track_id)): t for t in tracker.tracks}
 
     _save_frame_debug_txt(
         debug_dir=debug_dir,
@@ -151,6 +153,7 @@ def _save_frame_debug(*, frame_dir: Path, detections, tracker, log: dict) -> Non
         if trk is not None:
             rec["track"] = {
                 "track_id": int(trk.track_id),
+                "global_id": int(getattr(trk, "global_id", trk.track_id)),
                 "confirmed": bool(trk.confirmed),
                 "age": int(trk.age),
                 "hits": int(trk.hits),
@@ -223,10 +226,14 @@ def save_tracking_outputs(
 
 
 class FragmentExporter:
-    def __init__(self, base_dir: Path, min_hits: int):
+    def __init__(self, base_dir: Path, min_hits: int, app_match_threshold: float = 0.35):
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.min_hits = int(min_hits)
+        self.app_match_threshold = float(app_match_threshold)
+        self.large_cost = 1e6
+        self.global_gallery: dict[int, np.ndarray] = {}
+        self.next_global_id: int = 1
 
         max_idx = 0
         for p in self.base_dir.glob("fragment_*"):
@@ -241,9 +248,26 @@ class FragmentExporter:
         fragment_dir.mkdir(parents=True, exist_ok=True)
         return fragment_dir
 
-    def save_tracks(self, tracks, frame_idx: int) -> Path:
+    def save_tracks(self, tracks, frame_idx: int) -> tuple[Path, dict[int, int]]:
         tracks = list(tracks or [])
         eligible = [t for t in tracks if int(getattr(t, "hits", 0)) > self.min_hits]
+
+        segment_avg_embs: dict[int, np.ndarray] = {}
+        for trk in eligible:
+            emb = average_app_embedding(getattr(trk, "app_emb_history", []) or [])
+            if emb is not None:
+                segment_avg_embs[int(trk.track_id)] = emb
+
+        local_to_global, updated_gallery, next_global_id, audit = assign_segment_global_ids(
+            prev_gallery=self.global_gallery,
+            segment_tracks=segment_avg_embs,
+            next_global_id=self.next_global_id,
+            large_cost=self.large_cost,
+            greedy_threshold=self.app_match_threshold,
+        )
+
+        self.global_gallery = updated_gallery
+        self.next_global_id = next_global_id
 
         fragment_dir = self.next_fragment()
         saved_tracks = 0
@@ -253,12 +277,31 @@ class FragmentExporter:
             if not emb_history:
                 continue
 
-            track_dir = fragment_dir / f"Track_{int(trk.track_id)}"
+            global_id = int(local_to_global.get(int(trk.track_id), int(getattr(trk, "global_id", trk.track_id))))
+            track_dir = fragment_dir / f"Track_{global_id}"
             track_dir.mkdir(parents=True, exist_ok=True)
 
             for emb_idx, emb in enumerate(emb_history):
                 out_name = f"crop_emb_{emb_idx:06d}.npy"
                 np.save(track_dir / out_name, np.asarray(emb, dtype=np.float32))
+
+            mean_emb = average_app_embedding(emb_history)
+            if mean_emb is not None:
+                np.save(track_dir / "avg_app_emb.npy", np.asarray(mean_emb, dtype=np.float32))
+
+            (track_dir / "track_info.json").write_text(
+                json.dumps(
+                    {
+                        "local_track_id": int(trk.track_id),
+                        "global_track_id": global_id,
+                        "hits": int(getattr(trk, "hits", 0)),
+                        "emb_count": int(len(emb_history)),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
 
             saved_tracks += 1
 
@@ -268,10 +311,24 @@ class FragmentExporter:
             "tracks_total": int(len(tracks)),
             "tracks_eligible": int(len(eligible)),
             "tracks_saved": int(saved_tracks),
+            "local_to_global": {str(k): int(v) for k, v in local_to_global.items()},
+            "matching": audit,
         }
         (fragment_dir / "fragment_info.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
-        return fragment_dir
+        (self.base_dir / "global_gallery.json").write_text(
+            json.dumps(
+                {
+                    "next_global_id": int(self.next_global_id),
+                    "global_ids": sorted([int(k) for k in self.global_gallery.keys()]),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        return fragment_dir, local_to_global

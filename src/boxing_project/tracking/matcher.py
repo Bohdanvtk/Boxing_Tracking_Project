@@ -52,6 +52,114 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 
+
+
+def linear_assignment_with_unmatched(
+    C: np.ndarray,
+    large_cost: float,
+    greedy_threshold: float,
+) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
+    if C.size == 0:
+        return [], list(range(C.shape[0])), list(range(C.shape[1]))
+
+    n_tracks, n_dets = C.shape
+    edges: List[Tuple[float, int, int]] = []
+    for r in range(n_tracks):
+        for c in range(n_dets):
+            cost = float(C[r, c])
+            if cost >= large_cost or cost > greedy_threshold:
+                continue
+            edges.append((cost, r, c))
+
+    edges.sort(key=lambda x: x[0])
+
+    matched: List[Tuple[int, int]] = []
+    used_tracks = set()
+    used_dets = set()
+
+    for cost, r, c in edges:
+        if r in used_tracks or c in used_dets:
+            continue
+        matched.append((int(r), int(c)))
+        used_tracks.add(r)
+        used_dets.add(c)
+
+    unmatched_tracks = [i for i in range(n_tracks) if i not in used_tracks]
+    unmatched_dets = [j for j in range(n_dets) if j not in used_dets]
+    return matched, unmatched_tracks, unmatched_dets
+
+
+def average_app_embedding(embeddings) -> Optional[np.ndarray]:
+    arr = [np.asarray(e, dtype=np.float32).reshape(-1) for e in embeddings if e is not None]
+    if not arr:
+        return None
+    return np.mean(np.stack(arr, axis=0), axis=0, dtype=np.float32)
+
+
+def build_app_emb_matrix(
+    prev_global_embs: List[np.ndarray],
+    segment_track_embs: List[np.ndarray],
+    *,
+    large_cost: float,
+) -> np.ndarray:
+    if not prev_global_embs or not segment_track_embs:
+        return np.zeros((len(prev_global_embs), len(segment_track_embs)), dtype=np.float32)
+
+    C = np.full((len(prev_global_embs), len(segment_track_embs)), float(large_cost), dtype=np.float32)
+    for i, e_prev in enumerate(prev_global_embs):
+        for j, e_seg in enumerate(segment_track_embs):
+            sim = cosine_similarity(e_prev, e_seg)
+            C[i, j] = (1.0 - sim) / 2.0
+    return C
+
+
+def assign_segment_global_ids(
+    *,
+    prev_gallery,
+    segment_tracks,
+    next_global_id: int,
+    large_cost: float,
+    greedy_threshold: float,
+):
+    local_to_global = {}
+
+    prev_ids = sorted(prev_gallery.keys())
+    prev_embs = [prev_gallery[gid] for gid in prev_ids]
+
+    local_ids = sorted(segment_tracks.keys())
+    seg_embs = [segment_tracks[lid] for lid in local_ids]
+
+    C = build_app_emb_matrix(prev_embs, seg_embs, large_cost=large_cost)
+    matches, _, um_seg = linear_assignment_with_unmatched(
+        C=C,
+        large_cost=large_cost,
+        greedy_threshold=greedy_threshold,
+    )
+
+    updated_gallery = dict(prev_gallery)
+
+    for i_prev, j_seg in matches:
+        gid = int(prev_ids[i_prev])
+        lid = int(local_ids[j_seg])
+        local_to_global[lid] = gid
+        updated_gallery[gid] = seg_embs[j_seg]
+
+    for j_seg in um_seg:
+        lid = int(local_ids[j_seg])
+        gid = int(next_global_id)
+        next_global_id += 1
+        local_to_global[lid] = gid
+        updated_gallery[gid] = seg_embs[j_seg]
+
+    audit = {
+        "prev_global_ids": prev_ids,
+        "segment_local_ids": local_ids,
+        "cost_matrix": C.tolist(),
+        "matches": [[int(prev_ids[i]), int(local_ids[j])] for i, j in matches],
+        "local_to_global": {str(k): int(v) for k, v in local_to_global.items()},
+    }
+    return local_to_global, updated_gallery, next_global_id, audit
+
 def get_common_valid_joints(
     kpt_t: np.ndarray,
     kpt_d: np.ndarray,
@@ -336,44 +444,6 @@ def build_cost_matrix(
     return C, log
 
 
-
-def linear_assignment_with_unmatched(
-    C: np.ndarray,
-    large_cost: float,
-    greedy_threshold: float,
-) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
-    if C.size == 0:
-        return [], list(range(C.shape[0])), list(range(C.shape[1]))
-
-    n_tracks, n_dets = C.shape
-
-    edges: List[Tuple[float, int, int]] = []
-    for r in range(n_tracks):
-        for c in range(n_dets):
-            cost = float(C[r, c])
-            if cost >= large_cost:
-                continue
-            if cost > greedy_threshold:
-                continue
-            edges.append((cost, r, c))
-
-    edges.sort(key=lambda x: x[0])
-
-    matched: List[Tuple[int, int]] = []
-    used_tracks = set()
-    used_dets = set()
-
-    for cost, r, c in edges:
-        if r in used_tracks or c in used_dets:
-            continue
-        matched.append((int(r), int(c)))
-        used_tracks.add(r)
-        used_dets.add(c)
-
-    unmatched_tracks = [i for i in range(n_tracks) if i not in used_tracks]
-    unmatched_dets = [j for j in range(n_dets) if j not in used_dets]
-
-    return matched, unmatched_tracks, unmatched_dets
 
 
 def _load_match_config_from_yaml(config_path: Optional[Union[str, Path]] = None) -> MatchConfig:
