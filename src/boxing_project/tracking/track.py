@@ -149,7 +149,7 @@ class Track:
         """
         return
 
-    def is_dead(self, max_age: int) -> bool:
+    def is_dead(self, max_age: int, max_confirmed_age) -> bool:
         """
         Determine whether this track should be removed.
 
@@ -164,6 +164,10 @@ class Track:
             bool
                 True if the track should be removed.
         """
+
+        if self.confirmed:
+            return  self.time_since_update > max_confirmed_age
+
         return self.time_since_update > max_age
 
     @property

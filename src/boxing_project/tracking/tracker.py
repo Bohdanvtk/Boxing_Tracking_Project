@@ -21,6 +21,7 @@ class TrackerConfig:
     measure_var: float
     p0: float
     max_age: int
+    max_confirmed_age: int
     min_hits: int
     match: MatchConfig
     min_kp_conf: float
@@ -162,7 +163,7 @@ class MultiObjectTracker:
         return trk
 
     def _remove_dead(self):
-        self.tracks = [t for t in self.tracks if not t.is_dead(self.cfg.max_age)]
+        self.tracks = [t for t in self.tracks if not t.is_dead(self.cfg.max_age, self.cfg.max_age)]
 
     def _has_base_keypoints(self, det: Detection, min_core_kps: Optional[int] = None) -> bool:
         """
@@ -259,7 +260,7 @@ class MultiObjectTracker:
                 "pos": t.pos(),
             }
             for t in self.tracks
-            if not t.is_dead(self.cfg.max_age)
+            if not t.is_dead(self.cfg.max_age, self.cfg.max_confirmed_age)
         ]
 
         self._was_reset_mode = bool(reset_mode)
@@ -276,8 +277,8 @@ class MultiObjectTracker:
 
     def get_active_tracks(self, confirmed_only: bool = True) -> List[Track]:
         if confirmed_only:
-            return [t for t in self.tracks if t.confirmed and not t.is_dead(self.cfg.max_age)]
-        return [t for t in self.tracks if not t.is_dead(self.cfg.max_age)]
+            return [t for t in self.tracks if t.confirmed and not t.is_dead(self.cfg.max_age, self.cfg.max_confirmed_age)]
+        return [t for t in self.tracks if not t.is_dead(self.cfg.max_age, self.cfg.max_confirmed_age)]
 
     def get_segment_tracks(self) -> List[Track]:
         return list(self._segment_tracks.values())
