@@ -6,7 +6,7 @@ from pathlib import Path
 from boxing_project.tracking.tracker import openpose_people_to_detections
 from boxing_project.shot_boundary.inference import ShotBoundaryInferencer, ShotBoundaryInferConfig
 from boxing_project.tracking.image_utils import keypoints_to_bbox, expand_bbox_xyxy, render_tracking_overlays
-from boxing_project.tracking.saving_utils import save_tracking_outputs
+from boxing_project.tracking.saving_utils import FragmentExporter, save_tracking_outputs
 
 
 """
@@ -88,10 +88,6 @@ def preprocess_image(opWrapper, img_path: Path, save_width: int, return_img=Fals
     if return_img:
         return datums[0], img
     return datums[0]
-
-
-
-
 
 
 
@@ -191,7 +187,13 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
 
     app_embedder = AppearanceEmbedder(AppearanceEmbedConfig(model_path=app_emb_path))
 
+    fragment_exporter = None
+    if save_dir is not None:
+        fragment_exporter = FragmentExporter(save_dir / "fragments", min_hits=tracker.cfg.min_hits)
+
     sb_cfg = sb_cfg.get("shot_boundary", sb_cfg)
+
+    prev_reset_mode = False
 
     sb = ShotBoundaryInferencer(
         ShotBoundaryInferConfig(
@@ -215,6 +217,9 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
 
         reset_mode = (g < float(tracker.cfg.reset_g_threshold))
 
+        if reset_mode and not prev_reset_mode and fragment_exporter is not None:
+            fragment_exporter.save_tracks(tracker.get_segment_tracks(), frame_idx=frame_idx)
+
         frame, log = process_frame(
             result, tracker, img,
             tracker.cfg.min_kp_conf,
@@ -227,6 +232,8 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
         if debug:
             print_tracking_results(log, frame_idx)
 
+
+        prev_reset_mode = reset_mode
 
         if show_merge:
             frames.append(frame)

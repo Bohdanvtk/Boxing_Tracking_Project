@@ -30,7 +30,6 @@ def make_match_config(cfg: dict) -> MatchConfig:
     large_cost = float(_get(cfg, "tracking.matching.large_cost", 1e6))
     min_kp_conf = float(_get(cfg, "tracking.matching.min_kp_conf", 0.05))
     greedy_threshold = float(_get(cfg, "tracking.matching.greedy_threshold", 2.8))
-    greedy_reset_threshold = float(_get(cfg, "tracking.matching.greedy_reset_threshold", 1))
     emb_ema_alpha = float(_get(cfg, "tracking.matching.emb_ema_alpha", 0.9))
     keypoint_weights = _get(cfg, "tracking.matching.keypoint_weights", None)
     w_motion = _get(cfg, "tracking.matching.w_motion", 3)
@@ -57,7 +56,6 @@ def make_match_config(cfg: dict) -> MatchConfig:
         keypoint_weights=keypoint_weights,
         w_motion=w_motion,
         greedy_threshold=greedy_threshold,
-        greedy_reset_threshold=greedy_reset_threshold,
         emb_ema_alpha=emb_ema_alpha,
         w_pose=w_pose,
         w_app=w_app,
@@ -85,11 +83,10 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
     save_log = bool(_get(cfg, "tracking.save_log", True))
 
     max_age = int(_get(cfg, "tracking.tracker.max_age", 10))
-    post_reset_max_age = int(_get(cfg, "tracking.tracker.post_reset_max_age", 10))
+    max_confirmed_age = int(_get(cfg, "tracking.tracker.max_confirmed_age", 40))
     min_hits = int(_get(cfg, "tracking.tracker.min_hits", 3))
     min_kp_conf = float(_get(cfg, "tracking.tracker.min_kp_conf", 0.05))
     reset_g_threshold = float(_get(cfg, "tracking.tracker.reset_g_threshold", 0.7))
-    bad_kp_patience =  int(_get(cfg, "tracking.matching.bad_kp_patience", 3))
 
     return TrackerConfig(
         dt=dt,
@@ -97,17 +94,13 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
         measure_var=measure_var,
         p0=p0,
         max_age=max_age,
-        post_reset_max_age=post_reset_max_age,
+        max_confirmed_age=max_confirmed_age,
         min_hits=min_hits,
         match=match_cfg,
         min_kp_conf=min_kp_conf,
         reset_g_threshold=reset_g_threshold,
         debug=debug,
         save_log=save_log,
-        bad_kp_patience=bad_kp_patience,
-
-
-
     )
 
 

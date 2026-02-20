@@ -16,9 +16,9 @@ tracking:
     chi2_gating: 9.21         # Chi-square gating threshold for Kalman distance.
                               # Lower → stricter gating, fewer candidates
     pose_scale_eps: 1.0e-6    # Small epsilon to avoid division by zero in pose normalization
-    greedy_threshold: 1.6     # Cost threshold for accepting matches in normal mode
-    greedy_reset_threshold: 0.002026  # Stricter threshold used in reset_mode (appearance-only matching)
-    emb_ema_alpha: 0.9        # Ema param which corresponds to speed of acquisition of a new information
+    greedy_threshold: 5.1     # Cost threshold for accepting matches in normal mode
+
+    emb_ema_alpha: 0.9       # Ema param which corresponds to speed of acquisition of a new information
     bad_kp_patience: 50         # how much time algorithm should wait to update ema, kalman and pose
     large_cost: 880.0         # Sentinel value for invalid / gated-out matches
     min_kp_conf: 0.05         # Minimum confidence for a keypoint to be considered valid
@@ -52,9 +52,9 @@ tracking:
       - 5    # Left Shoulder
 
   tracker:
-    max_age: 25               # How many frames a track can survive without matching
-    post_reset_max_age: 100   # How many frames a track can survive without matching in post_reset_mode
-    min_hits: 200             # Number of successful matches required to confirm a track
+    max_age: 25             # How many frames a track can survive without matching
+    max_confirmed_age : 75  # How many frames a confirmed track can survive without matching
+    min_hits: 50             # Number of successful matches required to confirm a track
     min_kp_conf: 0.05         # Minimum keypoint confidence when updating track pose
     reset_g_threshold: 0.32    # If g < this value → reset_mode is activated
                               # (ignore motion & pose, match only by appearance)

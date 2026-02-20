@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -154,9 +155,6 @@ def _save_frame_debug(*, frame_dir: Path, detections, tracker, log: dict) -> Non
                 "age": int(trk.age),
                 "hits": int(trk.hits),
                 "time_since_update": int(trk.time_since_update),
-                "post_reset_mode": bool(trk.post_reset_mode),
-                "post_reset_age": int(trk.post_reset_age),
-                "bad_kp_streak": int(trk.bad_kp_streak),
                 "center": [float(x) for x in trk.pos()],
                 "state": np.asarray(trk.state, dtype=float).tolist(),
                 "last_det_center": [float(x) for x in trk.last_det_center] if trk.last_det_center is not None else None,
@@ -222,3 +220,58 @@ def save_tracking_outputs(
             kp_conf=det.kp_conf,
             conf_th=conf_th,
         )
+
+
+class FragmentExporter:
+    def __init__(self, base_dir: Path, min_hits: int):
+        self.base_dir = Path(base_dir)
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.min_hits = int(min_hits)
+
+        max_idx = 0
+        for p in self.base_dir.glob("fragment_*"):
+            m = re.match(r"fragment_(\d+)$", p.name)
+            if m:
+                max_idx = max(max_idx, int(m.group(1)))
+        self.fragment_idx = max_idx
+
+    def next_fragment(self) -> Path:
+        self.fragment_idx += 1
+        fragment_dir = self.base_dir / f"fragment_{self.fragment_idx}"
+        fragment_dir.mkdir(parents=True, exist_ok=True)
+        return fragment_dir
+
+    def save_tracks(self, tracks, frame_idx: int) -> Path:
+        tracks = list(tracks or [])
+        eligible = [t for t in tracks if int(getattr(t, "hits", 0)) > self.min_hits]
+
+        fragment_dir = self.next_fragment()
+        saved_tracks = 0
+
+        for trk in eligible:
+            emb_history = list(getattr(trk, "app_emb_history", []) or [])
+            if not emb_history:
+                continue
+
+            track_dir = fragment_dir / f"Track_{int(trk.track_id)}"
+            track_dir.mkdir(parents=True, exist_ok=True)
+
+            for emb_idx, emb in enumerate(emb_history):
+                out_name = f"crop_emb_{emb_idx:06d}.npy"
+                np.save(track_dir / out_name, np.asarray(emb, dtype=np.float32))
+
+            saved_tracks += 1
+
+        manifest = {
+            "frame_idx": int(frame_idx),
+            "min_hits": int(self.min_hits),
+            "tracks_total": int(len(tracks)),
+            "tracks_eligible": int(len(eligible)),
+            "tracks_saved": int(saved_tracks),
+        }
+        (fragment_dir / "fragment_info.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        return fragment_dir
