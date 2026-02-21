@@ -135,6 +135,8 @@ class MultiObjectTracker:
         self._segment_tracks: Dict[int, Track] = {}
         self._next_id: int = 1
         self._was_reset_mode: bool = False
+        self._epoch_id: int = 1
+        self._epoch_tracks: Dict[int, Dict[int, Track]] = {self._epoch_id: {}}
 
         raw = self.get_config_dict() or {}
         self.debug: bool = bool(raw.get("tracking", {}).get("debug", False))
@@ -152,9 +154,10 @@ class MultiObjectTracker:
             measure_var=self.cfg.measure_var,
             p0=self.cfg.p0,
         )
-        trk = Track(track_id=self._next_id, kf=kf, min_hits=self.cfg.min_hits)
+        trk = Track(track_id=self._next_id, kf=kf, min_hits=self.cfg.min_hits, epoch_id=self._epoch_id)
         self._next_id += 1
         self._segment_tracks[trk.track_id] = trk
+        self._epoch_tracks.setdefault(self._epoch_id, {})[trk.track_id] = trk
         trk.update(
             det,
             ema_alpha=self.cfg.match.emb_ema_alpha,
@@ -267,6 +270,7 @@ class MultiObjectTracker:
 
         return {
             "matches": id_pairs,
+            "epoch_id": int(self._epoch_id),
             "unmatched_track_ids": unmatched_track_ids,
             "unmatched_det_indices": um_det_idx,
             "cost_matrix": C,
@@ -287,3 +291,9 @@ class MultiObjectTracker:
         self.tracks.clear()
         self._segment_tracks.clear()
         self._next_id = 1
+
+        self._epoch_id += 1
+        self._epoch_tracks[self._epoch_id] = {}
+
+    def get_epoch_tracks(self) -> Dict[int, Dict[int, Track]]:
+        return {epoch_id: dict(tracks_by_id) for epoch_id, tracks_by_id in self._epoch_tracks.items()}

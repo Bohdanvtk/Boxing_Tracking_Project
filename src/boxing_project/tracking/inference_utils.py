@@ -2,11 +2,13 @@ import os
 import sys
 import cv2
 import numpy as np
+from dataclasses import dataclass
 from pathlib import Path
 from boxing_project.tracking.tracker import openpose_people_to_detections
 from boxing_project.shot_boundary.inference import ShotBoundaryInferencer, ShotBoundaryInferConfig
 from boxing_project.tracking.image_utils import keypoints_to_bbox, expand_bbox_xyxy, render_tracking_overlays
 from boxing_project.tracking.saving_utils import FragmentExporter, save_tracking_outputs
+from boxing_project.tracking.matcher import build_global_track_mapping
 
 
 """
@@ -93,78 +95,62 @@ def preprocess_image(opWrapper, img_path: Path, save_width: int, return_img=Fals
 
 
 
-def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, frame_idx: int, reset_mode: bool
-                  , save_dir: Path | None):
+@dataclass
+class FrameTrackingResult:
+    frame_idx: int
+    original_img: np.ndarray
+    detections: list
+    log: dict
+
+
+def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, reset_mode: bool):
     """
-    Convert OpenPose output to tracker input, compute embeddings, update tracker, draw results.
-    Returns processed_frame, log_dict.
+    Convert OpenPose output to tracker input and run tracking update.
+    Returns detections + log without drawing (global IDs are drawn after full sequence).
     """
-    frame = original_img.copy()
-    h, w = frame.shape[:2]
 
     if result.poseKeypoints is None:
-        return frame, {
+        return [], {
             "matches": [],
             "cost_matrix": np.zeros((0, 0)),
             "active_tracks": [],
+            "epoch_id": int(getattr(tracker, "_epoch_id", 1)),
         }
 
     kps = result.poseKeypoints  # (N_people, K, 3)
     n_people = len(kps)
+    h, w = original_img.shape[:2]
 
-    # 1) people list (raw for detector->detection)
     people = [{"keypoints": kps[i]} for i in range(n_people)]
 
-    # 2) bbox list (index == OpenPose person index)
-    # expand slightly for ReID crops: +10% width, +15% height
     bboxes = []
     for i in range(n_people):
         bb = keypoints_to_bbox(kps[i], conf_th)
         bb = expand_bbox_xyxy(bb, img_w=w, img_h=h, width_ratio=0.10, height_ratio=0.15)
         bboxes.append(bb)
 
-    # 3) attach bbox to raw person so it survives into det.meta["raw"]
     for i in range(n_people):
         people[i]["bbox"] = bboxes[i]
 
-    # 4) build detections
     detections = openpose_people_to_detections(
         people,
         min_kp_conf=tracker.cfg.min_kp_conf,
     )
 
-    # 5) compute embeddings and store into det.meta
-    #    det.meta already has {"raw": person} from openpose_people_to_detections
     for det in detections:
         raw = det.meta.get("raw", {})
         bbox = raw.get("bbox", None)
 
-        # appearance embedding
         if app_embedder is not None and bbox is not None:
             try:
-                det.meta["e_app"] = app_embedder.embed(frame, bbox)
+                det.meta["e_app"] = app_embedder.embed(original_img, bbox)
             except Exception as e:
                 det.meta["e_app"] = None
                 det.meta["e_app_error"] = str(e)
 
-    # 6) update tracker using detections (now they contain embeddings)
     log = tracker.update(detections, g=g, reset_mode=reset_mode)
+    return detections, log
 
-    render_tracking_overlays(frame=frame, detections=detections, matches=log.get("matches", []), frame_idx=frame_idx)
-
-    if save_dir is not None:
-        save_tracking_outputs(
-            save_dir=save_dir,
-            frame_idx=frame_idx,
-            original_frame=original_img,
-            processed_frame=frame,
-            detections=detections,
-            log=log,
-            conf_th=conf_th,
-            tracker=tracker,
-        )
-
-    return frame, log
 
 def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, save_width, merge_n,
                     save_dir: Path | None):
@@ -174,8 +160,7 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
     save_log = tracker.cfg.save_log
 
     show_merge = merge_n > 0
-    frames = []
-    count = 0
+    frame_results: list[FrameTrackingResult] = []
 
     if debug or save_log:
         from boxing_project.tracking.tracking_debug import (
@@ -220,13 +205,21 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
         if reset_mode and not prev_reset_mode and fragment_exporter is not None:
             fragment_exporter.save_tracks(tracker.get_segment_tracks(), frame_idx=frame_idx)
 
-        frame, log = process_frame(
+        detections, log = process_frame(
             result, tracker, img,
             tracker.cfg.min_kp_conf,
             app_embedder,
-            g=g, frame_idx=frame_idx,
-            save_dir=save_dir,
+            g=g,
             reset_mode=reset_mode
+        )
+
+        frame_results.append(
+            FrameTrackingResult(
+                frame_idx=frame_idx,
+                original_img=img.copy(),
+                detections=detections,
+                log=log,
+            )
         )
 
         if debug:
@@ -235,16 +228,52 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
 
         prev_reset_mode = reset_mode
 
-        if show_merge:
-            frames.append(frame)
-            count += 1
+    local_to_global = build_global_track_mapping(
+        epoch_tracks=tracker.get_epoch_tracks(),
+        large_cost=float(tracker.cfg.match.large_cost),
+        greedy_threshold=float(tracker.cfg.match.greedy_threshold),
+    )
 
-            if count == merge_n:
-                _show_merged(frames, merge_n)
-                frames = []
-                count = 0
+    rendered_frames = []
+    for result in frame_results:
+        frame = result.original_img.copy()
 
-    print(f"[INFO] {frame_idx} frames were processed")
+        global_matches = []
+        for local_track_id, det_idx in result.log.get("matches", []):
+            gid = local_to_global.get((int(result.log.get("epoch_id", 1)), int(local_track_id)), int(local_track_id))
+            global_matches.append((int(gid), int(det_idx)))
+
+        render_tracking_overlays(
+            frame=frame,
+            detections=result.detections,
+            matches=global_matches,
+            frame_idx=result.frame_idx,
+            use_global_ids=True,
+        )
+
+        if save_dir is not None:
+            out_log = dict(result.log)
+            out_log["global_matches"] = global_matches
+            save_tracking_outputs(
+                save_dir=save_dir,
+                frame_idx=result.frame_idx,
+                original_frame=result.original_img,
+                processed_frame=frame,
+                detections=result.detections,
+                log=out_log,
+                conf_th=tracker.cfg.min_kp_conf,
+                tracker=tracker,
+            )
+
+        rendered_frames.append(frame)
+
+    if show_merge and rendered_frames:
+        for i in range(0, len(rendered_frames), merge_n):
+            chunk = rendered_frames[i:i + merge_n]
+            if chunk:
+                _show_merged(chunk, len(chunk))
+
+    print(f"[INFO] {len(frame_results)} frames were processed")
 
 
 def _show_merged(frames, n):

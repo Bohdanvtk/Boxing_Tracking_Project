@@ -74,6 +74,7 @@ class Track:
     track_id: int
     kf: KalmanTracker
     min_hits: int
+    epoch_id: int = 1
 
     age: int = 0
 

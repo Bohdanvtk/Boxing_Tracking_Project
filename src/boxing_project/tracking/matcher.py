@@ -376,6 +376,93 @@ def linear_assignment_with_unmatched(
     return matched, unmatched_tracks, unmatched_dets
 
 
+
+
+def _track_mean_embedding(track: Track) -> Optional[np.ndarray]:
+    emb_history = list(getattr(track, "app_emb_history", []) or [])
+    if not emb_history:
+        return None
+
+    embs = np.asarray(emb_history, dtype=np.float32)
+    if embs.ndim != 2 or embs.shape[0] == 0:
+        return None
+
+    mean_emb = embs.mean(axis=0)
+    norm = float(np.linalg.norm(mean_emb))
+    if norm > 1e-8:
+        mean_emb = mean_emb / norm
+    return mean_emb.astype(np.float32)
+
+
+def build_global_track_mapping(
+    epoch_tracks: dict[int, dict[int, Track]],
+    large_cost: float,
+    greedy_threshold: float,
+) -> dict[tuple[int, int], int]:
+    """
+    Build mapping (epoch_id, local_track_id) -> global_track_id after all frames are processed.
+
+    Matching is done epoch-by-epoch against accumulated global track prototypes
+    using `linear_assignment_with_unmatched`.
+    """
+    local_to_global: dict[tuple[int, int], int] = {}
+    global_embs: dict[int, np.ndarray] = {}
+    next_global_id = 1
+
+    for epoch_id in sorted(epoch_tracks.keys()):
+        tracks_by_id = epoch_tracks.get(epoch_id, {})
+        candidates: list[tuple[int, np.ndarray]] = []
+
+        for local_id, trk in sorted(tracks_by_id.items()):
+            mean_emb = _track_mean_embedding(trk)
+            if mean_emb is None:
+                continue
+            candidates.append((int(local_id), mean_emb))
+
+        if not candidates:
+            continue
+
+        if not global_embs:
+            for local_id, emb in candidates:
+                gid = next_global_id
+                next_global_id += 1
+                global_embs[gid] = emb
+                local_to_global[(int(epoch_id), int(local_id))] = gid
+            continue
+
+        global_ids = sorted(global_embs.keys())
+        candidate_embs = np.asarray([x[1] for x in candidates], dtype=np.float32)
+        prototype_embs = np.asarray([global_embs[gid] for gid in global_ids], dtype=np.float32)
+
+        sim = candidate_embs @ prototype_embs.T
+        C = ((1.0 - sim) / 2.0).astype(np.float32)
+
+        matches, um_tracks, _ = linear_assignment_with_unmatched(
+            C=C,
+            large_cost=float(large_cost),
+            greedy_threshold=float(greedy_threshold),
+        )
+
+        for r, c in matches:
+            local_id, emb = candidates[r]
+            gid = global_ids[c]
+            local_to_global[(int(epoch_id), int(local_id))] = gid
+
+            updated = 0.5 * global_embs[gid] + 0.5 * emb
+            norm = float(np.linalg.norm(updated))
+            if norm > 1e-8:
+                updated = updated / norm
+            global_embs[gid] = updated.astype(np.float32)
+
+        for r in um_tracks:
+            local_id, emb = candidates[r]
+            gid = next_global_id
+            next_global_id += 1
+            global_embs[gid] = emb
+            local_to_global[(int(epoch_id), int(local_id))] = gid
+
+    return local_to_global
+
 def _load_match_config_from_yaml(config_path: Optional[Union[str, Path]] = None) -> MatchConfig:
     from boxing_project.utils.config import load_tracking_config
     resolved = Path(config_path) if config_path is not None else DEFAULT_TRACKING_CONFIG_PATH
