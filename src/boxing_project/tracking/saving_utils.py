@@ -123,6 +123,7 @@ def _save_frame_debug(*, frame_dir: Path, detections, tracker, log: dict) -> Non
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     matches = {int(det_idx): int(track_id) for track_id, det_idx in log.get("matches", [])}
+    global_matches = {int(det_idx): int(track_id) for track_id, det_idx in log.get("global_matches", [])}
     tracks_by_id = {int(t.track_id): t for t in tracker.tracks}
 
     _save_frame_debug_txt(
@@ -135,6 +136,7 @@ def _save_frame_debug(*, frame_dir: Path, detections, tracker, log: dict) -> Non
         raw = det.meta.get("raw", {}) if isinstance(det.meta, dict) else {}
         bbox = raw.get("bbox", None)
         track_id = matches.get(det_idx)
+        global_track_id = global_matches.get(det_idx)
         trk = tracks_by_id.get(track_id) if track_id is not None else None
 
         rec: dict[str, Any] = {
@@ -145,6 +147,7 @@ def _save_frame_debug(*, frame_dir: Path, detections, tracker, log: dict) -> Non
             "has_e_app": bool(det.meta.get("e_app") is not None),
             "e_app_error": det.meta.get("e_app_error", None) if isinstance(det.meta, dict) else None,
             "matched_track_id": int(track_id) if track_id is not None else None,
+            "matched_global_track_id": int(global_track_id) if global_track_id is not None else None,
             "track": None,
         }
 
@@ -249,16 +252,19 @@ class FragmentExporter:
         saved_tracks = 0
 
         for trk in eligible:
+            crop_history = list(getattr(trk, "app_crop_history", []) or [])
             emb_history = list(getattr(trk, "app_emb_history", []) or [])
-            if not emb_history:
+            if not crop_history and not emb_history:
                 continue
 
             track_dir = fragment_dir / f"Track_{int(trk.track_id)}"
             track_dir.mkdir(parents=True, exist_ok=True)
 
-            for emb_idx, emb in enumerate(emb_history):
-                out_name = f"crop_emb_{emb_idx:06d}.npy"
-                np.save(track_dir / out_name, np.asarray(emb, dtype=np.float32))
+            for crop_idx, crop in enumerate(crop_history):
+                if crop is None:
+                    continue
+                out_name = f"crop_{crop_idx:06d}.jpg"
+                cv2.imwrite(str(track_dir / out_name), np.asarray(crop))
 
             saved_tracks += 1
 

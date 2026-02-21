@@ -146,10 +146,10 @@ def expand_bbox_xyxy(
     return clip_bbox_xyxy((nx1, ny1, nx2, ny2), img_w=img_w, img_h=img_h)
 
 
-def draw_track_label(frame: np.ndarray, *, x_text: int, ty: int, x1: int, y1: int, track_id: int, det_idx: int, label_height: int = 18) -> None:
+def draw_track_label(frame: np.ndarray, *, x_text: int, ty: int, x1: int, y1: int, track_id: int, det_idx: int, label_height: int = 18, label_prefix: str = "ID") -> None:
     cv2.putText(
         frame,
-        f"ID {track_id}  Det {det_idx}",
+        f"{label_prefix} {track_id}  Det {det_idx}",
         (x_text, ty),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.6,
@@ -168,7 +168,7 @@ def draw_track_label(frame: np.ndarray, *, x_text: int, ty: int, x1: int, y1: in
     )
 
 
-def draw_matched_tracks(frame: np.ndarray, detections, matches) -> None:
+def draw_matched_tracks(frame: np.ndarray, detections, matches, label_prefix: str = "ID") -> None:
     """Draw matched bboxes + labels in-place."""
     h, w = frame.shape[:2]
 
@@ -211,10 +211,12 @@ def draw_matched_tracks(frame: np.ndarray, detections, matches) -> None:
             track_id=int(track_id),
             det_idx=int(det_idx),
             label_height=label_height,
+            label_prefix=label_prefix,
         )
 
 
-def render_tracking_overlays(frame: np.ndarray, detections, matches, frame_idx: int) -> None:
+def render_tracking_overlays(frame: np.ndarray, detections, matches, frame_idx: int, use_global_ids: bool = False) -> None:
     """Main high-level drawing entrypoint for tracking inference."""
-    draw_matched_tracks(frame=frame, detections=detections, matches=matches)
+    label_prefix = "GID" if use_global_ids else "ID"
+    draw_matched_tracks(frame=frame, detections=detections, matches=matches, label_prefix=label_prefix)
     draw_frame_index(frame, frame_idx)

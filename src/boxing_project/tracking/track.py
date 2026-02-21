@@ -74,6 +74,7 @@ class Track:
     track_id: int
     kf: KalmanTracker
     min_hits: int
+    epoch_id: int = 1
 
     age: int = 0
 
@@ -87,6 +88,7 @@ class Track:
 
     app_emb_ema: Optional[np.ndarray] = None
     app_emb_history: list[np.ndarray] = field(default_factory=list)
+    app_crop_history: list[np.ndarray] = field(default_factory=list)
 
     def predict(self) -> Tuple[np.ndarray, np.ndarray]:
         """
