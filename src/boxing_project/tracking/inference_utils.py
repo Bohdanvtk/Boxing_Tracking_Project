@@ -95,6 +95,45 @@ def preprocess_image(opWrapper, img_path: Path, save_width: int, return_img=Fals
 
 
 
+
+
+def _clip_bbox_xyxy(bbox, img_w: int, img_h: int):
+    if bbox is None:
+        return None
+    x1, y1, x2, y2 = bbox
+    x1 = max(0, min(int(x1), img_w - 1))
+    x2 = max(0, min(int(x2), img_w))
+    y1 = max(0, min(int(y1), img_h - 1))
+    y2 = max(0, min(int(y2), img_h))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def _store_matched_crops(tracker, frame: np.ndarray, detections, matches) -> None:
+    tracks_by_id = {int(t.track_id): t for t in tracker.tracks}
+    h, w = frame.shape[:2]
+
+    for track_id, det_idx in matches:
+        if det_idx < 0 or det_idx >= len(detections):
+            continue
+
+        trk = tracks_by_id.get(int(track_id))
+        if trk is None:
+            continue
+
+        raw = detections[det_idx].meta.get("raw", {})
+        bb = _clip_bbox_xyxy(raw.get("bbox", None), img_w=w, img_h=h)
+        if bb is None:
+            continue
+
+        x1, y1, x2, y2 = bb
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            continue
+
+        trk.app_crop_history.append(crop.copy())
+
 @dataclass
 class FrameTrackingResult:
     frame_idx: int
@@ -149,6 +188,7 @@ def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, 
                 det.meta["e_app_error"] = str(e)
 
     log = tracker.update(detections, g=g, reset_mode=reset_mode)
+    _store_matched_crops(tracker, original_img, detections, log.get("matches", []))
     return detections, log
 
 
@@ -233,6 +273,31 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
         large_cost=float(tracker.cfg.match.large_cost),
         greedy_threshold=float(tracker.cfg.match.greedy_threshold),
     )
+
+    if save_dir is not None:
+        import json
+
+        summary = []
+        for epoch_id, tracks_by_id in sorted(tracker.get_epoch_tracks().items()):
+            for local_id, trk in sorted(tracks_by_id.items()):
+                key = (int(epoch_id), int(local_id))
+                gid = local_to_global.get(key)
+                summary.append(
+                    {
+                        "epoch_id": int(epoch_id),
+                        "local_track_id": int(local_id),
+                        "global_track_id": int(gid) if gid is not None else None,
+                        "matched_to_global": bool(gid is not None),
+                        "hits": int(getattr(trk, "hits", 0)),
+                        "embeddings": int(len(getattr(trk, "app_emb_history", []) or [])),
+                        "crops": int(len(getattr(trk, "app_crop_history", []) or [])),
+                    }
+                )
+
+        (Path(save_dir) / "global_track_mapping.json").write_text(
+            json.dumps({"tracks": summary}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     rendered_frames = []
     for result in frame_results:
