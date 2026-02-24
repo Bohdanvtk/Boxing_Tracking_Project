@@ -8,7 +8,7 @@ from boxing_project.tracking.tracker import openpose_people_to_detections
 from boxing_project.shot_boundary.inference import ShotBoundaryInferencer, ShotBoundaryInferConfig
 from boxing_project.tracking.image_utils import keypoints_to_bbox, expand_bbox_xyxy, render_tracking_overlays
 from boxing_project.tracking.saving_utils import FragmentExporter, save_tracking_outputs
-from boxing_project.tracking.matcher import build_global_track_mapping
+from boxing_project.tracking.global_clustering import GlobalTrackClusterer
 
 
 """
@@ -193,7 +193,8 @@ def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, 
 
 
 def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, save_width, merge_n,
-                    save_dir: Path | None):
+                    save_dir: Path | None,
+                    graph_clustering_params: dict | None = None):
 
 
     debug = tracker.cfg.debug
@@ -268,17 +269,21 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
 
         prev_reset_mode = reset_mode
 
-    local_to_global = build_global_track_mapping(
-        epoch_tracks=tracker.get_epoch_tracks(),
-        large_cost=float(tracker.cfg.match.large_cost),
-        greedy_threshold=float(tracker.cfg.match.greedy_threshold),
+    epoch_tracks = tracker.get_epoch_tracks()
+    params = graph_clustering_params or {}
+    clusterer = GlobalTrackClusterer(
+        k=int(params.get("k", 10)),
+        sim_threshold=float(params.get("sim_threshold", 0.5)),
+        num_iters=int(params.get("num_iters", 20)),
+        rng_seed=int(params.get("rng_seed", 0)),
     )
+    local_to_global = clusterer.build_mapping(epoch_tracks=epoch_tracks)
 
     if save_dir is not None:
         import json
 
         summary = []
-        for epoch_id, tracks_by_id in sorted(tracker.get_epoch_tracks().items()):
+        for epoch_id, tracks_by_id in sorted(epoch_tracks.items()):
             for local_id, trk in sorted(tracks_by_id.items()):
                 key = (int(epoch_id), int(local_id))
                 gid = local_to_global.get(key)

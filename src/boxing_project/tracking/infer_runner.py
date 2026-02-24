@@ -70,6 +70,7 @@ class InferRunner:
 
         save_width = int(data_cfg.get("save_width", 800))
         merge_n = int(tracking_cfg.get("num_frames_merge", 40))
+        graph_clustering_params = tracking_cfg.get("graph_clustering", {})
 
         # NEW: artifacts output dir
         save_dir_raw = data_cfg.get("save_dir", None)
@@ -107,4 +108,5 @@ class InferRunner:
             save_width=save_width,
             merge_n=merge_n,
             save_dir=save_dir,
+            graph_clustering_params=graph_clustering_params,
         )
