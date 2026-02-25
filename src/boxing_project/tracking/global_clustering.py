@@ -63,6 +63,7 @@ def build_mean_embeddings(
 
 
 def build_mutual_knn_graph(
+    nodes: list[NodeKey],
     embs: np.ndarray,
     k: int,
     sim_threshold: float,
@@ -73,13 +74,16 @@ def build_mutual_knn_graph(
     ``adj[i]`` is a dictionary ``{j: sim_ij}``.
     Edge ``i--j`` exists only if:
     1) ``j`` is in top-k neighbors of ``i`` and ``i`` is in top-k of ``j`` (mutual kNN)
-    2) similarity is at least ``sim_threshold``.
+    2) similarity is at least ``sim_threshold``
+    3) nodes belong to different epochs (no intra-epoch edges).
     """
     embs = np.asarray(embs, dtype=np.float32)
     if embs.ndim != 2:
         raise ValueError("embs must be a 2D array")
 
     n_nodes = int(embs.shape[0])
+    if len(nodes) != n_nodes:
+        raise ValueError("nodes length must match embs.shape[0]")
     if n_nodes == 0:
         return []
 
@@ -103,6 +107,9 @@ def build_mutual_knn_graph(
             if i >= j:
                 continue
             if i in topk_sets[j]:
+                # Skip edges between tracks from the same epoch.
+                if nodes[i][0] == nodes[j][0]:
+                    continue
                 w = float(sim[i, j])
                 adj[i][j] = w
                 adj[j][i] = w
@@ -170,7 +177,7 @@ class GlobalTrackClusterer:
         if n_nodes == 0:
             return {}
 
-        adj = build_mutual_knn_graph(embs, k=self.k, sim_threshold=self.sim_threshold)
+        adj = build_mutual_knn_graph(nodes, embs, k=self.k, sim_threshold=self.sim_threshold)
         labels = chinese_whispers(adj, num_iters=self.num_iters, rng_seed=self.rng_seed)
 
         unique_labels = sorted(set(int(lbl) for lbl in labels))
