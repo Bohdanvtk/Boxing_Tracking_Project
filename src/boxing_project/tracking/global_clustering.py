@@ -161,6 +161,64 @@ def chinese_whispers(
     return labels
 
 
+def _support_score(i: int, nodes: list[NodeKey], labels: list[int], adj: list[dict[int, float]]) -> float:
+    """
+    Compute cross-epoch support for node ``i`` within its current label.
+
+    score = sum of edge weights to neighbors that:
+      - have the same label as node ``i``
+      - belong to a different epoch.
+    """
+    epoch_i = int(nodes[i][0])
+    label_i = int(labels[i])
+    score = 0.0
+    for j, w in adj[i].items():
+        if int(labels[int(j)]) != label_i:
+            continue
+        if int(nodes[int(j)][0]) == epoch_i:
+            continue
+        score += float(w)
+    return float(score)
+
+
+def _enforce_unique_gid_per_epoch(
+    nodes: list[NodeKey],
+    labels: list[int],
+    label_to_gid: dict[int, int],
+    adj: list[dict[int, float]],
+) -> dict[NodeKey, int]:
+    """Ensure that one epoch cannot map multiple local tracks to the same global ID."""
+    mapping: dict[NodeKey, int] = {}
+    for i, node in enumerate(nodes):
+        mapping[node] = int(label_to_gid[int(labels[i])])
+
+    groups: dict[tuple[int, int], list[int]] = {}
+    for i, node in enumerate(nodes):
+        gid = int(mapping[node])
+        key = (int(node[0]), gid)
+        groups.setdefault(key, []).append(i)
+
+    next_gid = (max(label_to_gid.values()) + 1) if label_to_gid else 1
+
+    for (_, gid), idxs in sorted(groups.items()):
+        if len(idxs) <= 1:
+            continue
+
+        # Keep node with strongest cross-epoch support; tie-break by smallest local_id.
+        keep_idx = min(
+            idxs,
+            key=lambda i: (-_support_score(i, nodes, labels, adj), int(nodes[i][1]), i),
+        )
+
+        for i in sorted(idxs):
+            if i == keep_idx:
+                continue
+            mapping[nodes[i]] = int(next_gid)
+            next_gid += 1
+
+    return mapping
+
+
 @dataclass
 class GlobalTrackClusterer:
     """Offline global ID unification based on mutual-kNN + Chinese Whispers."""
@@ -183,8 +241,10 @@ class GlobalTrackClusterer:
         unique_labels = sorted(set(int(lbl) for lbl in labels))
         label_to_gid = {lbl: gid for gid, lbl in enumerate(unique_labels, start=1)}
 
-        mapping: dict[NodeKey, int] = {}
-        for i, node in enumerate(nodes):
-            mapping[node] = int(label_to_gid[int(labels[i])])
-        return mapping
+        return _enforce_unique_gid_per_epoch(
+            nodes=nodes,
+            labels=labels,
+            label_to_gid=label_to_gid,
+            adj=adj,
+        )
 
