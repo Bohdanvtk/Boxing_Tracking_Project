@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
+from sklearn.cluster import SpectralClustering
 
 if TYPE_CHECKING:
     from .track import Track
@@ -117,116 +118,35 @@ def build_mutual_knn_graph(
     return adj
 
 
-def chinese_whispers(
-    adj: list[dict[int, float]],
-    num_iters: int,
-    rng_seed: int,
-) -> list[int]:
-    """
-    Run Chinese Whispers on a weighted graph.
-
-    Initialization: ``labels[i] = i``.
-    Update rule per node: pick neighbor-label with maximum summed edge weight.
-    Tie-breaking is deterministic: higher score first, then smaller label id.
-    """
+def _adjacency_to_affinity(adj: list[dict[int, float]]) -> np.ndarray:
+    """Convert weighted adjacency list to a dense symmetric affinity matrix."""
     n_nodes = len(adj)
-    labels = list(range(n_nodes))
-    if n_nodes == 0:
-        return labels
+    affinity = np.zeros((n_nodes, n_nodes), dtype=np.float32)
+    for i, neigh in enumerate(adj):
+        for j, w in neigh.items():
+            affinity[i, int(j)] = float(w)
 
-    rng = np.random.default_rng(int(rng_seed))
-    order = np.arange(n_nodes, dtype=np.int32)
-
-    for _ in range(max(0, int(num_iters))):
-        rng.shuffle(order)
-        for idx in order:
-            i = int(idx)
-            neigh = adj[i]
-            if not neigh:
-                continue
-
-            scores: dict[int, float] = {}
-            for j, w in neigh.items():
-                lbl = labels[int(j)]
-                scores[lbl] = scores.get(lbl, 0.0) + float(w)
-
-            best_label = min(scores.keys())
-            best_score = scores[best_label]
-            for lbl, score in scores.items():
-                if (score > best_score) or (score == best_score and lbl < best_label):
-                    best_label = lbl
-                    best_score = score
-            labels[i] = best_label
-
-    return labels
-
-
-def _support_score(i: int, nodes: list[NodeKey], labels: list[int], adj: list[dict[int, float]]) -> float:
-    """
-    Compute cross-epoch support for node ``i`` within its current label.
-
-    score = sum of edge weights to neighbors that:
-      - have the same label as node ``i``
-      - belong to a different epoch.
-    """
-    epoch_i = int(nodes[i][0])
-    label_i = int(labels[i])
-    score = 0.0
-    for j, w in adj[i].items():
-        if int(labels[int(j)]) != label_i:
-            continue
-        if int(nodes[int(j)][0]) == epoch_i:
-            continue
-        score += float(w)
-    return float(score)
-
-
-def _enforce_unique_gid_per_epoch(
-    nodes: list[NodeKey],
-    labels: list[int],
-    label_to_gid: dict[int, int],
-    adj: list[dict[int, float]],
-) -> dict[NodeKey, int]:
-    """Ensure that one epoch cannot map multiple local tracks to the same global ID."""
-    mapping: dict[NodeKey, int] = {}
-    for i, node in enumerate(nodes):
-        mapping[node] = int(label_to_gid[int(labels[i])])
-
-    groups: dict[tuple[int, int], list[int]] = {}
-    for i, node in enumerate(nodes):
-        gid = int(mapping[node])
-        key = (int(node[0]), gid)
-        groups.setdefault(key, []).append(i)
-
-    next_gid = (max(label_to_gid.values()) + 1) if label_to_gid else 1
-
-    for (_, gid), idxs in sorted(groups.items()):
-        if len(idxs) <= 1:
-            continue
-
-        # Keep node with strongest cross-epoch support; tie-break by smallest local_id.
-        keep_idx = min(
-            idxs,
-            key=lambda i: (-_support_score(i, nodes, labels, adj), int(nodes[i][1]), i),
-        )
-
-        for i in sorted(idxs):
-            if i == keep_idx:
-                continue
-            mapping[nodes[i]] = int(next_gid)
-            next_gid += 1
-
-    return mapping
+    affinity = 0.5 * (affinity + affinity.T)
+    # Diagonal self-affinity improves stability for sparse/disconnected graphs.
+    np.fill_diagonal(affinity, 1.0)
+    return affinity
 
 
 @dataclass
 class GlobalTrackClusterer:
-    """Offline global ID unification based on mutual-kNN + Chinese Whispers."""
+    """
+    Offline global ID unification based on:
+    1) custom mutual-kNN graph construction
+    2) Spectral Clustering over the graph affinity matrix.
 
-    k: int = 10
+    The pipeline enforces exactly 2 boxer clusters when there are at least 2 nodes.
+    """
+
+    k: int = 5
     sim_threshold: float = 0.5
-    num_iters: int = 20
-    rng_seed: int = 0
+    n_clusters: int = 2
+    random_state: int = 42
+    assign_labels: str = "kmeans"
 
     def build_mapping(self, epoch_tracks: dict[int, dict[int, "Track"]]) -> dict[NodeKey, int]:
         """Build ``(epoch_id, local_track_id) -> global_track_id`` mapping."""
@@ -234,17 +154,33 @@ class GlobalTrackClusterer:
         n_nodes = len(nodes)
         if n_nodes == 0:
             return {}
+        if n_nodes == 1:
+            return {nodes[0]: 1}
 
+        # Keep custom graph logic (mutual-kNN, threshold, same-epoch suppression).
         adj = build_mutual_knn_graph(nodes, embs, k=self.k, sim_threshold=self.sim_threshold)
-        labels = chinese_whispers(adj, num_iters=self.num_iters, rng_seed=self.rng_seed)
+        affinity = _adjacency_to_affinity(adj)
 
-        unique_labels = sorted(set(int(lbl) for lbl in labels))
-        label_to_gid = {lbl: gid for gid, lbl in enumerate(unique_labels, start=1)}
-
-        return _enforce_unique_gid_per_epoch(
-            nodes=nodes,
-            labels=labels,
-            label_to_gid=label_to_gid,
-            adj=adj,
+        # We know the sequence contains exactly two boxers.
+        n_clusters = int(self.n_clusters)
+        if n_clusters != 2:
+            n_clusters = 2
+        model = SpectralClustering(
+            n_clusters=n_clusters,
+            affinity="precomputed",
+            random_state=int(self.random_state),
+            assign_labels=str(self.assign_labels),
         )
+        labels = model.fit_predict(affinity)
 
+        # Deterministic remap to contiguous global IDs starting from 1.
+        unique_labels = sorted(set(int(lbl) for lbl in labels))
+
+        # Guardrail: ensure exactly 2 global IDs when we have >=2 nodes.
+        if len(unique_labels) == 1:
+            labels = labels.copy()
+            labels[1] = int(labels[0]) + 1
+            unique_labels = sorted(set(int(lbl) for lbl in labels))
+
+        label_to_gid = {lbl: gid for gid, lbl in enumerate(unique_labels, start=1)}
+        return {node: int(label_to_gid[int(labels[i])]) for i, node in enumerate(nodes)}

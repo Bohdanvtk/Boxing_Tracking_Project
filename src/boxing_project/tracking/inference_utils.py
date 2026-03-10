@@ -272,10 +272,11 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
     epoch_tracks = tracker.get_epoch_tracks()
     params = graph_clustering_params or {}
     clusterer = GlobalTrackClusterer(
-        k=int(params.get("k", 10)),
+        k=int(params.get("k", 5)),
         sim_threshold=float(params.get("sim_threshold", 0.5)),
-        num_iters=int(params.get("num_iters", 20)),
-        rng_seed=int(params.get("rng_seed", 0)),
+        n_clusters=int(params.get("n_clusters", 2)),
+        random_state=int(params.get("random_state", 42)),
+        assign_labels=str(params.get("assign_labels", "kmeans")),
     )
     local_to_global = clusterer.build_mapping(epoch_tracks=epoch_tracks)
 

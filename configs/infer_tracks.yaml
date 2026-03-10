@@ -23,10 +23,11 @@ tracking:
   num_frames_merge: 0      # how many pictures at one time will appear if it's 0, NO pictures will appear
   apperance_embedding_model_path: "/home/bohdan/PycharmProjects/Boxing_Tracking_Project/artifacts/models/apperance_cnn/osnet_x0_5.onnx"
   graph_clustering:
-    k: 10
+    k: 5
     sim_threshold: 0.5
-    num_iters: 20
-    rng_seed: 0
+    n_clusters: 2
+    random_state: 42
+    assign_labels: kmeans
 
 shot_boundary:
   config_path: "/home/bohdan/PycharmProjects/Boxing_Tracking_Project/configs/shot_boundary.yaml"
