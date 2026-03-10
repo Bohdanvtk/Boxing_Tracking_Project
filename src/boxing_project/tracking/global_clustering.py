@@ -132,6 +132,111 @@ def _adjacency_to_affinity(adj: list[dict[int, float]]) -> np.ndarray:
     return affinity
 
 
+def _l2_normalize(vec: np.ndarray) -> np.ndarray:
+    """Return L2-normalized vector (safe for near-zero norms)."""
+    v = np.asarray(vec, dtype=np.float32)
+    n = float(np.linalg.norm(v))
+    if n <= 1e-8:
+        return v.astype(np.float32)
+    return (v / n).astype(np.float32)
+
+
+def _build_boxer_prototypes(embs: np.ndarray, gids: np.ndarray) -> dict[int, np.ndarray]:
+    """Build normalized prototype embedding for each boxer gid in {1, 2}."""
+    prototypes: dict[int, np.ndarray] = {}
+    for gid in (1, 2):
+        idxs = np.where(gids == gid)[0]
+        if idxs.size == 0:
+            continue
+        mean_emb = embs[idxs].mean(axis=0)
+        prototypes[gid] = _l2_normalize(mean_emb)
+    return prototypes
+
+
+def _refine_epoch_assignments(
+    nodes: list[NodeKey],
+    embs: np.ndarray,
+    prototypes: dict[int, np.ndarray],
+) -> dict[NodeKey, int]:
+    """
+    Enforce one-to-one boxer assignment inside each epoch.
+
+    After global 2-boxer grouping, each epoch is refined so each boxer id (1/2)
+    appears at most once in that epoch.
+    """
+    by_epoch: dict[int, list[int]] = {}
+    for i, (epoch_id, _local_id) in enumerate(nodes):
+        by_epoch.setdefault(int(epoch_id), []).append(i)
+
+    mapping: dict[NodeKey, int] = {}
+
+    for epoch_id in sorted(by_epoch.keys()):
+        idxs = sorted(by_epoch[epoch_id], key=lambda i: int(nodes[i][1]))
+        if not idxs:
+            continue
+
+        sims = {i: {gid: float(np.dot(embs[i], prototypes[gid])) for gid in (1, 2)} for i in idxs}
+
+        if len(idxs) == 1:
+            i = idxs[0]
+            gid = 1 if sims[i][1] >= sims[i][2] else 2
+            mapping[nodes[i]] = gid
+            continue
+
+        if len(idxs) == 2:
+            a, b = idxs
+            score_ab = sims[a][1] + sims[b][2]
+            score_ba = sims[a][2] + sims[b][1]
+            if score_ab > score_ba:
+                mapping[nodes[a]] = 1
+                mapping[nodes[b]] = 2
+            elif score_ba > score_ab:
+                mapping[nodes[a]] = 2
+                mapping[nodes[b]] = 1
+            else:
+                # deterministic tie-break by smallest local id assigned to boxer 1
+                if int(nodes[a][1]) <= int(nodes[b][1]):
+                    mapping[nodes[a]] = 1
+                    mapping[nodes[b]] = 2
+                else:
+                    mapping[nodes[a]] = 2
+                    mapping[nodes[b]] = 1
+            continue
+
+        # len(idxs) > 2: best one-to-one assignment with at most one track per boxer.
+        candidates: list[tuple[float, dict[int, int]]] = []
+        candidates.append((0.0, {}))
+
+        for i in idxs:
+            candidates.append((sims[i][1], {1: i}))
+            candidates.append((sims[i][2], {2: i}))
+
+        for i in idxs:
+            for j in idxs:
+                if i == j:
+                    continue
+                candidates.append((sims[i][1] + sims[j][2], {1: i, 2: j}))
+
+        best_score, best_assign = candidates[0]
+
+        def tie_key(assign: dict[int, int]) -> tuple:
+            # Prefer more assigned boxers; then smallest local ids deterministically.
+            local1 = int(nodes[assign[1]][1]) if 1 in assign else 10**9
+            local2 = int(nodes[assign[2]][1]) if 2 in assign else 10**9
+            return (len(assign), -local1, -local2)
+
+        for score, assign in candidates[1:]:
+            if score > best_score:
+                best_score, best_assign = score, assign
+            elif score == best_score and tie_key(assign) > tie_key(best_assign):
+                best_score, best_assign = score, assign
+
+        for gid, i in sorted(best_assign.items()):
+            mapping[nodes[i]] = int(gid)
+
+    return mapping
+
+
 @dataclass
 class GlobalTrackClusterer:
     """
@@ -161,10 +266,8 @@ class GlobalTrackClusterer:
         adj = build_mutual_knn_graph(nodes, embs, k=self.k, sim_threshold=self.sim_threshold)
         affinity = _adjacency_to_affinity(adj)
 
-        # We know the sequence contains exactly two boxers.
-        n_clusters = int(self.n_clusters)
-        if n_clusters != 2:
-            n_clusters = 2
+        # Spectral clustering is the global grouping stage (exactly 2 boxers).
+        n_clusters = 2 if int(self.n_clusters) != 2 else int(self.n_clusters)
         model = SpectralClustering(
             n_clusters=n_clusters,
             affinity="precomputed",
@@ -173,14 +276,20 @@ class GlobalTrackClusterer:
         )
         labels = model.fit_predict(affinity)
 
-        # Deterministic remap to contiguous global IDs starting from 1.
+        # Deterministic remap to boxer IDs {1, 2}.
         unique_labels = sorted(set(int(lbl) for lbl in labels))
-
-        # Guardrail: ensure exactly 2 global IDs when we have >=2 nodes.
         if len(unique_labels) == 1:
             labels = labels.copy()
             labels[1] = int(labels[0]) + 1
             unique_labels = sorted(set(int(lbl) for lbl in labels))
-
         label_to_gid = {lbl: gid for gid, lbl in enumerate(unique_labels, start=1)}
-        return {node: int(label_to_gid[int(labels[i])]) for i, node in enumerate(nodes)}
+        gids = np.asarray([label_to_gid[int(lbl)] for lbl in labels], dtype=np.int32)
+
+        # Build boxer prototypes from global clusters and refine per-epoch one-to-one assignment.
+        prototypes = _build_boxer_prototypes(embs=embs, gids=gids)
+        if 1 not in prototypes and 2 in prototypes:
+            prototypes[1] = prototypes[2]
+        if 2 not in prototypes and 1 in prototypes:
+            prototypes[2] = prototypes[1]
+
+        return _refine_epoch_assignments(nodes=nodes, embs=embs, prototypes=prototypes)
