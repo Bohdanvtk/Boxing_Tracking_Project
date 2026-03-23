@@ -270,6 +270,14 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
         prev_reset_mode = reset_mode
 
     epoch_tracks = tracker.get_epoch_tracks()
+
+    #saving the last fragment(because there is probably no reset_mode in the end)
+
+    if fragment_exporter is not None:
+        fragment_exporter.save_tracks(
+            tracker.get_segment_tracks(),
+            frame_idx=len(images),
+        )
     params = graph_clustering_params or {}
     clusterer = GlobalTrackClusterer(
         k=int(params.get("k", 5)),

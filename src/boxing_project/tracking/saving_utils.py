@@ -251,7 +251,7 @@ class FragmentExporter:
 
     def save_tracks(self, tracks, frame_idx: int) -> Path:
         tracks = list(tracks or [])
-        eligible = [t for t in tracks if int(getattr(t, "hits", 0)) > self.min_hits]
+        eligible = [t for t in tracks if int(getattr(t, "hits", 0)) >= self.min_hits]
 
         fragment_dir = self.next_fragment()
         saved_tracks = 0
@@ -259,19 +259,24 @@ class FragmentExporter:
         for trk in eligible:
             crop_history = list(getattr(trk, "app_crop_history", []) or [])
             emb_history = list(getattr(trk, "app_emb_history", []) or [])
+
             if not crop_history and not emb_history:
                 continue
 
             track_dir = fragment_dir / f"Track_{int(trk.track_id)}"
             track_dir.mkdir(parents=True, exist_ok=True)
 
+            saved_any_crop = False
             for crop_idx, crop in enumerate(crop_history):
                 if crop is None:
                     continue
+
                 out_name = f"crop_{crop_idx:06d}.jpg"
                 cv2.imwrite(str(track_dir / out_name), np.asarray(crop))
+                saved_any_crop = True
 
-            saved_tracks += 1
+            if saved_any_crop or emb_history:
+                saved_tracks += 1
 
         manifest = {
             "frame_idx": int(frame_idx),
@@ -280,6 +285,7 @@ class FragmentExporter:
             "tracks_eligible": int(len(eligible)),
             "tracks_saved": int(saved_tracks),
         }
+
         (fragment_dir / "fragment_info.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2),
             encoding="utf-8",
