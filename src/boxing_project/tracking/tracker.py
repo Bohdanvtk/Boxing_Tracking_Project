@@ -166,7 +166,7 @@ class MultiObjectTracker:
         return trk
 
     def _remove_dead(self):
-        self.tracks = [t for t in self.tracks if not t.is_dead(self.cfg.max_age, self.cfg.max_age)]
+        self.tracks = [t for t in self.tracks if not t.is_dead(self.cfg.max_age, self.cfg.max_confirmed_age)]
 
     def _has_base_keypoints(self, det: Detection, min_core_kps: Optional[int] = None) -> bool:
         """

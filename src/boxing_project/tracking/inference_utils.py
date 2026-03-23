@@ -307,15 +307,28 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
 
     rendered_frames = []
     for result in frame_results:
-        frame = result.original_img.copy()
+        local_matches = [
+            (int(local_track_id), int(det_idx))
+            for local_track_id, det_idx in result.log.get("matches", [])
+        ]
 
+        local_frame = result.original_img.copy()
+        render_tracking_overlays(
+            frame=local_frame,
+            detections=result.detections,
+            matches=local_matches,
+            frame_idx=result.frame_idx,
+            use_global_ids=False,
+        )
+
+        global_frame = result.original_img.copy()
         global_matches = []
         for local_track_id, det_idx in result.log.get("matches", []):
             gid = local_to_global.get((int(result.log.get("epoch_id", 1)), int(local_track_id)), int(local_track_id))
             global_matches.append((int(gid), int(det_idx)))
 
         render_tracking_overlays(
-            frame=frame,
+            frame=global_frame,
             detections=result.detections,
             matches=global_matches,
             frame_idx=result.frame_idx,
@@ -329,14 +342,15 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
                 save_dir=save_dir,
                 frame_idx=result.frame_idx,
                 original_frame=result.original_img,
-                processed_frame=frame,
+                processed_frame=global_frame,
+                local_processed_frame=local_frame,
                 detections=result.detections,
                 log=out_log,
                 conf_th=tracker.cfg.min_kp_conf,
                 tracker=tracker,
             )
 
-        rendered_frames.append(frame)
+        rendered_frames.append(global_frame)
 
     if show_merge and rendered_frames:
         for i in range(0, len(rendered_frames), merge_n):

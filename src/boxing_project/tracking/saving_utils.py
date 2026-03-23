@@ -184,6 +184,7 @@ def save_tracking_outputs(
     frame_idx: int,
     original_frame: np.ndarray,
     processed_frame: np.ndarray,
+    local_processed_frame: np.ndarray | None,
     detections,
     log: dict,
     conf_th: float,
@@ -195,6 +196,10 @@ def save_tracking_outputs(
     vis_path = frame_dir / "frame_vis.jpg"
     if processed_frame is not None and not vis_path.exists():
         cv2.imwrite(str(vis_path), processed_frame)
+
+    local_vis_path = frame_dir / "frame_local_vis.jpg"
+    if local_processed_frame is not None and not local_vis_path.exists():
+        cv2.imwrite(str(local_vis_path), local_processed_frame)
 
     if bool(tracker.cfg.save_log):
         from boxing_project.tracking.tracking_debug import GENERAL_LOG
