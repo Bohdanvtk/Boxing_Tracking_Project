@@ -6,7 +6,7 @@ tracking:
   kalman:
     process_var: 1e6        # Process noise variance (acceleration noise).
                               # Higher → Kalman trusts predictions less, adapts faster
-    measure_var: 2000       # Measurement noise variance (detection noise).
+    measure_var: 4000       # Measurement noise variance (detection noise).
                               # Higher → Kalman trusts detections less
     p0: 1000.0                # Initial covariance for new tracks or Kalman reset.
                               # Higher → more uncertainty, easier re-alignment
@@ -18,7 +18,7 @@ tracking:
     pose_scale_eps: 1.0e-6    # Small epsilon to avoid division by zero in pose normalization
     greedy_threshold: 9.1     # Cost threshold for accepting matches in normal mode
 
-    emb_ema_alpha: 0.7       # Ema param which corresponds to speed of acquisition of a new information
+    emb_ema_alpha: 0.9       # Ema param which corresponds to speed of acquisition of a new information
     bad_kp_patience: 50         # how much time algorithm should wait to update ema, kalman and pose
     large_cost: 880.0         # Sentinel value for invalid / gated-out matches
     min_kp_conf: 0.05         # Minimum confidence for a keypoint to be considered valid

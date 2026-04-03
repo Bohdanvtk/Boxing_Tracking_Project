@@ -68,7 +68,7 @@ class AppearanceEmbedder:
         dim = int(self._embedding_dim or 0)
         return np.zeros((dim,), dtype=np.float32)
 
-    def embed(self, frame_bgr: np.ndarray, bbox_xyxy: Tuple[int, int, int, int]) -> np.ndarray:
+    def embed(self, frame_bgr: np.ndarray, bbox_xyxy: Tuple[int, int, int, int]=(3, 21, 19, 39)) -> np.ndarray:
         """
         Рахує appearance embedding для одного bbox.
 

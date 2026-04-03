@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-
+from .matcher import cosine_similarity
 import numpy as np
 from sklearn.cluster import SpectralClustering
 
@@ -189,8 +189,8 @@ def _refine_epoch_assignments(
 
         sims = {
             i: {
-                1: float(np.dot(embs[i], prototypes[1])),
-                2: float(np.dot(embs[i], prototypes[2])),
+                1: float(cosine_similarity(embs[i], prototypes[1])),
+                2: float(cosine_similarity(embs[i], prototypes[2])),
             }
             for i in idxs
         }

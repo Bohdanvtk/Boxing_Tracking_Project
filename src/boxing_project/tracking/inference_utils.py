@@ -95,8 +95,6 @@ def preprocess_image(opWrapper, img_path: Path, save_width: int, return_img=Fals
 
 
 
-
-
 def _clip_bbox_xyxy(bbox, img_w: int, img_h: int):
     if bbox is None:
         return None
