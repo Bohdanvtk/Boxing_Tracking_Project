@@ -13,25 +13,75 @@ if TYPE_CHECKING:
 NodeKey = tuple[int, int]
 
 
-def _track_mean_embedding(track: "Track") -> np.ndarray | None:
-    """Compute an L2-normalized mean embedding from ``track.app_emb_history``."""
-    emb_history = list(getattr(track, "app_emb_history", []) or [])
-    if not emb_history:
+def _mean_l2_feature(history: list[np.ndarray]) -> np.ndarray | None:
+    """Compute L2-normalized mean feature from a history list."""
+    if not history:
         return None
 
-    embs = np.asarray(emb_history, dtype=np.float32)
-    if embs.ndim != 2 or embs.shape[0] == 0:
+    feats = np.asarray(history, dtype=np.float32)
+    if feats.ndim != 2 or feats.shape[0] == 0:
         return None
 
-    mean_emb = embs.mean(axis=0)
-    if not np.all(np.isfinite(mean_emb)):
+    mean_feat = feats.mean(axis=0)
+    if not np.all(np.isfinite(mean_feat)):
         return None
 
-    norm = float(np.linalg.norm(mean_emb))
+    norm = float(np.linalg.norm(mean_feat))
     if norm <= 1e-8:
         return None
 
-    return (mean_emb / norm).astype(np.float32)
+    return (mean_feat / norm).astype(np.float32)
+
+
+
+def _track_mean_embedding(track: "Track") -> np.ndarray | None:
+    """Build one fused descriptor using weighted concatenation."""
+    body_feat = _mean_l2_feature(list(getattr(track, "app_emb_history", []) or []))
+    left_glove_feat = _mean_l2_feature(list(getattr(track, "left_glove_features_history", []) or []))
+    right_glove_feat = _mean_l2_feature(list(getattr(track, "right_glove_features_history", []) or []))
+    shorts_feat = _mean_l2_feature(list(getattr(track, "shorts_features_history", []) or []))
+
+    # Треба мати хоча б body, інакше трек занадто слабко описаний
+    if body_feat is None:
+        return None
+
+    # Ваги
+    w_body = 1.0
+    w_left_glove = 0.5
+    w_right_glove = 0.5
+    w_shorts = 1.0
+
+    parts = [w_body * body_feat]
+
+    # Якщо якоїсь частини нема — підставляємо нулі того ж розміру
+    if left_glove_feat is not None:
+        parts.append(w_left_glove * left_glove_feat)
+    else:
+        parts.append(np.zeros_like(track.left_glove_features_history[0], dtype=np.float32)
+                     if getattr(track, "left_glove_features_history", None) else np.zeros(32, dtype=np.float32))
+
+    if right_glove_feat is not None:
+        parts.append(w_right_glove * right_glove_feat)
+    else:
+        parts.append(np.zeros_like(track.right_glove_features_history[0], dtype=np.float32)
+                     if getattr(track, "right_glove_features_history", None) else np.zeros(32, dtype=np.float32))
+
+    if shorts_feat is not None:
+        parts.append(w_shorts * shorts_feat)
+    else:
+        parts.append(np.zeros_like(track.shorts_features_history[0], dtype=np.float32)
+                     if getattr(track, "shorts_features_history", None) else np.zeros(32, dtype=np.float32))
+
+    fused = np.concatenate(parts, axis=0)
+
+    if not np.all(np.isfinite(fused)):
+        return None
+
+    norm = float(np.linalg.norm(fused))
+    if norm <= 1e-8:
+        return None
+
+    return (fused / norm).astype(np.float32)
 
 
 def build_mean_embeddings(

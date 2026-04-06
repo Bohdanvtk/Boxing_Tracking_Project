@@ -6,9 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from boxing_project.tracking.tracker import openpose_people_to_detections
 from boxing_project.shot_boundary.inference import ShotBoundaryInferencer, ShotBoundaryInferConfig
-from boxing_project.tracking.image_utils import keypoints_to_bbox, expand_bbox_xyxy, render_tracking_overlays
+from boxing_project.tracking.image_utils import keypoints_to_bbox, expand_bbox_xyxy, render_tracking_overlays, extract_boxing_crops
 from boxing_project.tracking.saving_utils import FragmentExporter, save_tracking_outputs
 from boxing_project.tracking.global_clustering import GlobalTrackClusterer
+import matplotlib.pyplot as plt
+
 
 
 """
@@ -92,9 +94,6 @@ def preprocess_image(opWrapper, img_path: Path, save_width: int, return_img=Fals
     return datums[0]
 
 
-
-
-
 def _clip_bbox_xyxy(bbox, img_w: int, img_h: int):
     if bbox is None:
         return None
@@ -107,6 +106,49 @@ def _clip_bbox_xyxy(bbox, img_w: int, img_h: int):
         return None
     return x1, y1, x2, y2
 
+
+def extract_features_with_hsv(image: np.ndarray) -> np.ndarray:
+    """
+    Extracts a 32-dimensional HSV color histogram feature vector.
+
+    Steps:
+    1. Resize image to 32x32 for consistency
+    2. Convert from BGR to HSV color space
+    3. Compute histogram over H and S channels
+    4. Normalize and flatten to a 1D feature vector
+    """
+
+    # Check for invalid input
+    if image is None or image.size == 0:
+        return None
+
+    # Step 1: Resize image to fixed size (improves histogram stability)
+    image = cv2.resize(image, (32, 32))
+
+    # Step 2: Convert image from BGR (OpenCV default) to HSV
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+    # Step 3: Compute 2D histogram for H and S channels
+    # Channels:
+    #   0 -> Hue (color)
+    #   1 -> Saturation (color intensity)
+    # We ignore V (brightness) to make features robust to lighting
+    hist = cv2.calcHist(
+        [hsv],          # input image
+        [0, 1],         # channels: H and S
+        None,           # no mask (use entire image)
+        [8, 4],         # number of bins (H: 8, S: 4)
+        [0, 180, 0, 256]  # value ranges for H and S
+    )
+
+    # Step 4: Normalize histogram (scale values to comparable range)
+    hist = cv2.normalize(hist, hist)
+
+    # Flatten histogram to 1D vector (shape: 32,)
+    hist = hist.flatten()
+
+    # Convert to float32 (useful for ML models)
+    return hist.astype(np.float32)
 
 def _store_matched_crops(tracker, frame: np.ndarray, detections, matches) -> None:
     tracks_by_id = {int(t.track_id): t for t in tracker.tracks}
@@ -132,20 +174,112 @@ def _store_matched_crops(tracker, frame: np.ndarray, detections, matches) -> Non
 
         trk.app_crop_history.append(crop.copy())
 
+def show_crop(ax, img, title: str):
+    """
+    Показує одну картинку в одному subplot.
+
+    Parameters
+    ----------
+    ax : matplotlib axis
+        Область, куди малюємо картинку.
+    img : np.ndarray | None
+        Crop-зображення або None.
+    title : str
+        Назва над картинкою.
+    """
+    # Підпис над картинкою
+    ax.set_title(title)
+
+    # Прибираємо осі, бо для картинок вони не потрібні
+    ax.axis("off")
+
+    # Якщо crop відсутній, показуємо текст "None"
+    if img is None:
+        ax.text(0.5, 0.5, "None", ha="center", va="center", fontsize=12)
+        return
+
+    # OpenCV читає зображення як BGR,
+    # а matplotlib очікує RGB,
+    # тому перед показом треба конвертувати
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    # Відображаємо картинку
+    ax.imshow(img_rgb)
+
+def visualize_boxing_crops(original_img, people):
+    """
+    Для кожної людини показує 4 зображення в одному рядку:
+    1. повний кадр з bbox людини
+    2. crop лівої рукавиці
+    3. crop правої рукавиці
+    4. crop шортів
+    """
+    for i, person in enumerate(people):
+        # Створюємо 4 subplot-и в одному рядку
+        fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+
+        # -------------------------------------------------
+        # 1. Повне зображення + bbox людини
+        # -------------------------------------------------
+        full_img = original_img.copy()
+
+        bbox = person.get("bbox", None)
+        if bbox is not None:
+            x1, y1, x2, y2 = map(int, bbox)
+
+            # Малюємо bbox людини зеленим прямокутником
+            cv2.rectangle(full_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+        show_crop(axes[0], full_img, f"Person {i} bbox")
+
+        # -------------------------------------------------
+        # 2. Ліва рукавиця
+        # -------------------------------------------------
+        show_crop(axes[1], person.get("left_glove_crop"), "Left glove")
+
+        # -------------------------------------------------
+        # 3. Права рукавиця
+        # -------------------------------------------------
+        show_crop(axes[2], person.get("right_glove_crop"), "Right glove")
+
+        # -------------------------------------------------
+        # 4. Шорти
+        # -------------------------------------------------
+        show_crop(axes[3], person.get("shorts_crop"), "Shorts")
+
+        # Робимо відступи між subplot-ами красивішими
+        plt.tight_layout()
+
+        # Показуємо весь рядок картинок
+        plt.show()
+
 @dataclass
 class FrameTrackingResult:
+    """
+    Результат обробки одного кадру.
+    """
     frame_idx: int
     original_img: np.ndarray
     detections: list
     log: dict
 
-
 def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, reset_mode: bool):
     """
-    Convert OpenPose output to tracker input and run tracking update.
-    Returns detections + log without drawing (global IDs are drawn after full sequence).
+    Перетворює OpenPose output у формат, зручний для трекера,
+    і паралельно готує crop-и частин тіла для візуальної перевірки.
+
+    Що робить функція:
+    1. бере keypoints усіх людей на кадрі
+    2. рахує bbox кожної людини
+    3. рахує crop-и:
+       - left_glove
+       - right_glove
+       - shorts
+    4. записує все у список people
+    5. викликає visualize_boxing_crops(...) для дебагу
     """
 
+    # Якщо OpenPose не знайшов жодної людини
     if result.poseKeypoints is None:
         return [], {
             "matches": [],
@@ -154,20 +288,83 @@ def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, 
             "epoch_id": int(getattr(tracker, "_epoch_id", 1)),
         }
 
-    kps = result.poseKeypoints  # (N_people, K, 3)
+    # ------------------------------------------
+    # 1. Отримуємо keypoints усіх людей
+    # ------------------------------------------
+    kps = result.poseKeypoints  # shape: (N_people, K, 3)
     n_people = len(kps)
+
+    # Розмір повного оригінального зображення
     h, w = original_img.shape[:2]
 
+    # Створюємо базову структуру для кожної людини
     people = [{"keypoints": kps[i]} for i in range(n_people)]
 
+    # Тут будемо накопичувати:
+    # - bbox кожної людини
+    # - crop-и частин тіла
+    parts_crops = []
     bboxes = []
-    for i in range(n_people):
-        bb = keypoints_to_bbox(kps[i], conf_th)
-        bb = expand_bbox_xyxy(bb, img_w=w, img_h=h, width_ratio=0.10, height_ratio=0.15)
-        bboxes.append(bb)
 
+    # ------------------------------------------
+    # 2. Для кожної людини:
+    #    - рахуємо bbox
+    #    - рахуємо crop-и
+    # ------------------------------------------
+    for i in range(n_people):
+        # Bbox людини по keypoints
+        bb = keypoints_to_bbox(kps[i], conf_th)
+
+        # Crop-и частин тіла:
+        # left_glove, right_glove, shorts
+        parts = extract_boxing_crops(
+            frame_bgr=original_img,
+            kps=kps[i],
+            conf_threshold=conf_th
+        )
+
+        # Трохи розширюємо bbox людини
+        bb = expand_bbox_xyxy(
+            bb,
+            img_w=w,
+            img_h=h,
+            width_ratio=0.10,
+            height_ratio=0.15
+        )
+
+        # Зберігаємо результати
+        bboxes.append(bb)
+        parts_crops.append(parts)
+
+    # ------------------------------------------
+    # 3. Записуємо все назад у people
+    # ------------------------------------------
     for i in range(n_people):
         people[i]["bbox"] = bboxes[i]
+
+        # Тут тепер уже правильно:
+        # це саме crop-и, а не bbox-и
+        people[i]["left_glove_crop"] = parts_crops[i]["left_glove"]
+        people[i]["right_glove_crop"] = parts_crops[i]["right_glove"]
+        people[i]["shorts_crop"] = parts_crops[i]["shorts"]
+
+    for i in range(n_people):
+        print(f"Person {i}")
+
+        for part_name, crop in parts_crops[i].items():
+            if crop is None:
+                print(f"  {part_name}: None")
+            else:
+                print(f"  {part_name}: {crop.shape}")
+
+
+    # ------------------------------------------
+    # 4. Дебаг-візуалізація
+    # ------------------------------------------
+
+    #unactive in this commit
+    #visualize_boxing_crops(original_img, people)
+
 
     detections = openpose_people_to_detections(
         people,
@@ -177,12 +374,21 @@ def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, 
     for det in detections:
         raw = det.meta.get("raw", {})
         bbox = raw.get("bbox", None)
+        left_glove_crop = raw.get("left_glove_crop")
+        right_glove_crop = raw.get("right_glove_crop")
+        shorts_crop = raw.get("shorts_crop")
 
         if app_embedder is not None and bbox is not None:
             try:
                 det.meta["e_app"] = app_embedder.embed(original_img, bbox)
+                det.meta["left_glove_features"] = extract_features_with_hsv(left_glove_crop)
+                det.meta["right_glove_features"] = extract_features_with_hsv(right_glove_crop)
+                det.meta["shorts_features"] = extract_features_with_hsv(shorts_crop)
             except Exception as e:
                 det.meta["e_app"] = None
+                det.meta["left_glove_features"] = None
+                det.meta["right_glove_features"] = None
+                det.meta["shorts_features"] = None
                 det.meta["e_app_error"] = str(e)
 
     log = tracker.update(detections, g=g, reset_mode=reset_mode)

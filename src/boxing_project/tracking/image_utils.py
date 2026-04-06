@@ -1,6 +1,23 @@
 import cv2
 import numpy as np
 
+
+# =========================
+# OpenPose BODY_25 indices
+# =========================
+R_ELBOW = 3
+R_WRIST = 4
+L_ELBOW = 6
+L_WRIST = 7
+
+MID_HIP = 8
+R_HIP = 9
+R_KNEE = 10
+L_HIP = 12
+L_KNEE = 13
+
+
+
 def keypoints_to_bbox(kps, conf_th=0.1):
     """
     Compute bounding box over keypoints with confidence > conf_th.
@@ -24,6 +41,230 @@ def _rects_intersect(r1, r2) -> bool:
         return False
     return True
 
+
+
+def is_valid_keypoint(kps, keypoint_idx: int, conf_threshold: float) -> bool:
+    """
+    Перевіряє, чи keypoint можна використовувати.
+
+    Умова:
+    1. індекс існує в kps
+    2. confidence цієї точки >= conf_threshold
+
+    Очікуваний формат:
+        kps[idx] = (x, y, conf)
+    """
+    return (
+        keypoint_idx < len(kps)
+        and float(kps[keypoint_idx][2]) >= conf_threshold
+    )
+
+
+def get_keypoint_xy(kps, keypoint_idx: int) -> np.ndarray:
+    """
+    Повертає координати keypoint у вигляді numpy-вектора [x, y].
+
+    Confidence тут не повертаємо, бо для геометрії нам потрібні тільки координати.
+    """
+    return np.array(
+        [float(kps[keypoint_idx][0]), float(kps[keypoint_idx][1])],
+        dtype=np.float32,
+    )
+
+
+def crop_from_bbox(
+    frame_bgr: np.ndarray,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+):
+    """
+    Вирізає область з картинки по bbox.
+
+    Що робить:
+    1. обрізає координати по межах зображення
+    2. переводить їх у int
+    3. перевіряє, що bbox має нормальний розмір
+    4. повертає crop або None
+    """
+    image_height, image_width = frame_bgr.shape[:2]
+
+    x1 = int(max(0, min(image_width - 1, round(x1))))
+    x2 = int(max(0, min(image_width, round(x2))))
+    y1 = int(max(0, min(image_height - 1, round(y1))))
+    y2 = int(max(0, min(image_height, round(y2))))
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    return frame_bgr[y1:y2, x1:x2]
+
+
+def crop_glove_from_arm(
+    frame_bgr: np.ndarray,
+    kps,
+    elbow_idx: int,
+    wrist_idx: int,
+    conf_threshold: float = 0.2,
+    forward_shift_ratio: float = 0.25,
+    glove_size_ratio: float = 1.35,
+):
+    """
+    Будує crop рукавиці по геометрії руки: elbow -> wrist.
+
+    Ідея:
+    - лікоть і зап'ястя задають напрямок передпліччя
+    - довжина передпліччя дає локальний масштаб
+    - центр crop ставимо трохи далі за wrist
+    - розмір crop беремо пропорційно довжині передпліччя
+    """
+    if not (
+        is_valid_keypoint(kps, elbow_idx, conf_threshold)
+        and is_valid_keypoint(kps, wrist_idx, conf_threshold)
+    ):
+        return None
+
+    elbow_xy = get_keypoint_xy(kps, elbow_idx)
+    wrist_xy = get_keypoint_xy(kps, wrist_idx)
+
+    # Вектор від ліктя до зап'ястя
+    forearm_vector = wrist_xy - elbow_xy
+
+    # Довжина передпліччя в пікселях
+    forearm_length = float(np.linalg.norm(forearm_vector))
+    if forearm_length < 1e-6:
+        return None
+
+    # Одиничний вектор напряму руки
+    forearm_direction = forearm_vector / forearm_length
+
+    # Центр crop трохи попереду wrist у напрямку руки
+    crop_center = wrist_xy + forward_shift_ratio * forearm_length * forearm_direction
+
+    # Розмір квадрата пропорційний довжині передпліччя
+    crop_size = glove_size_ratio * forearm_length
+
+    # Перетворюємо center + size у координати bbox
+    x1 = crop_center[0] - crop_size / 2.0
+    y1 = crop_center[1] - crop_size / 2.0
+    x2 = crop_center[0] + crop_size / 2.0
+    y2 = crop_center[1] + crop_size / 2.0
+
+    return crop_from_bbox(frame_bgr, x1, y1, x2, y2)
+
+
+def crop_shorts_from_hips(
+    frame_bgr: np.ndarray,
+    kps,
+    conf_threshold: float = 0.2,
+    shorts_width_ratio: float = 1.5,
+    top_lift_ratio: float = 0.35,
+    knee_height_ratio: float = 0.45,
+    fallback_height_ratio: float = 0.9,
+):
+    """
+    Будує crop шортів по тазових точках.
+
+    Ідея:
+    - MID_HIP дає центр шортів
+    - L_HIP і R_HIP дають ширину таза
+    - верх crop ставимо трохи вище mid_hip
+    - низ crop тягнемо вниз:
+        * краще по колінах
+        * якщо колін нема, то по hip_width
+    """
+    if not (
+        is_valid_keypoint(kps, MID_HIP, conf_threshold)
+        and is_valid_keypoint(kps, R_HIP, conf_threshold)
+        and is_valid_keypoint(kps, L_HIP, conf_threshold)
+    ):
+        return None
+
+    mid_hip_xy = get_keypoint_xy(kps, MID_HIP)
+    right_hip_xy = get_keypoint_xy(kps, R_HIP)
+    left_hip_xy = get_keypoint_xy(kps, L_HIP)
+
+    # Ширина таза
+    hip_width = float(np.linalg.norm(left_hip_xy - right_hip_xy))
+    if hip_width < 1e-6:
+        return None
+
+    # Ширина crop для шортів трохи більша за таз
+    shorts_width = shorts_width_ratio * hip_width
+
+    # Верхня межа трохи вище таза
+    top_y = mid_hip_xy[1] - top_lift_ratio * hip_width
+
+    # Якщо є коліна, краще оцінюємо низ шортів через відстань до колін
+    if (
+        is_valid_keypoint(kps, R_KNEE, conf_threshold)
+        and is_valid_keypoint(kps, L_KNEE, conf_threshold)
+    ):
+        right_knee_xy = get_keypoint_xy(kps, R_KNEE)
+        left_knee_xy = get_keypoint_xy(kps, L_KNEE)
+
+        average_knee_y = 0.5 * (right_knee_xy[1] + left_knee_xy[1])
+
+        # Беремо частину шляху від таза до колін
+        bottom_y = mid_hip_xy[1] + knee_height_ratio * (average_knee_y - mid_hip_xy[1])
+    else:
+        # Якщо колін нема, просто йдемо вниз на пропорцію від ширини таза
+        bottom_y = mid_hip_xy[1] + fallback_height_ratio * hip_width
+
+    # Горизонтально центр беремо по mid_hip
+    x1 = mid_hip_xy[0] - shorts_width / 2.0
+    x2 = mid_hip_xy[0] + shorts_width / 2.0
+
+    # Вертикально беремо вже готові верх і низ
+    y1 = top_y
+    y2 = bottom_y
+
+    return crop_from_bbox(frame_bgr, x1, y1, x2, y2)
+
+
+def extract_boxing_crops(
+    frame_bgr: np.ndarray,
+    kps,
+    conf_threshold: float = 0.4,
+):
+    """
+    Витягує 3 crop-и для одного боксера:
+    - left_glove
+    - right_glove
+    - shorts
+
+    Повертає словник, де кожне значення:
+    - np.ndarray, якщо crop вдалося побудувати
+    - None, якщо ні
+    """
+    left_glove_crop = crop_glove_from_arm(
+        frame_bgr=frame_bgr,
+        kps=kps,
+        elbow_idx=L_ELBOW,
+        wrist_idx=L_WRIST,
+        conf_threshold=conf_threshold,
+    )
+
+    right_glove_crop = crop_glove_from_arm(
+        frame_bgr=frame_bgr,
+        kps=kps,
+        elbow_idx=R_ELBOW,
+        wrist_idx=R_WRIST,
+        conf_threshold=conf_threshold,
+    )
+
+    shorts_crop = crop_shorts_from_hips(
+        frame_bgr=frame_bgr,
+        kps=kps,
+        conf_threshold=conf_threshold,
+    )
+
+    return {
+        "left_glove": left_glove_crop,
+        "right_glove": right_glove_crop,
+        "shorts": shorts_crop,
+    }
 
 
 def _find_label_position(base_x, base_ty,

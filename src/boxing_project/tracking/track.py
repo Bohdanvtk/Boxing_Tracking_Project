@@ -90,6 +90,10 @@ class Track:
     app_emb_history: list[np.ndarray] = field(default_factory=list)
     app_crop_history: list[np.ndarray] = field(default_factory=list)
 
+    left_glove_features_history: list[np.ndarray] = field(default_factory=list)
+    right_glove_features_history: list[np.ndarray] = field(default_factory=list)
+    shorts_features_history: list[np.ndarray] = field(default_factory=list)
+
     def predict(self) -> Tuple[np.ndarray, np.ndarray]:
         """
         Advance this track one time step with the Kalman filter.
@@ -139,6 +143,19 @@ class Track:
                 else:
                     self.app_emb_ema = ema_alpha * self.app_emb_ema + (1.0 - ema_alpha) * e_app
                 self.app_emb_history.append(e_app.copy())
+
+            lf = det.meta.get("left_glove_features")
+            if lf is not None:
+                self.left_glove_features_history.append(lf)
+
+            rf = det.meta.get("right_glove_features")
+            if rf is not None:
+                self.right_glove_features_history.append(rf)
+
+            sf = det.meta.get("shorts_features")
+            if sf is not None:
+                self.shorts_features_history.append(sf)
+
 
         return state, cov
 
