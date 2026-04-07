@@ -34,7 +34,14 @@ def _mean_l2_feature(history: list[np.ndarray]) -> np.ndarray | None:
 
 
 
-def _track_mean_embedding(track: "Track") -> np.ndarray | None:
+def _track_mean_embedding(
+    track: "Track",
+    *,
+    w_body: float,
+    w_left_glove: float,
+    w_right_glove: float,
+    w_shorts: float,
+) -> np.ndarray | None:
     """Build one fused descriptor using weighted concatenation."""
     body_feat = _mean_l2_feature(list(getattr(track, "app_emb_history", []) or []))
     left_glove_feat = _mean_l2_feature(list(getattr(track, "left_glove_features_history", []) or []))
@@ -44,12 +51,6 @@ def _track_mean_embedding(track: "Track") -> np.ndarray | None:
     # Треба мати хоча б body, інакше трек занадто слабко описаний
     if body_feat is None:
         return None
-
-    # Ваги
-    w_body = 1.0
-    w_left_glove = 0.5
-    w_right_glove = 0.5
-    w_shorts = 1.0
 
     parts = [w_body * body_feat]
 
@@ -86,6 +87,11 @@ def _track_mean_embedding(track: "Track") -> np.ndarray | None:
 
 def build_mean_embeddings(
     epoch_tracks: dict[int, dict[int, "Track"]],
+    *,
+    w_body: float,
+    w_left_glove: float,
+    w_right_glove: float,
+    w_shorts: float,
 ) -> tuple[list[NodeKey], np.ndarray]:
     """
     Build track-level mean embeddings.
@@ -100,7 +106,16 @@ def build_mean_embeddings(
     for epoch_id in sorted(epoch_tracks.keys()):
         tracks_by_id = epoch_tracks.get(epoch_id, {})
         for local_id, track in sorted(tracks_by_id.items()):
-            mean_emb = _track_mean_embedding(track)
+            if not bool(getattr(track, "confirmed", False)):
+                continue
+
+            mean_emb = _track_mean_embedding(
+                track,
+                w_body=w_body,
+                w_left_glove=w_left_glove,
+                w_right_glove=w_right_glove,
+                w_shorts=w_shorts,
+            )
             if mean_emb is None:
                 continue
             nodes.append((int(epoch_id), int(local_id)))
@@ -295,10 +310,20 @@ class GlobalTrackClusterer:
     n_clusters: int = 3
     random_state: int = 42
     assign_labels: str = "kmeans"
+    w_body: float = 1.0
+    w_left_glove: float = 0.25
+    w_right_glove: float = 0.25
+    w_shorts: float = 0.75
 
     def build_mapping(self, epoch_tracks: dict[int, dict[int, "Track"]]) -> dict[NodeKey, int]:
         """Build ``(epoch_id, local_track_id) -> global_track_id`` mapping."""
-        nodes, embs = build_mean_embeddings(epoch_tracks)
+        nodes, embs = build_mean_embeddings(
+            epoch_tracks,
+            w_body=self.w_body,
+            w_left_glove=self.w_left_glove,
+            w_right_glove=self.w_right_glove,
+            w_shorts=self.w_shorts,
+        )
         n_nodes = len(nodes)
 
         if n_nodes == 0:

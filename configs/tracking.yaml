@@ -58,3 +58,14 @@ tracking:
     min_kp_conf: 0.05         # Minimum keypoint confidence when updating track pose
     reset_g_threshold: 0.32    # If g < this value → reset_mode is activated
                               # (ignore motion & pose, match only by appearance)
+
+  graph_clustering:
+    k: 9
+    sim_threshold: 0.8
+    n_clusters: 3
+    random_state: 42
+    assign_labels: kmeans
+    w_body: 1.0
+    w_left_glove: 0.25
+    w_right_glove: 0.25
+    w_shorts: 0.75

@@ -88,7 +88,6 @@ class Track:
 
     app_emb_ema: Optional[np.ndarray] = None
     app_emb_history: list[np.ndarray] = field(default_factory=list)
-    app_crop_history: list[np.ndarray] = field(default_factory=list)
 
     left_glove_features_history: list[np.ndarray] = field(default_factory=list)
     right_glove_features_history: list[np.ndarray] = field(default_factory=list)

@@ -257,26 +257,12 @@ class FragmentExporter:
         saved_tracks = 0
 
         for trk in eligible:
-            crop_history = list(getattr(trk, "app_crop_history", []) or [])
             emb_history = list(getattr(trk, "app_emb_history", []) or [])
 
-            if not crop_history and not emb_history:
+            if not emb_history:
                 continue
 
-            track_dir = fragment_dir / f"Track_{int(trk.track_id)}"
-            track_dir.mkdir(parents=True, exist_ok=True)
-
-            saved_any_crop = False
-            for crop_idx, crop in enumerate(crop_history):
-                if crop is None:
-                    continue
-
-                out_name = f"crop_{crop_idx:06d}.jpg"
-                cv2.imwrite(str(track_dir / out_name), np.asarray(crop))
-                saved_any_crop = True
-
-            if saved_any_crop or emb_history:
-                saved_tracks += 1
+            saved_tracks += 1
 
         manifest = {
             "frame_idx": int(frame_idx),

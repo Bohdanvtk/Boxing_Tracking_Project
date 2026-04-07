@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 from boxing_project.tracking.tracker import openpose_people_to_detections
 from boxing_project.shot_boundary.inference import ShotBoundaryInferencer, ShotBoundaryInferConfig
 from boxing_project.tracking.image_utils import keypoints_to_bbox, expand_bbox_xyxy, render_tracking_overlays, extract_boxing_crops
@@ -150,16 +151,21 @@ def extract_features_with_hsv(image: np.ndarray) -> np.ndarray:
     # Convert to float32 (useful for ML models)
     return hist.astype(np.float32)
 
-def _store_matched_crops(tracker, frame: np.ndarray, detections, matches) -> None:
-    tracks_by_id = {int(t.track_id): t for t in tracker.tracks}
+def _store_matched_crops(
+    frame: np.ndarray,
+    detections,
+    matches,
+    frame_dir: Optional[Path] = None,
+) -> None:
     h, w = frame.shape[:2]
+    if frame_dir is None:
+        return
+
+    matched_dir = Path(frame_dir) / "extra" / "matched_local"
+    matched_dir.mkdir(parents=True, exist_ok=True)
 
     for track_id, det_idx in matches:
         if det_idx < 0 or det_idx >= len(detections):
-            continue
-
-        trk = tracks_by_id.get(int(track_id))
-        if trk is None:
             continue
 
         raw = detections[det_idx].meta.get("raw", {})
@@ -172,7 +178,36 @@ def _store_matched_crops(tracker, frame: np.ndarray, detections, matches) -> Non
         if crop.size == 0:
             continue
 
-        trk.app_crop_history.append(crop.copy())
+        out_name = f"local_track_{int(track_id):03d}_det_{int(det_idx):03d}.jpg"
+        cv2.imwrite(str(matched_dir / out_name), crop)
+
+
+def _save_global_matched_crops(
+    frame: np.ndarray,
+    detections,
+    global_matches,
+    frame_dir: Optional[Path] = None,
+) -> None:
+    h, w = frame.shape[:2]
+    if frame_dir is None:
+        return
+
+    matched_dir = Path(frame_dir) / "extra" / "matched_global"
+    matched_dir.mkdir(parents=True, exist_ok=True)
+
+    for global_id, det_idx in global_matches:
+        if det_idx < 0 or det_idx >= len(detections):
+            continue
+        raw = detections[det_idx].meta.get("raw", {})
+        bb = _clip_bbox_xyxy(raw.get("bbox", None), img_w=w, img_h=h)
+        if bb is None:
+            continue
+        x1, y1, x2, y2 = bb
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            continue
+        out_name = f"global_id_{int(global_id):03d}_det_{int(det_idx):03d}.jpg"
+        cv2.imwrite(str(matched_dir / out_name), crop)
 
 def show_crop(ax, img, title: str):
     """
@@ -259,11 +294,20 @@ class FrameTrackingResult:
     Результат обробки одного кадру.
     """
     frame_idx: int
-    original_img: np.ndarray
     detections: list
     log: dict
+    original_img: Optional[np.ndarray] = None
 
-def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, reset_mode: bool):
+def process_frame(
+    result,
+    tracker,
+    original_img,
+    conf_th,
+    app_embedder,
+    g: int,
+    reset_mode: bool,
+    frame_dir: Optional[Path] = None,
+):
     """
     Перетворює OpenPose output у формат, зручний для трекера,
     і паралельно готує crop-и частин тіла для візуальної перевірки.
@@ -392,7 +436,12 @@ def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, 
                 det.meta["e_app_error"] = str(e)
 
     log = tracker.update(detections, g=g, reset_mode=reset_mode)
-    _store_matched_crops(tracker, original_img, detections, log.get("matches", []))
+    _store_matched_crops(
+        original_img,
+        detections,
+        log.get("matches", []),
+        frame_dir=frame_dir,
+    )
     return detections, log
 
 
@@ -455,15 +504,42 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
             tracker.cfg.min_kp_conf,
             app_embedder,
             g=g,
-            reset_mode=reset_mode
+            reset_mode=reset_mode,
+            frame_dir=(Path(save_dir) / f"frame_{frame_idx:06d}") if save_dir is not None else None,
         )
+
+        local_matches = [
+            (int(local_track_id), int(det_idx))
+            for local_track_id, det_idx in log.get("matches", [])
+        ]
+        local_frame = img.copy()
+        render_tracking_overlays(
+            frame=local_frame,
+            detections=detections,
+            matches=local_matches,
+            frame_idx=frame_idx,
+            use_global_ids=False,
+        )
+
+        if save_dir is not None:
+            save_tracking_outputs(
+                save_dir=save_dir,
+                frame_idx=frame_idx,
+                original_frame=img,
+                processed_frame=None,
+                local_processed_frame=local_frame,
+                detections=detections,
+                log=log,
+                conf_th=tracker.cfg.min_kp_conf,
+                tracker=tracker,
+            )
 
         frame_results.append(
             FrameTrackingResult(
                 frame_idx=frame_idx,
-                original_img=img.copy(),
                 detections=detections,
                 log=log,
+                original_img=None if save_dir is not None else img.copy(),
             )
         )
 
@@ -489,6 +565,10 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
         n_clusters=int(params.get("n_clusters", 2)),
         random_state=int(params.get("random_state", 42)),
         assign_labels=str(params.get("assign_labels", "kmeans")),
+        w_body=float(params.get("w_body", 1.0)),
+        w_left_glove=float(params.get("w_left_glove", 0.25)),
+        w_right_glove=float(params.get("w_right_glove", 0.25)),
+        w_shorts=float(params.get("w_shorts", 0.75)),
     )
     local_to_global = clusterer.build_mapping(epoch_tracks=epoch_tracks)
 
@@ -508,7 +588,6 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
                         "matched_to_global": bool(gid is not None),
                         "hits": int(getattr(trk, "hits", 0)),
                         "embeddings": int(len(getattr(trk, "app_emb_history", []) or [])),
-                        "crops": int(len(getattr(trk, "app_crop_history", []) or [])),
                     }
                 )
 
@@ -524,7 +603,14 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
             for local_track_id, det_idx in result.log.get("matches", [])
         ]
 
-        local_frame = result.original_img.copy()
+        original_frame = result.original_img
+        if original_frame is None and save_dir is not None:
+            frame_path = Path(save_dir) / f"frame_{result.frame_idx:06d}" / "extra" / "unprocessed_image.jpg"
+            original_frame = cv2.imread(str(frame_path))
+        if original_frame is None:
+            continue
+
+        local_frame = original_frame.copy()
         render_tracking_overlays(
             frame=local_frame,
             detections=result.detections,
@@ -533,7 +619,7 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
             use_global_ids=False,
         )
 
-        global_frame = result.original_img.copy()
+        global_frame = original_frame.copy()
         global_matches = []
         for local_track_id, det_idx in result.log.get("matches", []):
             gid = local_to_global.get((int(result.log.get("epoch_id", 1)), int(local_track_id)), int(local_track_id))
@@ -548,12 +634,13 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
         )
 
         if save_dir is not None:
+            frame_dir = Path(save_dir) / f"frame_{result.frame_idx:06d}"
             out_log = dict(result.log)
             out_log["global_matches"] = global_matches
             save_tracking_outputs(
                 save_dir=save_dir,
                 frame_idx=result.frame_idx,
-                original_frame=result.original_img,
+                original_frame=original_frame,
                 processed_frame=global_frame,
                 local_processed_frame=local_frame,
                 detections=result.detections,
@@ -561,6 +648,13 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
                 conf_th=tracker.cfg.min_kp_conf,
                 tracker=tracker,
             )
+            _save_global_matched_crops(
+                frame=original_frame,
+                detections=result.detections,
+                global_matches=global_matches,
+                frame_dir=frame_dir,
+            )
+            cv2.imwrite(str(frame_dir / "extra" / "frame_global_vis.jpg"), global_frame)
 
         rendered_frames.append(global_frame)
 
