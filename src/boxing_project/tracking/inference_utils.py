@@ -168,18 +168,38 @@ def _store_matched_crops(
         if det_idx < 0 or det_idx >= len(detections):
             continue
 
-        raw = detections[det_idx].meta.get("raw", {})
+        det = detections[det_idx]
+        raw = det.meta.get("raw", {})
+
+        # -----------------------------
+        # 1. Save full person bbox crop
+        # -----------------------------
         bb = _clip_bbox_xyxy(raw.get("bbox", None), img_w=w, img_h=h)
-        if bb is None:
-            continue
+        if bb is not None:
+            x1, y1, x2, y2 = bb
+            crop = frame[y1:y2, x1:x2]
+            if crop.size != 0:
+                out_name = f"local_track_{int(track_id):03d}_det_{int(det_idx):03d}_person.jpg"
+                cv2.imwrite(str(matched_dir / out_name), crop)
 
-        x1, y1, x2, y2 = bb
-        crop = frame[y1:y2, x1:x2]
-        if crop.size == 0:
-            continue
+        # -----------------------------
+        # 2. Save part crops
+        # -----------------------------
+        left_glove_crop = raw.get("left_glove_crop")
+        right_glove_crop = raw.get("right_glove_crop")
+        shorts_crop = raw.get("shorts_crop")
 
-        out_name = f"local_track_{int(track_id):03d}_det_{int(det_idx):03d}.jpg"
-        cv2.imwrite(str(matched_dir / out_name), crop)
+        if left_glove_crop is not None and left_glove_crop.size != 0:
+            out_name = f"local_track_{int(track_id):03d}_det_{int(det_idx):03d}_left_glove.jpg"
+            cv2.imwrite(str(matched_dir / out_name), left_glove_crop)
+
+        if right_glove_crop is not None and right_glove_crop.size != 0:
+            out_name = f"local_track_{int(track_id):03d}_det_{int(det_idx):03d}_right_glove.jpg"
+            cv2.imwrite(str(matched_dir / out_name), right_glove_crop)
+
+        if shorts_crop is not None and shorts_crop.size != 0:
+            out_name = f"local_track_{int(track_id):03d}_det_{int(det_idx):03d}_shorts.jpg"
+            cv2.imwrite(str(matched_dir / out_name), shorts_crop)
 
 
 def _save_global_matched_crops(

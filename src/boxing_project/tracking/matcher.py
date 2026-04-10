@@ -15,14 +15,18 @@ from boxing_project.tracking.normalization import bones_vector, mirror_invariant
 
 @dataclass
 class MatchConfig:
-    """"Конфіг для побудови cost matrix (motion/pose/app + gating)." """
     alpha: float
     chi2_gating: float
     large_cost: float
     pose_scale_eps: float
     keypoint_weights: Optional[np.ndarray]
     min_kp_conf: float
+
     greedy_threshold: float
+    motion_threshold: float
+    pose_threshold: float
+    appearance_threshold: float
+
     emb_ema_alpha: float
     w_motion: float
     w_pose: float
@@ -32,7 +36,6 @@ class MatchConfig:
     pose_center: list = list
 
     save_log: bool = bool
-
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """
@@ -312,6 +315,7 @@ def build_cost_matrix(
                 continue
 
             # appearance (works always)
+            # appearance
             if trk.app_emb_ema is not None and isinstance(det.meta, dict) and ("e_app" in det.meta):
                 sim_app = cosine_similarity(trk.app_emb_ema, det.meta["e_app"])
             else:
@@ -319,17 +323,31 @@ def build_cost_matrix(
 
             app_cost = (1.0 - sim_app) / 2.0
 
-            cost = (
-                    cfg.w_motion * (g * d_motion_norm)
-                    + cfg.w_pose * pose_cost
-                    + cfg.w_app * app_cost
-            )
-
             cell.d_pose = float(pose_cost)
             cell.d_app = float(app_cost)
+
+            motion_ok = d_motion_norm <= cfg.motion_threshold
+            pose_ok = pose_cost <= cfg.pose_threshold
+            app_ok = app_cost <= cfg.appearance_threshold
+
+            # optional debug fields
+            cell.motion_ok = bool(motion_ok)
+            cell.pose_ok = bool(pose_ok)
+            cell.app_ok = bool(app_ok)
+
+            if not (motion_ok and pose_ok and app_ok):
+                C[i, j] = float(cfg.large_cost)
+                cell.cost = float(cfg.large_cost)
+                continue
+
+            cost = (
+                cfg.w_motion * (g * d_motion_norm)
+                + cfg.w_pose * pose_cost
+                + cfg.w_app * app_cost
+            )
+
             cell.cost = float(cost)
             C[i, j] = float(cost)
-
     if show or cfg.save_log:
         log.show_matrix()
 
