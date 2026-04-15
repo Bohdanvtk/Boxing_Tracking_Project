@@ -38,6 +38,9 @@ def make_match_config(cfg: dict) -> MatchConfig:
     w_motion = _get(cfg, "tracking.matching.w_motion", 3)
     w_pose = _get(cfg, "tracking.matching.w_pose", 5)
     w_app = _get(cfg, "tracking.matching.w_app", 10)
+    k_motion = _get(cfg, "tracking.matching.k_motion", 3)
+    k_pose = _get(cfg, "tracking.matching.k_pose", 3)
+    k_app = _get(cfg, "tracking.matching.k_app", 4)
     min_core_kps = int(_get(cfg, "tracking.matching.min_core_kps", 8))
     pose_core = _get(cfg, "tracking.matching.pose_core", [1, 2, 5, 8, 9, 12] )
     pose_center = _get(cfg, "tracking.matching.pose_center", [8, 1, 9, 12, 5, 2])
@@ -67,6 +70,9 @@ def make_match_config(cfg: dict) -> MatchConfig:
         w_motion=w_motion,
         w_pose=w_pose,
         w_app=w_app,
+        k_motion=k_motion,
+        k_pose=k_pose,
+        k_app=k_app,
         min_core_kps=min_core_kps,
         pose_scale_eps=pose_scale_eps,
         save_log=save_log,

@@ -1,4 +1,3 @@
-# src/boxing_project/tracking/tracking_debug.py
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -22,14 +21,25 @@ class MatrixCell:
 
     Stores all components you compute for a pair (track_i, det_j).
     """
+    # raw absolute values
     d_motion: float = 0.0
     d_pose: float = 0.0
     d_app: float = 0.0
+
+    # row-wise relative penalties
+    rel_motion: float = 0.0
+    rel_pose: float = 0.0
+    rel_app: float = 0.0
+
+    # final cost
     cost: float = 0.0
 
-    # optional gating info
+    # gating/debug info
     allowed: bool = True
     d2: Optional[float] = None
+    motion_ok: bool = True
+    pose_ok: bool = True
+    app_ok: bool = True
 
 
 @dataclass
@@ -55,9 +65,7 @@ class DebugLog:
     matrix: List[List[MatrixCell]] = field(default_factory=list)
 
     def _emit(self, line: str) -> None:
-        # Always collect into buffer
         self.buffer.append(line)
-        # Print only if enabled_print=True
         if self.enabled_print:
             self.sink(line)
 
@@ -88,14 +96,7 @@ class DebugLog:
             return self.matrix[int(i)][int(j)]
         return self.matrix[int(idx)]
 
-    # ----------------------------
-    # Helpers to get ids from meta
-    # ----------------------------
     def _get_track_id(self, i: int) -> Any:
-        """
-        Returns a persistent track_id for row index i, if available.
-        Fallback: returns f"track_index={i}" if no info.
-        """
         try:
             if isinstance(self.meta, dict):
                 track_ids = self.meta.get("track_ids", None)
@@ -107,7 +108,6 @@ class DebugLog:
                     t = tracks[i]
                     if isinstance(t, dict) and "track_id" in t:
                         return t["track_id"]
-                    # allow objects with attribute track_id
                     if hasattr(t, "track_id"):
                         return getattr(t, "track_id")
         except Exception:
@@ -115,10 +115,6 @@ class DebugLog:
         return f"track_index={i}"
 
     def _get_det_id(self, j: int) -> Any:
-        """
-        Returns a detection id for col index j, if available.
-        Fallback: returns f"det_index={j}" if no info.
-        """
         try:
             if isinstance(self.meta, dict):
                 det_ids = self.meta.get("det_ids", None)
@@ -129,7 +125,6 @@ class DebugLog:
                 if isinstance(detections, (list, tuple)) and 0 <= j < len(detections):
                     d = detections[j]
                     if isinstance(d, dict):
-                        # try common keys
                         for k in ("det_id", "id", "detection_id", "person_id"):
                             if k in d:
                                 return d[k]
@@ -143,20 +138,18 @@ class DebugLog:
 
     def show_matrix(self, precision: int = 6) -> None:
         """
-        New output format:
+        Output format:
           1) g coefficient + explanation of indices
-          2) Full breakdown PER TRACK (track_id) over all detections (det_id)
+          2) Full breakdown PER TRACK over all detections
           3) Summary: best match per track (row-min)
           4) Compact cost matrix
 
-        Collects text into GENERAL_LOG regardless of enabled_print.
+        Final cost is RELATIVE-ONLY after hard gating.
         """
         global FRAME_IDX
 
-        # Start a fresh buffer for this call
         self.buffer.clear()
 
-        # If empty matrix: still collect a log entry (useful for saving)
         if self.n_rows == 0 or self.n_cols == 0:
             self.section("[debug] empty matrix")
             frame_header(FRAME_IDX)
@@ -165,7 +158,6 @@ class DebugLog:
             self.reset_matrix()
             return
 
-        # g coefficient (optional)
         g = None
         if isinstance(self.meta, dict):
             g = self.meta.get("g", None)
@@ -173,23 +165,20 @@ class DebugLog:
         if g is not None:
             self.section(f"[debug] frame coefficient g = {float(g):.3f}")
 
-        # Explain indexes once
         self.section("[info] Meaning of indexes:")
         self.line("- Track#i = i-th element in the current tracks list (0-based list index)")
         self.line("- Det#j   = j-th element in the current detections list (0-based list index)")
-        self.line("- track_id = persistent ID stored inside Track (e.g., tracks[i].track_id)")
-        self.line("- det_id   = ID stored for Detection (if available; otherwise it can be just j)")
+        self.line("- track_id = persistent ID stored inside Track")
+        self.line("- det_id   = ID stored for Detection (if available; otherwise j)")
         self.line("")
-        self.line("[debug] Pairwise costs (lower = better). 880.0 usually means GATED / INVALID MATCH.")
+        self.line("[debug] Final cost is RELATIVE-ONLY after hard gating.")
+        self.line("[debug] Raw d_* values are used for gating and debug.")
+        self.line("[debug] Lower final cost = better. large_cost usually means GATED / INVALID MATCH.")
 
-        # -----------------------------------------
-        # 1) Full breakdown grouped by each track row
-        # -----------------------------------------
         self.section("=" * 80)
         self.line("TRACK DETAILS (full breakdown)")
         self.line("=" * 80)
 
-        # Precompute row minima for "best match" markers
         row_best_j: List[int] = []
         row_best_cost: List[float] = []
         for i in range(self.n_rows):
@@ -212,28 +201,38 @@ class DebugLog:
                 did = self._get_det_id(j)
                 cell = self.matrix[i][j]
 
-                # marker: best for the row
                 marker = ""
                 if j == row_best_j[i]:
                     marker = "   <-- best match for this track (row minimum)"
 
-                # gated marker (heuristic: cost >= 880 or not allowed)
+                reasons = []
+                if not bool(cell.allowed):
+                    reasons.append("chi2")
+                if not bool(cell.motion_ok):
+                    reasons.append("motion_thr")
+                if not bool(cell.pose_ok):
+                    reasons.append("pose_thr")
+                if not bool(cell.app_ok):
+                    reasons.append("app_thr")
+
                 gated = ""
-                if (not bool(cell.allowed)) or float(cell.cost) >= 879.999:
-                    gated = "  [GATED / INVALID]"
+                if reasons:
+                    gated = f"  [GATED: {', '.join(reasons)}]"
 
                 self.line(f"  Det#{j} (det_id={did}):")
                 self.line(f"    d_motion = {cell.d_motion:.{precision}f}")
                 self.line(f"    d_pose   = {cell.d_pose:.{precision}f}")
                 self.line(f"    d_app    = {cell.d_app:.{precision}f}")
+                self.line(f"    rel_m    = {cell.rel_motion:.{precision}f}")
+                self.line(f"    rel_p    = {cell.rel_pose:.{precision}f}")
+                self.line(f"    rel_a    = {cell.rel_app:.{precision}f}")
+                if cell.d2 is not None:
+                    self.line(f"    d2       = {cell.d2:.{precision}f}")
                 self.line(f"    cost     = {cell.cost:.{precision}f}{gated}{marker}")
 
             self.line("")
             self.line("-" * 80)
 
-        # -----------------------------------------
-        # 2) Summary per track: best detection (row min)
-        # -----------------------------------------
         self.section("=" * 80)
         self.line("SUMMARY (row-min best match per track)")
         self.line("=" * 80)
@@ -248,14 +247,10 @@ class DebugLog:
         self.line("[info] Note: this is per-track best. Final assignment can differ because one detection")
         self.line("       cannot be matched to many tracks at the same time.")
 
-        # -----------------------------------------
-        # 3) Compact matrix
-        # -----------------------------------------
         self.section("=" * 80)
         self.line("COST MATRIX (tracks x detections)")
         self.line("=" * 80)
 
-        # header with Det#j
         header = "           " + " ".join([f"Det#{j:02d}" for j in range(self.n_cols)])
         self.line(header)
 
@@ -265,9 +260,6 @@ class DebugLog:
             row_vals = [fmt.format(float(self.matrix[i][j].cost)) for j in range(self.n_cols)]
             self.line(f"Track#{i:02d} " + " ".join(row_vals))
 
-        # -----------------------------------------
-        # Persist into GENERAL_LOG for saving
-        # -----------------------------------------
         frame_header(FRAME_IDX)
         FRAME_IDX += 1
         GENERAL_LOG.extend(self.buffer)

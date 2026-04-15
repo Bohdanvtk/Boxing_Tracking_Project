@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Tuple, Optional, Callable, Union
 
@@ -10,7 +10,11 @@ import numpy as np
 from .track import Track, Detection
 from . import DEFAULT_TRACKING_CONFIG_PATH
 from .tracking_debug import DebugLog
-from boxing_project.tracking.normalization import bones_vector, mirror_invariant, normalize_pose_2d
+from boxing_project.tracking.normalization import (
+    bones_vector,
+    mirror_invariant,
+    normalize_pose_2d,
+)
 
 
 @dataclass
@@ -32,10 +36,16 @@ class MatchConfig:
     w_pose: float
     w_app: float
     min_core_kps: int
-    pose_core: list = list
-    pose_center: list = list
 
-    save_log: bool = bool
+    pose_core: list = field(default_factory=list)
+    pose_center: list = field(default_factory=list)
+    save_log: bool = False
+
+    relative_eps: float = 1e-6
+    k_motion: float = 3.0
+    k_pose: float = 3.0
+    k_app: float = 3.0
+
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """
@@ -54,6 +64,60 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (na * nb))
 
 
+def _log_ratio_penalty(
+    value: float,
+    best: float,
+    k: float,
+    eps: float = 1e-6,
+) -> float:
+    """
+    Relative penalty in [0, 1].
+
+    value == best        -> 0
+    value == k * best    -> 1
+    value  > k * best    -> 1 (clipped)
+    """
+    value = float(value)
+    best = float(best)
+    k = float(max(k, 1.000001))
+    eps = float(max(eps, 1e-12))
+
+    ratio = (value + eps) / (best + eps)
+    penalty = np.log(ratio) / np.log(k)
+    return float(np.clip(penalty, 0.0, 1.0))
+
+
+def _compute_row_relative_penalties(
+    values: np.ndarray,
+    valid_mask: np.ndarray,
+    k: float,
+    eps: float,
+) -> np.ndarray:
+    """
+    values: shape (n_dets,)
+    valid_mask: bool mask for valid detections in this row
+
+    Returns penalties in [0, 1].
+    Invalid entries get 1.0 by default.
+    """
+    penalties = np.ones_like(values, dtype=np.float32)
+
+    valid_idx = np.where(valid_mask)[0]
+    if valid_idx.size == 0:
+        return penalties
+
+    best = float(np.min(values[valid_idx]))
+
+    for j in valid_idx:
+        penalties[j] = _log_ratio_penalty(
+            value=float(values[j]),
+            best=best,
+            k=k,
+            eps=eps,
+        )
+
+    return penalties
+
 
 def get_common_valid_joints(
     kpt_t: np.ndarray,
@@ -66,7 +130,6 @@ def get_common_valid_joints(
     """
     Returns indices of pose_core joints that are valid in BOTH track and detection.
     """
-    # basic checks
     if kpt_t is None or kpt_d is None:
         return None
     if kpt_t.ndim != 2 or kpt_d.ndim != 2 or kpt_t.shape[1] < 2 or kpt_d.shape[1] < 2:
@@ -76,7 +139,6 @@ def get_common_valid_joints(
 
     n_k = kpt_t.shape[0]
 
-    # confidence fallback
     if conf_t is None:
         conf_t = np.ones((n_k,), dtype=float)
     if conf_d is None:
@@ -87,13 +149,11 @@ def get_common_valid_joints(
     if conf_t.shape[0] != n_k or conf_d.shape[0] != n_k:
         return None
 
-    # pose_core sanity
     core = np.asarray(pose_core, dtype=int).reshape(-1)
     core = core[(core >= 0) & (core < n_k)]
     if core.size == 0:
         return None
 
-    # validity mask on core joints
     good_t = np.isfinite(kpt_t[core, :2]).all(axis=1) & (conf_t[core] >= min_kp_conf)
     good_d = np.isfinite(kpt_d[core, :2]).all(axis=1) & (conf_d[core] >= min_kp_conf)
 
@@ -106,7 +166,6 @@ def pick_shared_root(kpt_t, kpt_d, conf_t, conf_d, pose_center, min_kp_conf):
     If no valid shared keypoint exists, returns None.
     Safe against None inputs.
     """
-
     if (
         kpt_t is None
         or kpt_d is None
@@ -127,7 +186,6 @@ def pick_shared_root(kpt_t, kpt_d, conf_t, conf_d, pose_center, min_kp_conf):
     return None
 
 
-
 def _pose_distance(
     track_keypoints: Optional[np.ndarray],
     track_kp_conf: Optional[np.ndarray],
@@ -141,7 +199,6 @@ def _pose_distance(
 
     Returns similarity in [-1, 1].
     """
-
     if track_keypoints is None or det_keypoints is None:
         return 0.0
 
@@ -231,28 +288,30 @@ def _prepare_pose_for_distance(keypoints, kp_conf, cfg):
     return kpt, conf
 
 
-
-
-def _motion_cost_with_gating(track: Track, det: Detection, cfg: MatchConfig, gating: bool) -> Tuple[float, bool, float]:
+def _motion_cost_with_gating(
+    track: Track,
+    det: Detection,
+    cfg: MatchConfig,
+    gating: bool,
+) -> Tuple[float, bool, float]:
     d2 = track.kf.gating_distance(np.asarray(det.center, dtype=float))
-    allowed = (d2 <= cfg.chi2_gating)
+    allowed = d2 <= cfg.chi2_gating
     d_motion = float(np.sqrt(max(d2, 0.0)))
 
-    if gating == False:
+    if gating is False:
         allowed = True
+
     return d_motion, allowed, float(d2)
 
 
 def build_cost_matrix(
     tracks: List[Track],
     detections: List[Detection],
-    reset_mode: bool,
     cfg: MatchConfig,
     show: bool = True,
     sink: Optional[Callable[[str], None]] = None,
     g: float = 1.0,
 ) -> Tuple[np.ndarray, DebugLog]:
-
     n_t = len(tracks)
     n_d = len(detections)
     C = np.zeros((n_t, n_d), dtype=np.float32)
@@ -262,10 +321,10 @@ def build_cost_matrix(
     log = DebugLog(enabled_print=show, sink=sink or print)
     log.meta = {
         "g": g,
-        "tracks": tracks,  # <-- щоб _get_track_id(i) брав trk.track_id
-        "detections": detections,  # <-- щоб _get_det_id(j) міг брати id якщо є
-        "track_ids": [t.track_id for t in tracks],  # (опційно, але супер-надійно)
-        "det_ids": list(range(len(detections)))  # щоб явно було Det#j == j
+        "tracks": tracks,
+        "detections": detections,
+        "track_ids": [t.track_id for t in tracks],
+        "det_ids": list(range(len(detections))),
     }
 
     log.create_matrix(n_t, n_d)
@@ -279,22 +338,31 @@ def build_cost_matrix(
         for det in detections
     ]
 
-
     for i, trk in enumerate(tracks):
+        row_motion = np.full((n_d,), np.inf, dtype=np.float32)
+        row_pose = np.full((n_d,), np.inf, dtype=np.float32)
+        row_app = np.full((n_d,), np.inf, dtype=np.float32)
+        row_valid = np.zeros((n_d,), dtype=bool)
+
+        # PASS 1: raw pairwise values + hard gating
         for j, det in enumerate(detections):
             cell = log[i, j]
 
-            d_motion, allowed, d2 = _motion_cost_with_gating(trk, det, cfg, gating=True)
-            d_motion_norm = float(np.clip(d2 / max(cfg.chi2_gating, 1e-12), 0.0, 1.0))
+            d_motion, allowed, d2 = _motion_cost_with_gating(
+                trk, det, cfg, gating=True
+            )
+            d_motion_norm = float(
+                np.clip(d2 / max(cfg.chi2_gating, 1e-12), 0.0, 1.0)
+            )
 
             trk_kps, trk_conf = track_pose[i]
             det_kps, det_conf = det_pose[j]
 
-            #picking common root index and normilize
-
             root_idx = pick_shared_root(
-                trk_kps, det_kps,
-                trk_conf, det_conf,
+                trk_kps,
+                det_kps,
+                trk_conf,
+                det_conf,
                 cfg.pose_center,
                 cfg.min_kp_conf,
             )
@@ -302,57 +370,86 @@ def build_cost_matrix(
             if root_idx is not None:
                 trk_kps = normalize_pose_2d(trk_kps, root_idx)
                 det_kps = normalize_pose_2d(det_kps, root_idx)
+
             sim_pose = _pose_distance(trk_kps, trk_conf, det_kps, det_conf, cfg)
-            pose_cost = (1.0 - sim_pose) / 2.0
+            pose_cost = float((1.0 - sim_pose) / 2.0)
 
-            cell.d_motion = float(d_motion_norm)
-            cell.allowed = bool(allowed)
-            cell.d2 = float(d2)
-
-            if not allowed:
-                C[i, j] = float(cfg.large_cost)
-                cell.cost = float(cfg.large_cost)
-                continue
-
-            # appearance (works always)
-            # appearance
             if trk.app_emb_ema is not None and isinstance(det.meta, dict) and ("e_app" in det.meta):
                 sim_app = cosine_similarity(trk.app_emb_ema, det.meta["e_app"])
             else:
                 sim_app = 0.0
 
-            app_cost = (1.0 - sim_app) / 2.0
-
-            cell.d_pose = float(pose_cost)
-            cell.d_app = float(app_cost)
+            app_cost = float((1.0 - sim_app) / 2.0)
 
             motion_ok = d_motion_norm <= cfg.motion_threshold
             pose_ok = pose_cost <= cfg.pose_threshold
             app_ok = app_cost <= cfg.appearance_threshold
 
-            # optional debug fields
+            valid = bool(allowed and motion_ok and pose_ok and app_ok)
+
+            cell.d_motion = float(d_motion_norm)
+            cell.allowed = bool(allowed)
+            cell.d2 = float(d2)
+            cell.d_pose = float(pose_cost)
+            cell.d_app = float(app_cost)
             cell.motion_ok = bool(motion_ok)
             cell.pose_ok = bool(pose_ok)
             cell.app_ok = bool(app_ok)
 
-            if not (motion_ok and pose_ok and app_ok):
+            row_motion[j] = float(d_motion_norm)
+            row_pose[j] = float(pose_cost)
+            row_app[j] = float(app_cost)
+            row_valid[j] = valid
+
+        # PASS 2: row-wise relative penalties
+        rel_motion = _compute_row_relative_penalties(
+            values=row_motion,
+            valid_mask=row_valid,
+            k=cfg.k_motion,
+            eps=cfg.relative_eps,
+        )
+        rel_pose = _compute_row_relative_penalties(
+            values=row_pose,
+            valid_mask=row_valid,
+            k=cfg.k_pose,
+            eps=cfg.relative_eps,
+        )
+        rel_app = _compute_row_relative_penalties(
+            values=row_app,
+            valid_mask=row_valid,
+            k=cfg.k_app,
+            eps=cfg.relative_eps,
+        )
+
+        # PASS 3: final RELATIVE-ONLY cost
+        for j in range(n_d):
+            cell = log[i, j]
+
+            if not row_valid[j]:
                 C[i, j] = float(cfg.large_cost)
                 cell.cost = float(cfg.large_cost)
+                cell.rel_motion = 1.0
+                cell.rel_pose = 1.0
+                cell.rel_app = 1.0
                 continue
 
+            cell.rel_motion = float(rel_motion[j])
+            cell.rel_pose = float(rel_pose[j])
+            cell.rel_app = float(rel_app[j])
+
             cost = (
-                cfg.w_motion * (g * d_motion_norm)
-                + cfg.w_pose * pose_cost
-                + cfg.w_app * app_cost
+                cfg.w_motion * float(rel_motion[j])
+                + cfg.w_pose * float(rel_pose[j])
+                + cfg.w_app * float(rel_app[j])
             )
 
             cell.cost = float(cost)
             C[i, j] = float(cost)
+
     if show or cfg.save_log:
         log.show_matrix()
 
     return C, log
-
 
 
 def linear_assignment_with_unmatched(
@@ -394,11 +491,11 @@ def linear_assignment_with_unmatched(
     return matched, unmatched_tracks, unmatched_dets
 
 
-
-
-
-def _load_match_config_from_yaml(config_path: Optional[Union[str, Path]] = None) -> MatchConfig:
+def _load_match_config_from_yaml(
+    config_path: Optional[Union[str, Path]] = None,
+) -> MatchConfig:
     from boxing_project.utils.config import load_tracking_config
+
     resolved = Path(config_path) if config_path is not None else DEFAULT_TRACKING_CONFIG_PATH
     _, match_cfg, _ = load_tracking_config(str(resolved))
     return copy.deepcopy(match_cfg)
@@ -413,12 +510,9 @@ def match_tracks_and_detections(
     sink=None,
     config_path=None,
     g: float = 1.0,
-
 ):
     if cfg is None:
         cfg = _load_match_config_from_yaml(config_path)
-
-
 
     C, log = build_cost_matrix(
         tracks=tracks,
@@ -427,9 +521,7 @@ def match_tracks_and_detections(
         show=debug,
         sink=sink,
         g=g,
-        reset_mode=reset_mode
     )
-
 
     matches, um_tr, um_dt = linear_assignment_with_unmatched(
         C=C,
