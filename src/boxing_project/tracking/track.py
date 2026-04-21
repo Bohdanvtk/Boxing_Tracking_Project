@@ -133,7 +133,10 @@ class Track:
         self.last_keypoints = None if det.keypoints is None else np.asarray(det.keypoints, dtype=float)
         self.last_kp_conf = None if det.kp_conf is None else np.asarray(det.kp_conf, dtype=float)
 
-        if update_app:
+        bbox_quality = det.meta.get("bbox_quality", "invalid")
+        allow_app_update = bbox_quality in {"high", "medium"}
+
+        if update_app and allow_app_update:
             e_app = det.meta.get("e_app", None)
             if e_app is not None:
                 e_app = np.asarray(e_app, dtype=np.float32)

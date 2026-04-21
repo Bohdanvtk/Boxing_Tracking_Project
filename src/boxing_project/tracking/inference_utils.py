@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 from boxing_project.tracking.tracker import openpose_people_to_detections
 from boxing_project.shot_boundary.inference import ShotBoundaryInferencer, ShotBoundaryInferConfig
-from boxing_project.tracking.image_utils import keypoints_to_bbox, expand_bbox_xyxy, render_tracking_overlays, extract_boxing_crops
+from boxing_project.tracking.image_utils import keypoints_to_bbox, render_tracking_overlays, extract_boxing_crops
 from boxing_project.tracking.saving_utils import FragmentExporter, save_tracking_outputs
 from boxing_project.tracking.global_clustering import GlobalTrackClusterer
 import matplotlib.pyplot as plt
@@ -369,6 +369,7 @@ def process_frame(
     # - crop-и частин тіла
     parts_crops = []
     bboxes = []
+    bboxes_quality = []
 
     # ------------------------------------------
     # 2. Для кожної людини:
@@ -377,8 +378,7 @@ def process_frame(
     # ------------------------------------------
     for i in range(n_people):
         # Bbox людини по keypoints
-        bb = keypoints_to_bbox(kps[i], conf_th)
-
+        bb, bbox_quality = keypoints_to_bbox(kps[i], conf_th, w, h)
         # Crop-и частин тіла:
         # left_glove, right_glove, shorts
         parts = extract_boxing_crops(
@@ -387,24 +387,18 @@ def process_frame(
             conf_threshold=conf_th
         )
 
-        # Трохи розширюємо bbox людини
-        bb = expand_bbox_xyxy(
-            bb,
-            img_w=w,
-            img_h=h,
-            width_ratio=0.10,
-            height_ratio=0.15
-        )
 
         # Зберігаємо результати
         bboxes.append(bb)
         parts_crops.append(parts)
+        bboxes_quality.append(bbox_quality)
 
     # ------------------------------------------
     # 3. Записуємо все назад у people
     # ------------------------------------------
     for i in range(n_people):
         people[i]["bbox"] = bboxes[i]
+        people[i]["bbox_quality"] = bboxes_quality[i]
 
         # Тут тепер уже правильно:
         # це саме crop-и, а не bbox-и
@@ -438,11 +432,15 @@ def process_frame(
     for det in detections:
         raw = det.meta.get("raw", {})
         bbox = raw.get("bbox", None)
+        bbox_quality = raw.get("bbox_quality", "invalid")
+
         left_glove_crop = raw.get("left_glove_crop")
         right_glove_crop = raw.get("right_glove_crop")
         shorts_crop = raw.get("shorts_crop")
 
-        if app_embedder is not None and bbox is not None:
+        det.meta["bbox_quality"] = bbox_quality
+
+        if app_embedder is not None and bbox is not None and bbox_quality in {"high", "medium"}:
             try:
                 det.meta["e_app"] = app_embedder.embed(original_img, bbox)
                 det.meta["left_glove_features"] = extract_features_with_hsv(left_glove_crop)
@@ -454,6 +452,11 @@ def process_frame(
                 det.meta["right_glove_features"] = None
                 det.meta["shorts_features"] = None
                 det.meta["e_app_error"] = str(e)
+        else:
+            det.meta["e_app"] = None
+            det.meta["left_glove_features"] = extract_features_with_hsv(left_glove_crop)
+            det.meta["right_glove_features"] = extract_features_with_hsv(right_glove_crop)
+            det.meta["shorts_features"] = extract_features_with_hsv(shorts_crop)
 
     log = tracker.update(detections, g=g, reset_mode=reset_mode)
     _store_matched_crops(

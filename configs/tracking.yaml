@@ -25,7 +25,7 @@ tracking:
     appearance_threshold: 0.5 # Max allowed appearance distance
                               # Above this -> reject pair
 
-    emb_ema_alpha: 0.6        # EMA update factor for appearance embedding
+    emb_ema_alpha: 0.8       # EMA update factor for appearance embedding
                               # Higher -> faster update to new appearance
     bad_kp_patience: 50       # Frames to wait before updating from bad keypoints
     large_cost: 880.0         # Sentinel cost for invalid / gated pairs
