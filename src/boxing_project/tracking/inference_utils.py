@@ -151,6 +151,58 @@ def extract_features_with_hsv(image: np.ndarray) -> np.ndarray:
     # Convert to float32 (useful for ML models)
     return hist.astype(np.float32)
 
+def _kp_center(kp: np.ndarray, conf_th: float):
+    valid = kp[:, 2] > conf_th
+    if not np.any(valid):
+        return None
+    return np.mean(kp[valid, :2], axis=0)
+
+
+def _center_dist(a, b) -> float:
+    if a is None or b is None:
+        return float("inf")
+    return float(np.linalg.norm(a - b))
+
+
+def select_top3_with_nearest(kps: np.ndarray, conf_th: float) -> np.ndarray:
+    """
+    Keep top-3 OpenPose detections by original OpenPose order.
+    Then add one nearest extra detection for each top detection.
+
+    If two top detections share the same nearest extra detection,
+    that duplicate is allowed once. Other top detections then try
+    to get their own next nearest extra detection.
+
+    Result: usually 4-6 people, depending on duplicates.
+    """
+
+    n = len(kps)
+    if n <= 3:
+        return kps
+
+    top_indices = list(range(min(3, n)))
+    extra_indices = list(range(3, n))
+
+    centers = [_kp_center(kps[i], conf_th) for i in range(n)]
+
+    selected = list(top_indices)
+    selected_extras = set()
+
+    for top_idx in top_indices:
+        candidates = sorted(
+            extra_indices,
+            key=lambda cand_idx: _center_dist(centers[top_idx], centers[cand_idx])
+        )
+
+        for cand_idx in candidates:
+            if cand_idx not in selected_extras:
+                selected.append(cand_idx)
+                selected_extras.add(cand_idx)
+                break
+
+    return kps[selected]
+
+
 def _store_matched_crops(
     frame: np.ndarray,
     detections,
@@ -311,12 +363,13 @@ def visualize_boxing_crops(original_img, people):
 @dataclass
 class FrameTrackingResult:
     """
-    Результат обробки одного кадру.
+    Lightweight per-frame result.
+    Stores only tracking data and path to frame on disk.
     """
     frame_idx: int
     detections: list
     log: dict
-    original_img: Optional[np.ndarray] = None
+    frame_path: Path
 
 def process_frame(
     result,
@@ -356,8 +409,12 @@ def process_frame(
     # 1. Отримуємо keypoints усіх людей
     # ------------------------------------------
     kps = result.poseKeypoints  # shape: (N_people, K, 3)
-    n_people = len(kps)
 
+    # Keep top-3 OpenPose detections and add nearest extra detections.
+    kps = select_top3_with_nearest(kps, conf_th=conf_th)
+
+
+    n_people = len(kps)
     # Розмір повного оригінального зображення
     h, w = original_img.shape[:2]
 
@@ -476,7 +533,6 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
     debug = tracker.cfg.debug
     save_log = tracker.cfg.save_log
 
-    show_merge = merge_n > 0
     frame_results: list[FrameTrackingResult] = []
 
     if debug or save_log:
@@ -557,14 +613,18 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
                 tracker=tracker,
             )
 
+        frame_dir = Path(save_dir) / f"frame_{frame_idx:06d}"
+        frame_path = frame_dir / "extra" / "unprocessed_image.jpg"
+
         frame_results.append(
             FrameTrackingResult(
                 frame_idx=frame_idx,
                 detections=detections,
                 log=log,
-                original_img=None if save_dir is not None else img.copy(),
+                frame_path=frame_path,
             )
         )
+
 
         if debug:
             print_tracking_results(log, frame_idx)
@@ -619,19 +679,16 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
             encoding="utf-8",
         )
 
-    rendered_frames = []
     for result in frame_results:
         local_matches = [
             (int(local_track_id), int(det_idx))
             for local_track_id, det_idx in result.log.get("matches", [])
         ]
 
-        original_frame = result.original_img
-        if original_frame is None and save_dir is not None:
-            frame_path = Path(save_dir) / f"frame_{result.frame_idx:06d}" / "extra" / "unprocessed_image.jpg"
-            original_frame = cv2.imread(str(frame_path))
+        original_frame = cv2.imread(str(result.frame_path))
         if original_frame is None:
             continue
+
 
         local_frame = original_frame.copy()
         render_tracking_overlays(
@@ -679,34 +736,9 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
             )
             cv2.imwrite(str(frame_dir / "extra" / "frame_global_vis.jpg"), global_frame)
 
-        rendered_frames.append(global_frame)
 
-    if show_merge and rendered_frames:
-        for i in range(0, len(rendered_frames), merge_n):
-            chunk = rendered_frames[i:i + merge_n]
-            if chunk:
-                _show_merged(chunk, len(chunk))
+
+
 
     print(f"[INFO] {len(frame_results)} frames were processed")
 
-
-def _show_merged(frames, n):
-    """
-    Merge multiple frames horizontally (aligning by height) and show via cv2.imshow.
-    """
-    max_h = max(f.shape[0] for f in frames)
-
-    aligned = []
-    for f in frames:
-        h, w = f.shape[:2]
-        if h < max_h:
-            top = (max_h - h) // 2
-            bottom = max_h - h - top
-            f = cv2.copyMakeBorder(f, top, bottom, 0, 0, cv2.BORDER_CONSTANT, value=(0, 0, 0))
-        aligned.append(f)
-
-    combined = cv2.hconcat(aligned)
-
-    cv2.imshow(f"Tracking ({n} frames)", combined)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()

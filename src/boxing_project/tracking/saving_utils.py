@@ -251,25 +251,42 @@ class FragmentExporter:
 
     def save_tracks(self, tracks, frame_idx: int) -> Path:
         tracks = list(tracks or [])
-        eligible = [t for t in tracks if int(getattr(t, "hits", 0)) >= self.min_hits]
 
-        fragment_dir = self.next_fragment()
-        saved_tracks = 0
+        track_rows = []
 
-        for trk in eligible:
+        for trk in tracks:
+            track_id = int(getattr(trk, "track_id", -1))
+            hits = int(getattr(trk, "hits", 0))
+            min_hits = int(getattr(trk, "min_hits", self.min_hits))
+            confirmed = bool(getattr(trk, "confirmed", hits >= min_hits))
+
             emb_history = list(getattr(trk, "app_emb_history", []) or [])
 
-            if not emb_history:
-                continue
+            track_rows.append({
+                "local_track_id": track_id,
+                "confirmed": confirmed,
+                "hits": hits,
+                "min_hits": min_hits,
+                "age": int(getattr(trk, "age", 0)),
+                "time_since_update": int(getattr(trk, "time_since_update", 0)),
+                "has_embedding_history": bool(len(emb_history) > 0),
+                "embedding_history_len": int(len(emb_history)),
+            })
 
-            saved_tracks += 1
+        eligible = [
+            row for row in track_rows
+            if bool(row["confirmed"]) and bool(row["has_embedding_history"])
+        ]
+
+        fragment_dir = self.next_fragment()
 
         manifest = {
             "frame_idx": int(frame_idx),
             "min_hits": int(self.min_hits),
             "tracks_total": int(len(tracks)),
             "tracks_eligible": int(len(eligible)),
-            "tracks_saved": int(saved_tracks),
+            "tracks_saved": int(len(eligible)),
+            "tracks": track_rows,
         }
 
         (fragment_dir / "fragment_info.json").write_text(

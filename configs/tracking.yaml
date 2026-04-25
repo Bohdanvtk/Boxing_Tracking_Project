@@ -16,7 +16,7 @@ tracking:
     chi2_gating: 9.21         # Chi-square gating threshold
                               # Lower -> stricter motion gate
     pose_scale_eps: 1.0e-6    # Small epsilon for pose-related normalization
-    greedy_threshold: 2.1     # Max final cost accepted by greedy matcher
+    greedy_threshold: 4.1     # Max final cost accepted by greedy matcher
 
     motion_threshold: 0.09    # Max allowed normalized motion distance
                               # Above this -> reject pair
@@ -65,10 +65,10 @@ tracking:
       - 5   # Left Shoulder
 
   tracker:
-    max_age: 5                # Max missed frames for unconfirmed track
+    max_age: 4                # Max missed frames for unconfirmed track
     max_confirmed_age: 75     # Max missed frames for confirmed track
-    min_hits: 30              # Matches needed to confirm a track
-    min_kp_conf: 0.05         # Minimum keypoint confidence for track update
+    min_hits: 35              # Matches needed to confirm a track
+    min_kp_conf: 0.009         # Minimum keypoint confidence for track update
     reset_g_threshold: 0.32   # If g < threshold -> activate reset mode
 
   graph_clustering:
