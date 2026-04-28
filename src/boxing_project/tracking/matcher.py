@@ -375,16 +375,33 @@ def _compute_pairwise_components(
     cfg: MatchConfig,
 ) -> Tuple[float, float, float, bool, float, bool, bool, bool]:
     """
-    Compute raw pairwise values and hard-gating decisions for one (track, detection) pair.
+    Compute raw pairwise values with early-exit gating.
 
-    Returns
-    -------
-    d_motion_norm, pose_cost, app_cost,
-    allowed_by_chi2, d2,
-    motion_ok, pose_ok, app_ok
+    Order:
+      1) motion / chi2
+      2) pose
+      3) appearance
+
+    If a pair fails earlier gates, later expensive components are skipped.
     """
     _, allowed, d2 = _motion_cost_with_gating(track, det, cfg, gating=True)
     d_motion_norm = float(np.clip(d2 / max(cfg.chi2_gating, 1e-12), 0.0, 1.0))
+
+    motion_ok = d_motion_norm <= cfg.motion_threshold
+
+    # Early exit:
+    # If motion is already invalid, do not compute pose/app.
+    if not allowed or not motion_ok:
+        return (
+            d_motion_norm,
+            1.0,          # pose_cost fallback
+            1.0,          # app_cost fallback
+            bool(allowed),
+            float(d2),
+            bool(motion_ok),
+            False,        # pose_ok
+            False,        # app_ok
+        )
 
     trk_kps, trk_conf = track_pose_item
     det_kps, det_conf = det_pose_item
@@ -404,8 +421,24 @@ def _compute_pairwise_components(
 
     sim_pose = _pose_distance(trk_kps, trk_conf, det_kps, det_conf, cfg)
     pose_cost = float((1.0 - sim_pose) / 2.0)
+    pose_ok = pose_cost <= cfg.pose_threshold
+
+    # Early exit:
+    # If pose is invalid, do not compute appearance.
+    if not pose_ok:
+        return (
+            d_motion_norm,
+            pose_cost,
+            1.0,          # app_cost fallback
+            bool(allowed),
+            float(d2),
+            bool(motion_ok),
+            bool(pose_ok),
+            False,        # app_ok
+        )
 
     sim_app = 0.0
+
     if track.app_emb_ema is not None and isinstance(det.meta, dict) and ("e_app" in det.meta):
         det_emb = det.meta.get("e_app", None)
 
@@ -417,9 +450,6 @@ def _compute_pairwise_components(
                 sim_app = cosine_similarity(track_emb, det_emb)
 
     app_cost = float((1.0 - sim_app) / 2.0)
-
-    motion_ok = d_motion_norm <= cfg.motion_threshold
-    pose_ok = pose_cost <= cfg.pose_threshold
     app_ok = app_cost <= cfg.appearance_threshold
 
     return (

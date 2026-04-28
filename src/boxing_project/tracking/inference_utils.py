@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 from boxing_project.tracking.tracker import openpose_people_to_detections
 from boxing_project.shot_boundary.inference import ShotBoundaryInferencer, ShotBoundaryInferConfig
-from boxing_project.tracking.image_utils import keypoints_to_bbox, render_tracking_overlays, extract_boxing_crops
+from boxing_project.tracking.image_utils import keypoints_to_bbox, render_tracking_overlays, extract_boxing_crops, attach_overlap_info_to_detections
 from boxing_project.tracking.saving_utils import FragmentExporter, save_tracking_outputs, save_tracks_similarity
 from boxing_project.tracking.global_clustering import GlobalTrackClusterer
 import matplotlib.pyplot as plt
@@ -427,7 +427,7 @@ def process_frame(
     kps = result.poseKeypoints
 
     top_track_ids_before = _top_track_ids_by_hits(tracker, k=4)
-    extra_n = int(getattr(tracker, "_adaptive_extra_n", 6))
+    extra_n = int(getattr(tracker, "_adaptive_extra_n", 3))
 
     kps = select_top_with_nearest(
         kps,
@@ -480,6 +480,11 @@ def process_frame(
         min_kp_conf=tracker.cfg.min_kp_conf,
     )
 
+    attach_overlap_info_to_detections(
+        detections=detections,
+        overlap_threshold=tracker.cfg.overlap_log_threshold,
+    )
+
     for det in detections:
         raw = det.meta.get("raw", {})
         bbox = raw.get("bbox", None)
@@ -519,9 +524,9 @@ def process_frame(
     missed_top_track_ids = top_track_ids_before - matched_track_ids
 
     if missed_top_track_ids:
-        tracker._adaptive_extra_n = extra_n + 6
+        tracker._adaptive_extra_n = extra_n + 9
     else:
-        tracker._adaptive_extra_n = 6
+        tracker._adaptive_extra_n = 3
 
     log["adaptive_extra_n_used"] = int(extra_n)
     log["adaptive_extra_n_next"] = int(tracker._adaptive_extra_n)

@@ -29,6 +29,8 @@ class TrackerConfig:
     debug: bool
     save_log: bool
 
+    overlap_log_threshold: float = 0.10
+    overlap_skip_threshold: float = 0.40
 
 def openpose_people_to_detections(
     people: List[Dict[str, Any]],
@@ -162,6 +164,7 @@ class MultiObjectTracker:
             det,
             ema_alpha=self.cfg.match.emb_ema_alpha,
             update_app=self._has_base_keypoints(det),
+            overlap_skip_threshold=self.cfg.overlap_skip_threshold,
         )
         return trk
 
@@ -240,7 +243,12 @@ class MultiObjectTracker:
         for i_track, j_det in matches_idx:
             trk = self.tracks[i_track]
             det = detections[j_det]
-            trk.update(det, ema_alpha=self.cfg.match.emb_ema_alpha, update_app=True)
+            trk.update(
+                det,
+                ema_alpha=self.cfg.match.emb_ema_alpha,
+                update_app=True,
+                overlap_skip_threshold=self.cfg.overlap_skip_threshold,
+            )
             id_pairs.append((trk.track_id, j_det))
 
         # 4) Spawn new tracks

@@ -109,23 +109,39 @@ class Track:
         self.time_since_update += 1
         return self.kf.predict()
 
-    def update(self, det: Detection, ema_alpha: float = 0.9, update_app: bool = True):
+    def update(
+            self,
+            det: Detection,
+            ema_alpha: float = 0.9,
+            update_app: bool = True,
+            overlap_skip_threshold: float = 0.40,
+    ):
         """
-        Оновлює трек за matched детекцією.
+        Update track with matched detection.
 
-        Робить:
-          1) Kalman update по det.center
-          2) оновлює last_* поля (keypoints/conf/center)
-          3) EMA-оновлення embedding (app) з det.meta["e_app"]
-
-        Args:
-            det: Detection, який Hungarian приписав цьому треку.
-            ema_alpha: коеф. EMA (чим ближче до 1, тим повільніше змінюється памʼять треку).
-            update_app: чи оновлювати EMA appearance embedding для цієї детекції.
+        If detection strongly overlaps with another detection, skip the update
+        completely to avoid contaminating motion, pose, and appearance memory.
         """
+        max_overlap_iou = float(det.meta.get("max_overlap_iou", 0.0))
+
+        # Strong overlap means this detection may be contaminated by another person.
+        # In this case we skip the whole update:
+        # - no Kalman update
+        # - no last_keypoints update
+        # - no appearance EMA update
+        # - no feature history update
+        if max_overlap_iou >= overlap_skip_threshold:
+            det.meta["track_update_skipped"] = True
+            det.meta["track_update_skip_reason"] = "high_detection_overlap"
+            return self.kf.get_state(), self.kf.get_cov()
+
+        det.meta["track_update_skipped"] = False
+        det.meta["track_update_skip_reason"] = None
         state, cov = self.kf.update(np.asarray(det.center, dtype=float))
+
         self.time_since_update = 0
         self.hits += 1
+
         if not self.confirmed and self.hits >= self.min_hits:
             self.confirmed = True
 
@@ -138,12 +154,15 @@ class Track:
 
         if update_app and allow_app_update:
             e_app = det.meta.get("e_app", None)
+
             if e_app is not None:
                 e_app = np.asarray(e_app, dtype=np.float32)
+
                 if self.app_emb_ema is None:
                     self.app_emb_ema = e_app
                 else:
                     self.app_emb_ema = ema_alpha * self.app_emb_ema + (1.0 - ema_alpha) * e_app
+
                 self.app_emb_history.append(e_app.copy())
 
             lf = det.meta.get("left_glove_features")
@@ -157,7 +176,6 @@ class Track:
             sf = det.meta.get("shorts_features")
             if sf is not None:
                 self.shorts_features_history.append(sf)
-
 
         return state, cov
 

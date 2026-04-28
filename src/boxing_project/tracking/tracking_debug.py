@@ -136,6 +136,23 @@ class DebugLog:
             pass
         return f"det_index={j}"
 
+    def _get_det_overlap(self, j: int) -> tuple[float, Any, int]:
+        try:
+            detections = self.meta.get("detections", None)
+            if isinstance(detections, (list, tuple)) and 0 <= j < len(detections):
+                det = detections[j]
+                meta = getattr(det, "meta", {}) if not isinstance(det, dict) else det.get("meta", {})
+                return (
+                    float(meta.get("max_overlap_iou", 0.0)),
+                    meta.get("max_overlap_det_idx", None),
+                    len(meta.get("overlap_relations", []) or []),
+                )
+        except Exception:
+            pass
+
+        return 0.0, None, 0
+
+
     def show_matrix(self, precision: int = 6) -> None:
         """
         Output format:
@@ -174,7 +191,13 @@ class DebugLog:
         self.line("[debug] Final cost is RELATIVE-ONLY after hard gating.")
         self.line("[debug] Raw d_* values are used for gating and debug.")
         self.line("[debug] Lower final cost = better. large_cost usually means GATED / INVALID MATCH.")
-
+        self.section("[debug] Detection overlaps:")
+        for j in range(self.n_cols):
+            max_iou, other_idx, n_rel = self._get_det_overlap(j)
+            self.line(
+                f"- Det#{j}: max_overlap_iou={max_iou:.3f}, "
+                f"max_overlap_det_idx={other_idx}, overlaps={n_rel}"
+            )
         self.section("=" * 80)
         self.line("TRACK DETAILS (full breakdown)")
         self.line("=" * 80)

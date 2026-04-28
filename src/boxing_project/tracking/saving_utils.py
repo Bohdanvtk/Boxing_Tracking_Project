@@ -159,6 +159,12 @@ def _save_frame_debug(*, frame_dir: Path, detections, tracker, log: dict) -> Non
             "det_idx": int(det_idx),
             "bbox_xyxy": list(map(float, bbox)) if bbox is not None else None,
             "det_center": list(map(float, det.center)) if det.center is not None else None,
+
+            "max_overlap_iou": float(det.meta.get("max_overlap_iou", 0.0)),
+            "max_overlap_det_idx": det.meta.get("max_overlap_det_idx", None),
+            "is_overlapping": bool(det.meta.get("is_overlapping", False)),
+            "overlap_relations": det.meta.get("overlap_relations", []),
+
             "has_e_app": bool(det.meta.get("e_app") is not None),
             "e_app_error": det.meta.get("e_app_error", None) if isinstance(det.meta, dict) else None,
             "matched_track_id": int(track_id) if track_id is not None else None,

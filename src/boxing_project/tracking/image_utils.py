@@ -1,6 +1,9 @@
 import cv2
 import numpy as np
 
+from typing import Any, Dict, List, Optional, Tuple
+
+from .track import Detection
 
 # =========================
 # OpenPose BODY_25 indices
@@ -21,9 +24,6 @@ R_HIP = 9
 R_KNEE = 10
 L_HIP = 12
 L_KNEE = 13
-
-
-import numpy as np
 
 
 def keypoints_to_bbox(
@@ -237,12 +237,160 @@ def _finalize_bbox(x1, y1, x2, y2, img_w, img_h):
 def _rects_intersect(r1, r2) -> bool:
     x1, y1, x2, y2 = r1
     X1, Y1, X2, Y2 = r2
+
     if x2 <= X1 or X2 <= x1:
         return False
+
     if y2 <= Y1 or Y2 <= y1:
         return False
+
     return True
 
+
+BBox = Tuple[float, float, float, float]  # (x1, y1, x2, y2)
+
+
+def bbox_iou(box_a: BBox, box_b: BBox, eps: float = 1e-9) -> float:
+    """
+    Compute IoU between two bounding boxes.
+
+    Box format:
+        (x1, y1, x2, y2)
+
+    Returns:
+        IoU in [0.0, 1.0]
+    """
+    ax1, ay1, ax2, ay2 = map(float, box_a)
+    bx1, by1, bx2, by2 = map(float, box_b)
+
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+
+    inter_w = max(0.0, ix2 - ix1)
+    inter_h = max(0.0, iy2 - iy1)
+    inter_area = inter_w * inter_h
+
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+
+    union_area = area_a + area_b - inter_area
+
+    if union_area <= eps:
+        return 0.0
+
+    return float(inter_area / union_area)
+
+
+def get_detection_bbox(det: Detection) -> Optional[BBox]:
+    """
+    Extract bbox from Detection.meta["raw"]["bbox"].
+
+    Expected format:
+        det.meta["raw"]["bbox"] = (x1, y1, x2, y2)
+
+    Returns:
+        bbox as (x1, y1, x2, y2), or None if not available.
+    """
+    if not isinstance(det.meta, dict):
+        return None
+
+    raw = det.meta.get("raw", {})
+    if not isinstance(raw, dict):
+        return None
+
+    bbox = raw.get("bbox", None)
+
+    if bbox is None or len(bbox) != 4:
+        return None
+
+    x1, y1, x2, y2 = map(float, bbox)
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    return x1, y1, x2, y2
+
+
+def compute_detection_iou_relations(
+    detections: List[Detection],
+    overlap_threshold: float = 0.15,
+) -> List[Dict[str, Any]]:
+    """
+    Compute pairwise IoU relations between all detections.
+
+    For each detection, returns:
+        - max IoU with any other detection
+        - index of the most overlapping detection
+        - list of overlaps above overlap_threshold
+    """
+    bboxes = [get_detection_bbox(det) for det in detections]
+    results: List[Dict[str, Any]] = []
+
+    for i, box_i in enumerate(bboxes):
+        max_iou = 0.0
+        max_iou_det_idx: Optional[int] = None
+        overlaps: List[Dict[str, Any]] = []
+
+        if box_i is not None:
+            for j, box_j in enumerate(bboxes):
+                if i == j or box_j is None:
+                    continue
+
+                iou = bbox_iou(box_i, box_j)
+
+                if iou > max_iou:
+                    max_iou = iou
+                    max_iou_det_idx = j
+
+                if iou >= overlap_threshold:
+                    overlaps.append(
+                        {
+                            "det_idx": int(j),
+                            "iou": float(iou),
+                        }
+                    )
+
+        results.append(
+            {
+                "det_idx": int(i),
+                "bbox": box_i,
+                "max_iou": float(max_iou),
+                "max_iou_det_idx": max_iou_det_idx,
+                "overlaps": overlaps,
+                "is_overlapping": bool(max_iou >= overlap_threshold),
+            }
+        )
+
+    return results
+
+
+def attach_overlap_info_to_detections(
+    detections: List[Detection],
+    overlap_threshold: float = 0.15,
+) -> None:
+    """
+    Compute IoU relations and attach overlap info to det.meta.
+
+    This mutates detections in-place.
+
+    Added fields:
+        det.meta["max_overlap_iou"]
+        det.meta["max_overlap_det_idx"]
+        det.meta["overlap_relations"]
+        det.meta["is_overlapping"]
+    """
+    relations = compute_detection_iou_relations(
+        detections=detections,
+        overlap_threshold=overlap_threshold,
+    )
+
+    for det, info in zip(detections, relations):
+        det.meta["max_overlap_iou"] = info["max_iou"]
+        det.meta["max_overlap_det_idx"] = info["max_iou_det_idx"]
+        det.meta["overlap_relations"] = info["overlaps"]
+        det.meta["is_overlapping"] = info["is_overlapping"]
 
 
 def is_valid_keypoint(kps, keypoint_idx: int, conf_threshold: float) -> bool:

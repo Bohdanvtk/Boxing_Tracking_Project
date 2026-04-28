@@ -2,6 +2,8 @@ tracking:
   debug: true                 # Enable console debug output
   save_log: true              # Save debug logs to disk
   fps: 30                     # Video FPS
+  overlap_log_threshold: 0.10
+  overlap_skip_threshold: 0.40
 
   kalman:
     process_var: 1e6          # Process noise variance
@@ -32,8 +34,8 @@ tracking:
     min_kp_conf: 0.05         # Minimum keypoint confidence
 
     w_motion: 5.0             # Weight of relative motion penalty
-    w_pose: 3.0               # Weight of relative pose penalty
-    w_app: 0.5                # Weight of relative appearance penalty
+    w_pose: 2.0               # Weight of relative pose penalty
+    w_app: 1.0                # Weight of relative appearance penalty
 
     k_motion: 3.0             # Relative saturation ratio for motion
                               # 3x worse than best -> near max penalty

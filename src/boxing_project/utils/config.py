@@ -94,6 +94,9 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
     debug = bool(_get(cfg, "tracking.debug", False))
     save_log = bool(_get(cfg, "tracking.save_log", True))
 
+    overlap_log_threshold = float(_get(cfg, "tracking.overlap_log_threshold", 0.10))
+    overlap_skip_threshold = float(_get(cfg, "tracking.overlap_skip_threshold", 0.40))
+
     max_age = int(_get(cfg, "tracking.tracker.max_age", 10))
     max_confirmed_age = int(_get(cfg, "tracking.tracker.max_confirmed_age", 40))
     min_hits = int(_get(cfg, "tracking.tracker.min_hits", 3))
@@ -113,8 +116,9 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
         reset_g_threshold=reset_g_threshold,
         debug=debug,
         save_log=save_log,
+        overlap_log_threshold=overlap_log_threshold,
+        overlap_skip_threshold=overlap_skip_threshold,
     )
-
 
 def load_tracking_config(path: str):
     cfg = load_cfg(path)
