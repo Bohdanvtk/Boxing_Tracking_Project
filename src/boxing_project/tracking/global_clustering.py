@@ -180,7 +180,7 @@ def build_mutual_knn_graph(
                 adj[i][j] = w
                 adj[j][i] = w
 
-    return adj
+    return adj, sim
 
 
 def _adjacency_to_affinity(adj: list[dict[int, float]]) -> np.ndarray:
@@ -315,7 +315,15 @@ class GlobalTrackClusterer:
     w_right_glove: float = 0.25
     w_shorts: float = 0.75
 
-    def build_mapping(self, epoch_tracks: dict[int, dict[int, "Track"]]) -> dict[NodeKey, int]:
+    def build_mapping(
+            self,
+            epoch_tracks: dict[int, dict[int, "Track"]],
+            *,
+            return_similarity: bool = False,
+    ) -> dict[NodeKey, int] | tuple[
+        dict[NodeKey, int],
+        dict[str, list[NodeKey] | np.ndarray],
+    ]:
         """Build ``(epoch_id, local_track_id) -> global_track_id`` mapping."""
         nodes, embs = build_mean_embeddings(
             epoch_tracks,
@@ -327,16 +335,38 @@ class GlobalTrackClusterer:
         n_nodes = len(nodes)
 
         if n_nodes == 0:
-            return {}
+            mapping: dict[NodeKey, int] = {}
+            sim = np.zeros((0, 0), dtype=np.float32)
+
+            if return_similarity:
+                return mapping, {
+                    "nodes": nodes,
+                    "sim": sim,
+                }
+
+            return mapping
 
         if n_nodes == 1:
-            return {nodes[0]: 1}
+            mapping = {nodes[0]: 1}
+            sim = np.ones((1, 1), dtype=np.float32)
 
-        # Keep custom graph logic (mutual-kNN, threshold, same-epoch suppression).
-        adj = build_mutual_knn_graph(nodes, embs, k=self.k, sim_threshold=self.sim_threshold)
+            if return_similarity:
+                return mapping, {
+                    "nodes": nodes,
+                    "sim": sim,
+                }
+
+            return mapping
+
+        adj, sim = build_mutual_knn_graph(
+            nodes,
+            embs,
+            k=self.k,
+            sim_threshold=self.sim_threshold,
+        )
+
         affinity = _adjacency_to_affinity(adj)
 
-        # Allow 3 clusters (or fewer if too few nodes exist).
         n_clusters = max(2, min(int(self.n_clusters), n_nodes))
 
         model = SpectralClustering(
@@ -345,27 +375,32 @@ class GlobalTrackClusterer:
             random_state=int(self.random_state),
             assign_labels=str(self.assign_labels),
         )
+
         labels = model.fit_predict(affinity).astype(np.int32)
 
-        # Deterministic remap of spectral labels to global IDs {1, 2, 3, ...}
         unique_labels = sorted(set(int(lbl) for lbl in labels))
         label_to_gid = {lbl: gid for gid, lbl in enumerate(unique_labels, start=1)}
         gids = np.asarray([label_to_gid[int(lbl)] for lbl in labels], dtype=np.int32)
 
-        # Build prototypes for all current global ids.
         prototypes = _build_cluster_prototypes(embs=embs, gids=gids)
 
-        # Make sure ids 1 and 2 always exist for refinement.
         if 1 not in prototypes and 2 in prototypes:
             prototypes[1] = prototypes[2]
+
         if 2 not in prototypes and 1 in prototypes:
             prototypes[2] = prototypes[1]
 
-        # If cluster 3 does not exist because there are too few nodes / clusters,
-        # refinement still works for ids 1 and 2.
-        return _refine_epoch_assignments(
+        mapping = _refine_epoch_assignments(
             nodes=nodes,
             embs=embs,
             prototypes=prototypes,
             initial_gids=gids,
         )
+
+        if return_similarity:
+            return mapping, {
+                "nodes": nodes,
+                "sim": sim,
+            }
+
+        return mapping

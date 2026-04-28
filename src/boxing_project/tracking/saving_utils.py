@@ -103,6 +103,21 @@ def _save_frame_extra(*, frame_dir: Path, unprocessed_frame: np.ndarray, detecti
         cv2.imwrite(str(extra_dir / f"det_{det_idx:03d}.jpg"), crop)
 
 
+def save_tracks_similarity(
+    *,
+    nodes: list[tuple[int, int]],
+    sim: np.ndarray,
+    output_path: Path,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    nodes_arr = np.asarray(nodes, dtype=np.int32)  # shape (N, 2)
+
+    np.savez_compressed(
+        str(output_path),
+        sim=sim.astype(np.float32),
+        nodes=nodes_arr,
+    )
 
 
 def _save_frame_debug_txt(*, debug_dir: Path, frame_idx: int, frame_log) -> None:

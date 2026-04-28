@@ -8,7 +8,7 @@ from typing import Optional
 from boxing_project.tracking.tracker import openpose_people_to_detections
 from boxing_project.shot_boundary.inference import ShotBoundaryInferencer, ShotBoundaryInferConfig
 from boxing_project.tracking.image_utils import keypoints_to_bbox, render_tracking_overlays, extract_boxing_crops
-from boxing_project.tracking.saving_utils import FragmentExporter, save_tracking_outputs
+from boxing_project.tracking.saving_utils import FragmentExporter, save_tracking_outputs, save_tracks_similarity
 from boxing_project.tracking.global_clustering import GlobalTrackClusterer
 import matplotlib.pyplot as plt
 
@@ -164,44 +164,66 @@ def _center_dist(a, b) -> float:
     return float(np.linalg.norm(a - b))
 
 
-def select_top3_with_nearest(kps: np.ndarray, conf_th: float) -> np.ndarray:
+def select_top_with_nearest(
+    kps: np.ndarray,
+    conf_th: float,
+    top_count: int = 3,
+    n: int = 3,
+    intersect: int = 1,
+) -> np.ndarray:
     """
-    Keep top-3 OpenPose detections by original OpenPose order.
-    Then add one nearest extra detection for each top detection.
+    Keep top detections by original OpenPose order.
+    Then add up to n nearest extra detections.
 
-    If two top detections share the same nearest extra detection,
-    that duplicate is allowed once. Other top detections then try
-    to get their own next nearest extra detection.
+    intersect:
+        max number of top detections that may point to the same extra detection.
 
-    Result: usually 4-6 people, depending on duplicates.
+    Important:
+        top detections are never used as nearest extras.
     """
 
-    n = len(kps)
-    if n <= 3:
+    total = len(kps)
+    if total <= top_count:
         return kps
 
-    top_indices = list(range(min(3, n)))
-    extra_indices = list(range(3, n))
+    top_count = min(top_count, total)
+    top_indices = list(range(top_count))
 
-    centers = [_kp_center(kps[i], conf_th) for i in range(n)]
+    # extra candidates start only AFTER top detections
+    extra_indices = list(range(top_count, total))
+
+    centers = [_kp_center(kps[i], conf_th) for i in range(total)]
+
+    # extra_idx -> how many top detections selected it as neighbor
+    usage_count = {idx: 0 for idx in extra_indices}
 
     selected = list(top_indices)
-    selected_extras = set()
+    selected_extras = []
 
+    # candidates: (distance, top_idx, extra_idx)
+    pairs = []
     for top_idx in top_indices:
-        candidates = sorted(
-            extra_indices,
-            key=lambda cand_idx: _center_dist(centers[top_idx], centers[cand_idx])
-        )
+        for extra_idx in extra_indices:
+            dist = _center_dist(centers[top_idx], centers[extra_idx])
+            pairs.append((dist, top_idx, extra_idx))
 
-        for cand_idx in candidates:
-            if cand_idx not in selected_extras:
-                selected.append(cand_idx)
-                selected_extras.add(cand_idx)
-                break
+    pairs.sort(key=lambda x: x[0])
+
+    for dist, top_idx, extra_idx in pairs:
+        if len(selected_extras) >= n:
+            break
+
+        if usage_count[extra_idx] >= intersect:
+            continue
+
+        # додаємо extra detection у фінальний список тільки один раз
+        if extra_idx not in selected:
+            selected.append(extra_idx)
+            selected_extras.append(extra_idx)
+
+        usage_count[extra_idx] += 1
 
     return kps[selected]
-
 
 def _store_matched_crops(
     frame: np.ndarray,
@@ -371,6 +393,19 @@ class FrameTrackingResult:
     log: dict
     frame_path: Path
 
+
+def _top_track_ids_by_hits(tracker, k: int = 4) -> set[int]:
+    tracks = tracker.get_active_tracks(confirmed_only=False)
+
+    tracks = sorted(
+        tracks,
+        key=lambda t: int(getattr(t, "hits", 0)),
+        reverse=True,
+    )
+
+    return {int(t.track_id) for t in tracks[:k]}
+
+
 def process_frame(
     result,
     tracker,
@@ -381,22 +416,6 @@ def process_frame(
     reset_mode: bool,
     frame_dir: Optional[Path] = None,
 ):
-    """
-    Перетворює OpenPose output у формат, зручний для трекера,
-    і паралельно готує crop-и частин тіла для візуальної перевірки.
-
-    Що робить функція:
-    1. бере keypoints усіх людей на кадрі
-    2. рахує bbox кожної людини
-    3. рахує crop-и:
-       - left_glove
-       - right_glove
-       - shorts
-    4. записує все у список people
-    5. викликає visualize_boxing_crops(...) для дебагу
-    """
-
-    # Якщо OpenPose не знайшов жодної людини
     if result.poseKeypoints is None:
         return [], {
             "matches": [],
@@ -405,60 +424,44 @@ def process_frame(
             "epoch_id": int(getattr(tracker, "_epoch_id", 1)),
         }
 
-    # ------------------------------------------
-    # 1. Отримуємо keypoints усіх людей
-    # ------------------------------------------
-    kps = result.poseKeypoints  # shape: (N_people, K, 3)
+    kps = result.poseKeypoints
 
-    # Keep top-3 OpenPose detections and add nearest extra detections.
-    kps = select_top3_with_nearest(kps, conf_th=conf_th)
+    top_track_ids_before = _top_track_ids_by_hits(tracker, k=4)
+    extra_n = int(getattr(tracker, "_adaptive_extra_n", 6))
 
+    kps = select_top_with_nearest(
+        kps,
+        conf_th=conf_th,
+        top_count=3,
+        n=extra_n,
+        intersect=2,
+    )
 
     n_people = len(kps)
-    # Розмір повного оригінального зображення
     h, w = original_img.shape[:2]
 
-    # Створюємо базову структуру для кожної людини
     people = [{"keypoints": kps[i]} for i in range(n_people)]
 
-    # Тут будемо накопичувати:
-    # - bbox кожної людини
-    # - crop-и частин тіла
     parts_crops = []
     bboxes = []
     bboxes_quality = []
 
-    # ------------------------------------------
-    # 2. Для кожної людини:
-    #    - рахуємо bbox
-    #    - рахуємо crop-и
-    # ------------------------------------------
     for i in range(n_people):
-        # Bbox людини по keypoints
         bb, bbox_quality = keypoints_to_bbox(kps[i], conf_th, w, h)
-        # Crop-и частин тіла:
-        # left_glove, right_glove, shorts
+
         parts = extract_boxing_crops(
             frame_bgr=original_img,
             kps=kps[i],
-            conf_threshold=conf_th
+            conf_threshold=conf_th,
         )
 
-
-        # Зберігаємо результати
         bboxes.append(bb)
         parts_crops.append(parts)
         bboxes_quality.append(bbox_quality)
 
-    # ------------------------------------------
-    # 3. Записуємо все назад у people
-    # ------------------------------------------
     for i in range(n_people):
         people[i]["bbox"] = bboxes[i]
         people[i]["bbox_quality"] = bboxes_quality[i]
-
-        # Тут тепер уже правильно:
-        # це саме crop-и, а не bbox-и
         people[i]["left_glove_crop"] = parts_crops[i]["left_glove"]
         people[i]["right_glove_crop"] = parts_crops[i]["right_glove"]
         people[i]["shorts_crop"] = parts_crops[i]["shorts"]
@@ -471,15 +474,6 @@ def process_frame(
                 print(f"  {part_name}: None")
             else:
                 print(f"  {part_name}: {crop.shape}")
-
-
-    # ------------------------------------------
-    # 4. Дебаг-візуалізація
-    # ------------------------------------------
-
-    #unactive in this commit
-    #visualize_boxing_crops(original_img, people)
-
 
     detections = openpose_people_to_detections(
         people,
@@ -516,12 +510,30 @@ def process_frame(
             det.meta["shorts_features"] = extract_features_with_hsv(shorts_crop)
 
     log = tracker.update(detections, g=g, reset_mode=reset_mode)
+
+    matched_track_ids = {
+        int(track_id)
+        for track_id, det_idx in log.get("matches", [])
+    }
+
+    missed_top_track_ids = top_track_ids_before - matched_track_ids
+
+    if missed_top_track_ids:
+        tracker._adaptive_extra_n = extra_n + 6
+    else:
+        tracker._adaptive_extra_n = 6
+
+    log["adaptive_extra_n_used"] = int(extra_n)
+    log["adaptive_extra_n_next"] = int(tracker._adaptive_extra_n)
+    log["missed_top_track_ids"] = sorted(missed_top_track_ids)
+
     _store_matched_crops(
         original_img,
         detections,
         log.get("matches", []),
         frame_dir=frame_dir,
     )
+
     return detections, log
 
 
@@ -653,10 +665,20 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
         w_right_glove=float(params.get("w_right_glove", 0.25)),
         w_shorts=float(params.get("w_shorts", 0.75)),
     )
-    local_to_global = clusterer.build_mapping(epoch_tracks=epoch_tracks)
+    local_to_global, sim_data = clusterer.build_mapping(
+        epoch_tracks=epoch_tracks,
+        return_similarity=True,
+    )
+
 
     if save_dir is not None:
         import json
+
+        save_tracks_similarity(
+            nodes=sim_data["nodes"],
+            sim=sim_data["sim"],
+            output_path=save_dir / "tracks_similarity.npz",
+        )
 
         summary = []
         for epoch_id, tracks_by_id in sorted(epoch_tracks.items()):

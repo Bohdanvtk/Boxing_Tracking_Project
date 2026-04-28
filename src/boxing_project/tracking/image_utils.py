@@ -26,37 +26,53 @@ L_KNEE = 13
 import numpy as np
 
 
-def keypoints_to_bbox(kps, conf_th=0.1, img_w=None, img_h=None):
+def keypoints_to_bbox(
+    kps,
+    conf_th=0.1,
+    img_w=None,
+    img_h=None,
+    pose_center_indices=(8, 1, 9, 12, 2, 5),
+):
     """
-    Build tight upper-body bbox (for OSNet) from keypoints.
+    Build tight and stable body bbox from BODY_25 keypoints.
 
-    Priority:
-      1) neck + two shoulders   -> high
-      2) neck + one shoulder    -> medium
-      3) two shoulders          -> medium
-      4) neck + head            -> low
-      5) fallback over valid kps -> low
+    Center priority:
+      8  - MidHip
+      1  - Neck
+      9  - Right Hip
+      12 - Left Hip
+      2  - Right Shoulder
+      5  - Left Shoulder
 
-    Returns:
-        bbox, quality
-
-    bbox:
-        (x1, y1, x2, y2) or None
-
-    quality:
-        "high", "medium", "low", or "invalid"
+    Goal:
+      - use body-root joints as center
+      - keep bbox narrow
+      - avoid capturing another boxer
+      - do NOT expand bbox to include all keypoints
     """
+
     if kps is None or len(kps) == 0:
         return None, "invalid"
 
     kps = np.asarray(kps, dtype=np.float32)
+
     if kps.ndim != 2 or kps.shape[1] < 2:
         return None, "invalid"
 
+    n_kps = len(kps)
+
+    # BODY_25 indices
+    NOSE = 0
+    NECK = 1
+    R_SH = 2
+    L_SH = 5
+    MID_HIP = 8
+    R_HIP = 9
+    L_HIP = 12
 
     def valid(idx):
         return (
-            idx < len(kps)
+            0 <= idx < n_kps
             and np.isfinite(kps[idx, :2]).all()
             and (kps[idx, 2] >= conf_th if kps.shape[1] >= 3 else True)
         )
@@ -67,107 +83,139 @@ def keypoints_to_bbox(kps, conf_th=0.1, img_w=None, img_h=None):
     def dist(a, b):
         return float(np.linalg.norm(a - b))
 
-    has_nose = valid(NOSE)
-    has_neck = valid(NECK)
-    has_rs = valid(R_SH)
-    has_ls = valid(L_SH)
-
-    nose = get(NOSE) if has_nose else None
-    neck = get(NECK) if has_neck else None
-    rs = get(R_SH) if has_rs else None
-    ls = get(L_SH) if has_ls else None
-
-    # CASE 1: neck + both shoulders -> HIGH
-    if has_neck and has_rs and has_ls:
-        d = dist(rs, ls)
-        cx = 0.5 * (rs[0] + ls[0])
-        cy = 0.5 * (rs[1] + ls[1])
-
-        w = 1.35 * d
-
-        if has_nose:
-            top = nose[1] - 0.25 * d
-        else:
-            top = neck[1] - 0.65 * d
-
-        bottom = cy + 0.85 * d
-        left = cx - w / 2
-        right = cx + w / 2
-
-        bbox = _finalize_bbox(left, top, right, bottom, img_w, img_h)
-        return bbox, ("high" if bbox is not None else "invalid")
-
-    # CASE 2: neck + one shoulder -> MEDIUM
-    if has_neck and (has_rs or has_ls):
-        sh = rs if has_rs else ls
-        hw = dist(neck, sh)
-
-        w = 2.4 * hw
-        cx = neck[0]
-
-        if has_nose:
-            top = nose[1] - 0.2 * hw
-        else:
-            top = neck[1] - 0.75 * hw
-
-        bottom = neck[1] + 1.2 * hw
-        left = cx - w / 2
-        right = cx + w / 2
-
-        bbox = _finalize_bbox(left, top, right, bottom, img_w, img_h)
-        return bbox, ("medium" if bbox is not None else "invalid")
-
-    # CASE 3: two shoulders only -> MEDIUM
-    if has_rs and has_ls:
-        d = dist(rs, ls)
-        cx = 0.5 * (rs[0] + ls[0])
-        cy = 0.5 * (rs[1] + ls[1])
-
-        w = 1.3 * d
-
-        if has_nose:
-            top = nose[1] - 0.25 * d
-        else:
-            top = cy - 0.8 * d
-
-        bottom = cy + 0.75 * d
-        left = cx - w / 2
-        right = cx + w / 2
-
-        bbox = _finalize_bbox(left, top, right, bottom, img_w, img_h)
-        return bbox, ("medium" if bbox is not None else "invalid")
-
-    # CASE 4: neck + head -> LOW
-    if has_neck and has_nose:
-        d = max(dist(neck, nose), 8.0)
-
-        cx = neck[0]
-        w = 3.0 * d
-
-        top = nose[1] - 0.3 * d
-        bottom = neck[1] + 2.0 * d
-        left = cx - w / 2
-        right = cx + w / 2
-
-        bbox = _finalize_bbox(left, top, right, bottom, img_w, img_h)
-        return bbox, ("low" if bbox is not None else "invalid")
-
-    # CASE 5: fallback over all valid keypoints -> LOW
-    valid_mask = (
-        kps[:, 2] > conf_th
-        if kps.shape[1] >= 3
-        else np.ones(len(kps), dtype=bool)
-    )
+    valid_mask = np.isfinite(kps[:, :2]).all(axis=1)
+    if kps.shape[1] >= 3:
+        valid_mask &= kps[:, 2] >= conf_th
 
     if not valid_mask.any():
         return None, "invalid"
 
-    xs = kps[valid_mask, 0]
-    ys = kps[valid_mask, 1]
+    valid_pts = kps[valid_mask, :2]
 
-    bbox = _finalize_bbox(xs.min(), ys.min(), xs.max(), ys.max(), img_w, img_h)
-    return bbox, ("low" if bbox is not None else "invalid")
+    # ------------------------------------------------------------
+    # 1) Stable root-based center
+    # ------------------------------------------------------------
+    center_candidates = []
 
+    for idx in pose_center_indices:
+        if valid(idx):
+            center_candidates.append((idx, get(idx)))
+
+    if center_candidates:
+        primary_idx, _ = center_candidates[0]
+
+        centers = []
+        weights = []
+
+        for idx, pt in center_candidates:
+            if idx == primary_idx:
+                w = 4.0
+            elif idx == MID_HIP:
+                w = 3.0
+            elif idx == NECK:
+                w = 2.5
+            elif idx in (R_HIP, L_HIP):
+                w = 1.5
+            elif idx in (R_SH, L_SH):
+                w = 1.0
+            else:
+                w = 0.5
+
+            centers.append(pt)
+            weights.append(w)
+
+        center = np.average(
+            np.asarray(centers, dtype=np.float32),
+            axis=0,
+            weights=np.asarray(weights, dtype=np.float32),
+        ).astype(np.float32)
+
+    else:
+        # Last fallback only.
+        center = valid_pts.mean(axis=0).astype(np.float32)
+        primary_idx = None
+
+    # ------------------------------------------------------------
+    # 2) Robust body scale
+    # ------------------------------------------------------------
+    scales = []
+
+    if valid(R_SH) and valid(L_SH):
+        scales.append(dist(get(R_SH), get(L_SH)) * 1.15)
+
+    if valid(R_HIP) and valid(L_HIP):
+        scales.append(dist(get(R_HIP), get(L_HIP)) * 1.35)
+
+    if valid(NECK) and valid(MID_HIP):
+        scales.append(dist(get(NECK), get(MID_HIP)) * 0.75)
+
+    if valid(NECK) and valid(R_HIP):
+        scales.append(dist(get(NECK), get(R_HIP)) * 0.60)
+
+    if valid(NECK) and valid(L_HIP):
+        scales.append(dist(get(NECK), get(L_HIP)) * 0.60)
+
+    if scales:
+        scale = float(np.median(scales))
+        quality = "high" if len(center_candidates) >= 2 else "medium"
+    else:
+        xs = valid_pts[:, 0]
+        ys = valid_pts[:, 1]
+        scale = max(
+            float(xs.max() - xs.min()),
+            float(ys.max() - ys.min()),
+            20.0,
+        )
+        quality = "low"
+
+    scale = max(scale, 20.0)
+
+    # ------------------------------------------------------------
+    # 3) Tight bbox around root center
+    # ------------------------------------------------------------
+    if primary_idx == MID_HIP:
+        left = center[0] - 0.65 * scale
+        right = center[0] + 0.65 * scale
+        top = center[1] - 1.55 * scale
+        bottom = center[1] + 0.30 * scale
+
+    elif primary_idx == NECK:
+        left = center[0] - 0.68 * scale
+        right = center[0] + 0.68 * scale
+        top = center[1] - 0.55 * scale
+        bottom = center[1] + 1.25 * scale
+
+    elif primary_idx in (R_HIP, L_HIP):
+        left = center[0] - 0.70 * scale
+        right = center[0] + 0.70 * scale
+        top = center[1] - 1.50 * scale
+        bottom = center[1] + 0.32 * scale
+
+    elif primary_idx in (R_SH, L_SH):
+        left = center[0] - 0.72 * scale
+        right = center[0] + 0.72 * scale
+        top = center[1] - 0.55 * scale
+        bottom = center[1] + 1.30 * scale
+
+    else:
+        left = center[0] - 0.72 * scale
+        right = center[0] + 0.72 * scale
+        top = center[1] - 0.95 * scale
+        bottom = center[1] + 1.05 * scale
+
+    # ------------------------------------------------------------
+    # 4) Minimal expansion only for weak fallback
+    # ------------------------------------------------------------
+    if quality == "low":
+        pad = 0.03 * scale
+        left -= pad
+        right += pad
+        top -= pad
+        bottom += pad
+
+    bbox = _finalize_bbox(left, top, right, bottom, img_w, img_h)
+
+    return bbox, (quality if bbox is not None else "invalid")
 
 def _finalize_bbox(x1, y1, x2, y2, img_w, img_h):
     """
