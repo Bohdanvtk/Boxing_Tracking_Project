@@ -2,8 +2,14 @@ tracking:
   debug: true                 # Enable console debug output
   save_log: true              # Save debug logs to disk
   fps: 30                     # Video FPS
-  overlap_log_threshold: 0.10
-  overlap_skip_threshold: 0.40
+  overlap_log_threshold: 0.10   # IoU threshold used only for debug/logging overlap state
+    # If detection IoU with another detection >= this value,
+    # it is marked as overlapping in logs/meta
+
+  overlap_skip_threshold: 0.10  # IoU threshold for freezing appearance EMA updates
+    # If matched detection overlaps another detection >= this value,
+    # do NOT update app_emb_ema for this track
+    # Motion/Kalman and pose state should still be updated
 
   kalman:
     process_var: 1e6          # Process noise variance
@@ -24,10 +30,10 @@ tracking:
                               # Above this -> reject pair
     pose_threshold: 0.4       # Max allowed pose distance
                               # Above this -> reject pair
-    appearance_threshold: 0.5 # Max allowed appearance distance
+    appearance_threshold: 0.4  # Max allowed appearance distance
                               # Above this -> reject pair
 
-    emb_ema_alpha: 0.8       # EMA update factor for appearance embedding
+    emb_ema_alpha: 0.6       # EMA update factor for appearance embedding
                               # Higher -> faster update to new appearance
     bad_kp_patience: 50       # Frames to wait before updating from bad keypoints
     large_cost: 880.0         # Sentinel cost for invalid / gated pairs
@@ -35,7 +41,7 @@ tracking:
 
     w_motion: 5.0             # Weight of relative motion penalty
     w_pose: 2.0               # Weight of relative pose penalty
-    w_app: 1.0                # Weight of relative appearance penalty
+    w_app: 2.0                # Weight of relative appearance penalty
 
     k_motion: 3.0             # Relative saturation ratio for motion
                               # 3x worse than best -> near max penalty
@@ -43,6 +49,10 @@ tracking:
                               # 3x worse than best -> near max penalty
     k_app: 3.0                # Relative saturation ratio for appearance
                               # 3x worse than best -> near max penalty
+
+
+    miss_relax_full_after: 20
+    miss_relax_strength: 2.0
 
     min_core_kps: 7           # Minimum valid core keypoints for reliable pose matching
 
@@ -69,7 +79,7 @@ tracking:
   tracker:
     max_age: 20                # Max missed frames for unconfirmed track
     max_confirmed_age: 75     # Max missed frames for confirmed track
-    min_hits: 25              # Matches needed to confirm a track
+    min_hits: 20              # Matches needed to confirm a track
     min_kp_conf: 0.009         # Minimum keypoint confidence for track update
     reset_g_threshold: 0.32   # If g < threshold -> activate reset mode
 

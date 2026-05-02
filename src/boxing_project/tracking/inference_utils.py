@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 from boxing_project.tracking.tracker import openpose_people_to_detections
 from boxing_project.shot_boundary.inference import ShotBoundaryInferencer, ShotBoundaryInferConfig
-from boxing_project.tracking.image_utils import keypoints_to_bbox, render_tracking_overlays, extract_boxing_crops, attach_overlap_info_to_detections
+from boxing_project.tracking.image_utils import keypoints_to_bbox, render_tracking_overlays, extract_boxing_crops, attach_overlap_info_to_detections, keypoints_to_intersection_bbox
 from boxing_project.tracking.saving_utils import FragmentExporter, save_tracking_outputs, save_tracks_similarity
 from boxing_project.tracking.global_clustering import GlobalTrackClusterer
 import matplotlib.pyplot as plt
@@ -235,46 +235,60 @@ def _store_matched_crops(
     if frame_dir is None:
         return
 
-    matched_dir = Path(frame_dir) / "extra" / "matched_local"
-    matched_dir.mkdir(parents=True, exist_ok=True)
+    base_dir = Path(frame_dir) / "extra" / "matched_local"
+    base_dir.mkdir(parents=True, exist_ok=True)
 
     for track_id, det_idx in matches:
         if det_idx < 0 or det_idx >= len(detections):
             continue
 
+        track_dir = base_dir / f"track_{int(track_id):03d}"
+        track_dir.mkdir(parents=True, exist_ok=True)
+
         det = detections[det_idx]
         raw = det.meta.get("raw", {})
 
-        # -----------------------------
-        # 1. Save full person bbox crop
-        # -----------------------------
+        # 1. Save tight person bbox crop
         bb = _clip_bbox_xyxy(raw.get("bbox", None), img_w=w, img_h=h)
         if bb is not None:
             x1, y1, x2, y2 = bb
             crop = frame[y1:y2, x1:x2]
-            if crop.size != 0:
-                out_name = f"local_track_{int(track_id):03d}_det_{int(det_idx):03d}_person.jpg"
-                cv2.imwrite(str(matched_dir / out_name), crop)
 
-        # -----------------------------
-        # 2. Save part crops
-        # -----------------------------
+            if crop.size != 0:
+                out_name = f"det_{int(det_idx):03d}_person.jpg"
+                cv2.imwrite(str(track_dir / out_name), crop)
+
+        # 2. Save intersection bbox crop
+        intersection_bb = _clip_bbox_xyxy(
+            raw.get("bbox_for_intersection", None),
+            img_w=w,
+            img_h=h,
+        )
+
+        if intersection_bb is not None:
+            x1, y1, x2, y2 = intersection_bb
+            crop = frame[y1:y2, x1:x2]
+
+            if crop.size != 0:
+                out_name = f"det_{int(det_idx):03d}_intersection_bbox.jpg"
+                cv2.imwrite(str(track_dir / out_name), crop)
+
+        # 3. Save part crops
         left_glove_crop = raw.get("left_glove_crop")
         right_glove_crop = raw.get("right_glove_crop")
         shorts_crop = raw.get("shorts_crop")
 
         if left_glove_crop is not None and left_glove_crop.size != 0:
-            out_name = f"local_track_{int(track_id):03d}_det_{int(det_idx):03d}_left_glove.jpg"
-            cv2.imwrite(str(matched_dir / out_name), left_glove_crop)
+            out_name = f"det_{int(det_idx):03d}_left_glove.jpg"
+            cv2.imwrite(str(track_dir / out_name), left_glove_crop)
 
         if right_glove_crop is not None and right_glove_crop.size != 0:
-            out_name = f"local_track_{int(track_id):03d}_det_{int(det_idx):03d}_right_glove.jpg"
-            cv2.imwrite(str(matched_dir / out_name), right_glove_crop)
+            out_name = f"det_{int(det_idx):03d}_right_glove.jpg"
+            cv2.imwrite(str(track_dir / out_name), right_glove_crop)
 
         if shorts_crop is not None and shorts_crop.size != 0:
-            out_name = f"local_track_{int(track_id):03d}_det_{int(det_idx):03d}_shorts.jpg"
-            cv2.imwrite(str(matched_dir / out_name), shorts_crop)
-
+            out_name = f"det_{int(det_idx):03d}_shorts.jpg"
+            cv2.imwrite(str(track_dir / out_name), shorts_crop)
 
 def _save_global_matched_crops(
     frame: np.ndarray,
@@ -444,10 +458,20 @@ def process_frame(
 
     parts_crops = []
     bboxes = []
+    intersection_bboxes = []
     bboxes_quality = []
 
     for i in range(n_people):
+        # Tight bbox for crop / appearance embedding.
         bb, bbox_quality = keypoints_to_bbox(kps[i], conf_th, w, h)
+
+        # Simple full-keypoint bbox only for IoU / overlap logic.
+        intersection_bb = keypoints_to_intersection_bbox(
+            kps[i],
+            conf_th=conf_th,
+            img_w=w,
+            img_h=h,
+        )
 
         parts = extract_boxing_crops(
             frame_bgr=original_img,
@@ -456,11 +480,13 @@ def process_frame(
         )
 
         bboxes.append(bb)
+        intersection_bboxes.append(intersection_bb)
         parts_crops.append(parts)
         bboxes_quality.append(bbox_quality)
 
     for i in range(n_people):
         people[i]["bbox"] = bboxes[i]
+        people[i]["bbox_for_intersection"] = intersection_bboxes[i]
         people[i]["bbox_quality"] = bboxes_quality[i]
         people[i]["left_glove_crop"] = parts_crops[i]["left_glove"]
         people[i]["right_glove_crop"] = parts_crops[i]["right_glove"]
@@ -496,7 +522,7 @@ def process_frame(
 
         det.meta["bbox_quality"] = bbox_quality
 
-        if app_embedder is not None and bbox is not None and bbox_quality in {"high", "medium"}:
+        if app_embedder is not None and bbox is not None:
             try:
                 det.meta["e_app"] = app_embedder.embed(original_img, bbox)
                 det.meta["left_glove_features"] = extract_features_with_hsv(left_glove_crop)

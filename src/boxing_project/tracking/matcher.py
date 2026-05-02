@@ -50,6 +50,9 @@ class MatchConfig:
     k_pose: float = 3.0
     k_app: float = 3.0
 
+    miss_relax_full_after: int = 20
+    miss_relax_strength: float = 2.0
+
 
 @dataclass
 class PairwiseArtifacts:
@@ -367,6 +370,22 @@ def _motion_cost_with_gating(
     return d_motion, allowed, float(d2)
 
 
+def _miss_relaxation(track: Track, cfg: MatchConfig) -> float:
+    """
+    Compute age-aware relaxation for confirmed tracks.
+
+    Returns:
+        0.0 -> normal strict matching
+        1.0 -> maximum relaxation
+    """
+    if not track.confirmed:
+        return 0.0
+
+    missed = max(0, int(track.time_since_update))
+    full_after = max(1, int(cfg.miss_relax_full_after))
+
+    return float(np.clip(missed / full_after, 0.0, 1.0))
+
 def _compute_pairwise_components(
     track: Track,
     det: Detection,
@@ -375,32 +394,33 @@ def _compute_pairwise_components(
     cfg: MatchConfig,
 ) -> Tuple[float, float, float, bool, float, bool, bool, bool]:
     """
-    Compute raw pairwise values with early-exit gating.
-
-    Order:
-      1) motion / chi2
-      2) pose
-      3) appearance
-
-    If a pair fails earlier gates, later expensive components are skipped.
+    Compute pairwise values with early-exit gating and age-aware relaxation.
     """
+    relax = _miss_relaxation(track, cfg)
+
+    motion_threshold_eff = cfg.motion_threshold * (
+        1.0 + cfg.miss_relax_strength * relax
+    )
+
+    pose_threshold_eff = cfg.pose_threshold * (
+        1.0 + cfg.miss_relax_strength * relax
+    )
+
     _, allowed, d2 = _motion_cost_with_gating(track, det, cfg, gating=True)
     d_motion_norm = float(np.clip(d2 / max(cfg.chi2_gating, 1e-12), 0.0, 1.0))
 
-    motion_ok = d_motion_norm <= cfg.motion_threshold
+    motion_ok = d_motion_norm <= motion_threshold_eff
 
-    # Early exit:
-    # If motion is already invalid, do not compute pose/app.
     if not allowed or not motion_ok:
         return (
             d_motion_norm,
-            1.0,          # pose_cost fallback
-            1.0,          # app_cost fallback
+            1.0,
+            1.0,
             bool(allowed),
             float(d2),
             bool(motion_ok),
-            False,        # pose_ok
-            False,        # app_ok
+            False,
+            False,
         )
 
     trk_kps, trk_conf = track_pose_item
@@ -421,20 +441,19 @@ def _compute_pairwise_components(
 
     sim_pose = _pose_distance(trk_kps, trk_conf, det_kps, det_conf, cfg)
     pose_cost = float((1.0 - sim_pose) / 2.0)
-    pose_ok = pose_cost <= cfg.pose_threshold
 
-    # Early exit:
-    # If pose is invalid, do not compute appearance.
+    pose_ok = pose_cost <= pose_threshold_eff
+
     if not pose_ok:
         return (
             d_motion_norm,
             pose_cost,
-            1.0,          # app_cost fallback
+            1.0,
             bool(allowed),
             float(d2),
             bool(motion_ok),
             bool(pose_ok),
-            False,        # app_ok
+            False,
         )
 
     sim_app = 0.0
@@ -462,7 +481,6 @@ def _compute_pairwise_components(
         bool(pose_ok),
         bool(app_ok),
     )
-
 
 def _initialize_debug_log(
     tracks: List[Track],

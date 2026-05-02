@@ -234,6 +234,47 @@ def _finalize_bbox(x1, y1, x2, y2, img_w, img_h):
 
     return int(x1), int(y1), int(x2), int(y2)
 
+
+def keypoints_to_intersection_bbox(
+    kps,
+    conf_th: float = 0.1,
+    img_w=None,
+    img_h=None,
+):
+    """
+    Build a simple full-body bbox from all valid keypoints.
+
+    Used only for overlap / IoU logic.
+    Does not return quality.
+    """
+    if kps is None or len(kps) == 0:
+        return None
+
+    kps = np.asarray(kps, dtype=np.float32)
+
+    if kps.ndim != 2 or kps.shape[1] < 2:
+        return None
+
+    valid_mask = np.isfinite(kps[:, :2]).all(axis=1)
+
+    if kps.shape[1] >= 3:
+        valid_mask &= kps[:, 2] >= float(conf_th)
+
+    if not valid_mask.any():
+        return None
+
+    xs = kps[valid_mask, 0]
+    ys = kps[valid_mask, 1]
+
+    return _finalize_bbox(
+        xs.min(),
+        ys.min(),
+        xs.max(),
+        ys.max(),
+        img_w,
+        img_h,
+    )
+
 def _rects_intersect(r1, r2) -> bool:
     x1, y1, x2, y2 = r1
     X1, Y1, X2, Y2 = r2
@@ -285,10 +326,11 @@ def bbox_iou(box_a: BBox, box_b: BBox, eps: float = 1e-9) -> float:
 
 def get_detection_bbox(det: Detection) -> Optional[BBox]:
     """
-    Extract bbox from Detection.meta["raw"]["bbox"].
+    Extract bbox used for IoU / overlap logic.
 
-    Expected format:
-        det.meta["raw"]["bbox"] = (x1, y1, x2, y2)
+    Priority:
+        1. det.meta["raw"]["bbox_for_intersection"]
+        2. det.meta["raw"]["bbox"]
 
     Returns:
         bbox as (x1, y1, x2, y2), or None if not available.
@@ -300,7 +342,7 @@ def get_detection_bbox(det: Detection) -> Optional[BBox]:
     if not isinstance(raw, dict):
         return None
 
-    bbox = raw.get("bbox", None)
+    bbox = raw.get("bbox_for_intersection", raw.get("bbox", None))
 
     if bbox is None or len(bbox) != 4:
         return None
