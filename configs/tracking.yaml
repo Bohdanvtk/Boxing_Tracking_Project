@@ -6,10 +6,16 @@ tracking:
     # If detection IoU with another detection >= this value,
     # it is marked as overlapping in logs/meta
 
-  overlap_skip_threshold: 0.10  # IoU threshold for freezing appearance EMA updates
-    # If matched detection overlaps another detection >= this value,
-    # do NOT update app_emb_ema for this track
-    # Motion/Kalman and pose state should still be updated
+  overlap_skip_threshold: 0.10  # IoU threshold for freezing appearance-memory updates
+    # In Track.update(), overlap means:
+    # max_overlap_iou > overlap_skip_threshold
+    # If matched detection has overlap, skip only app_emb_ema / appearance histories.
+    # Motion/Kalman/hits/pose state are still updated.
+
+  overlap_app_freeze_after: 5
+    # Source-based cooldown length.
+    # If Track M disappears immediately after overlap with Track N,
+    # Track N freezes appearance until Track M matches again or this counter reaches 0.
 
   kalman:
     process_var: 1e6          # Process noise variance

@@ -28,49 +28,114 @@ class Detection:
 @dataclass
 class Track:
     """
-    Single target track managed by the tracker.
+    Single target track managed by MultiObjectTracker.
 
-    Represents one real-world object (e.g. a person) across multiple frames.
-    A track stores:
-    - motion state (Kalman filter),
-    - reliability over time (hits / confirmation),
-    - and object identity via smoothed appearance embeddings (EMA).
+    A Track represents one local object identity inside one tracking epoch.
+
+    It stores only local state for one target:
+      - Kalman / motion state,
+      - pose state from the latest matched detection,
+      - reliability counters,
+      - appearance identity memory,
+      - local overlap/cooldown bookkeeping.
+
+    Important architecture rule:
+      Track does NOT decide global overlap-group behavior.
+      Track does NOT decide which other tracks disappeared or returned.
+      MultiObjectTracker owns that global logic.
+
+    Track only stores:
+      - with whom it overlapped on the previous frame,
+      - whether its appearance memory is currently frozen,
+      - and which source track caused that freeze.
+
+    Motion/pose update rule:
+      A matched detection always updates:
+        - Kalman state,
+        - time_since_update,
+        - hits / confirmed,
+        - last_det_center,
+        - last_keypoints / last_kp_conf.
+
+    Appearance update rule:
+      Appearance memory is updated only when:
+        - update_app is True,
+        - det.meta["e_app"] exists,
+        - current detection has no dangerous overlap,
+        - this track has no active freeze source.
+
+    Dangerous overlap means:
+        det.meta["max_overlap_iou"] > overlap_skip_threshold
+
+    bbox_quality is intentionally NOT used to block appearance updates.
+    If e_app exists and the crop is not blocked by overlap/cooldown,
+    the appearance EMA can be updated.
 
     Attributes:
-    track_id : int
-    Unique ID of the tracked object.
+        track_id:
+            Persistent local track id inside the current epoch.
 
-    kf : KalmanTracker
-    Motion model used to predict and update the object position.
+        epoch_id:
+            Tracking epoch id. Increased after reset/shot-boundary reset.
 
-    min_hits : int
-    Number of successful updates required to confirm the track.
+        kf:
+            KalmanTracker used for motion prediction/update.
 
-    age : int
-    Total number of frames since track creation.
+        min_hits:
+            Number of matched detections required before confirmed=True.
 
-    hits : int
-    Number of frames where the track was matched with a detection.
+        age:
+            Total lifetime in frames since this track was created.
 
-    time_since_update : int
-    Frames since the last successful update; used for track removal.
+        hits:
+            Number of frames where this track was matched to a detection.
 
-    confirmed : bool
-    Whether the track is considered reliable (hits >= min_hits).
+        time_since_update:
+            Number of frames since the last matched detection.
+            Incremented by predict(), reset to 0 by update().
 
-    last_det_center : Tuple[float, float]
-    Last detection center used to update the track.
+        confirmed:
+            True after hits >= min_hits.
 
-    last_keypoints : Optional[np.ndarray]
-    Last observed keypoints (K, 2), used as a fallback for pose matching.
+        last_det_center:
+            Last matched detection center.
 
-    last_kp_conf : Optional[np.ndarray]
-    Confidence scores for the last keypoints (K,).
+        last_keypoints:
+            Last matched detection keypoints, used later by pose matching.
 
-    app_emb_ema : Optional[np.ndarray]
-    EMA of appearance embeddings, representing the track’s long-term visual identity.
+        last_kp_conf:
+            Last matched detection keypoint confidences.
 
-"""
+        app_emb_ema:
+            Smoothed appearance embedding for identity matching.
+            Protected from contaminated overlap crops.
+
+        app_emb_history:
+            Accepted appearance embeddings used later for global clustering.
+
+        left_glove_features_history / right_glove_features_history / shorts_features_history:
+            Accepted local color/part features used for later identity grouping.
+
+        overlap_group_ids:
+            Track ids that overlapped with this track on the previous frame.
+            MultiObjectTracker writes this field after converting detection overlap
+            relations into track ids.
+
+        freeze_sources:
+            Source-based appearance cooldown map:
+                source_track_id -> frames_left
+
+            Example:
+                freeze_sources = {3: 4}
+
+            Meaning:
+                this track is frozen for 4 more frames because Track 3 disappeared
+                after being in an overlap group with this track.
+
+        freeze_frames_left:
+            Convenience summary of freeze_sources.
+            Usually max(freeze_sources.values()) or 0 if no source is active.
+    """
     track_id: int
     kf: KalmanTracker
     min_hits: int
@@ -92,6 +157,16 @@ class Track:
     left_glove_features_history: list[np.ndarray] = field(default_factory=list)
     right_glove_features_history: list[np.ndarray] = field(default_factory=list)
     shorts_features_history: list[np.ndarray] = field(default_factory=list)
+
+    # Track ids that overlapped with this track on the previous frame.
+    # MultiObjectTracker writes this field; Track only stores it.
+    overlap_group_ids: set[int] = field(default_factory=set)
+
+    # Source-based appearance freeze.
+    # Key: source track_id that disappeared after overlap.
+    # Value: frames left.
+    freeze_sources: Dict[int, int] = field(default_factory=dict)
+    freeze_frames_left: int = 0
 
     def predict(self) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -116,27 +191,18 @@ class Track:
             update_app: bool = True,
             overlap_skip_threshold: float = 0.40,
     ):
-        """
-        Update track with matched detection.
-
-        If detection strongly overlaps with another detection, skip the update
-        completely to avoid contaminating motion, pose, and appearance memory.
-        """
+        # Matched detection update.
+        #
+        # Overlap no longer skips the whole track update.
+        # Motion / pose / hits are always updated.
+        # Only appearance memory is blocked by current overlap or active freeze.
         max_overlap_iou = float(det.meta.get("max_overlap_iou", 0.0))
-
-        # Strong overlap means this detection may be contaminated by another person.
-        # In this case we skip the whole update:
-        # - no Kalman update
-        # - no last_keypoints update
-        # - no appearance EMA update
-        # - no feature history update
-        if max_overlap_iou >= overlap_skip_threshold:
-            det.meta["track_update_skipped"] = True
-            det.meta["track_update_skip_reason"] = "high_detection_overlap"
-            return self.kf.get_state(), self.kf.get_cov()
+        current_overlap = max_overlap_iou > float(overlap_skip_threshold)
 
         det.meta["track_update_skipped"] = False
         det.meta["track_update_skip_reason"] = None
+        det.meta["track_match_had_overlap"] = bool(current_overlap)
+
         state, cov = self.kf.update(np.asarray(det.center, dtype=float))
 
         self.time_since_update = 0
@@ -149,21 +215,31 @@ class Track:
         self.last_keypoints = None if det.keypoints is None else np.asarray(det.keypoints, dtype=float)
         self.last_kp_conf = None if det.kp_conf is None else np.asarray(det.kp_conf, dtype=float)
 
-        bbox_quality = det.meta.get("bbox_quality", "invalid")
-        allow_app_update = bbox_quality in {"high", "medium"}
+        self._sync_freeze_counter()
 
-        if update_app and allow_app_update:
-            e_app = det.meta.get("e_app", None)
+        e_app = det.meta.get("e_app", None)
+        freeze_active = self.is_frozen()
 
-            if e_app is not None:
-                e_app = np.asarray(e_app, dtype=np.float32)
+        allow_app_update = (
+            bool(update_app)
+            and e_app is not None
+            and not current_overlap
+            and not freeze_active
+        )
 
-                if self.app_emb_ema is None:
-                    self.app_emb_ema = e_app
-                else:
-                    self.app_emb_ema = ema_alpha * self.app_emb_ema + (1.0 - ema_alpha) * e_app
+        det.meta["track_app_update_allowed"] = bool(allow_app_update)
+        det.meta["track_freeze_frames_left"] = int(self.freeze_frames_left)
+        det.meta["track_freeze_source_ids"] = sorted(int(source_id) for source_id in self.freeze_sources.keys())
 
-                self.app_emb_history.append(e_app.copy())
+        if allow_app_update:
+            e_app = np.asarray(e_app, dtype=np.float32)
+
+            if self.app_emb_ema is None:
+                self.app_emb_ema = e_app
+            else:
+                self.app_emb_ema = ema_alpha * self.app_emb_ema + (1.0 - ema_alpha) * e_app
+
+            self.app_emb_history.append(e_app.copy())
 
             lf = det.meta.get("left_glove_features")
             if lf is not None:
@@ -177,15 +253,90 @@ class Track:
             if sf is not None:
                 self.shorts_features_history.append(sf)
 
+            det.meta["track_app_update_block_reason"] = None
+        else:
+            if not bool(update_app):
+                reason = "update_app_false"
+            elif e_app is None:
+                reason = "missing_e_app"
+            elif current_overlap:
+                reason = "current_detection_overlap"
+            elif freeze_active:
+                reason = "freeze_source_active"
+            else:
+                reason = "unknown"
+
+            det.meta["track_app_update_block_reason"] = reason
+
         return state, cov
 
-    def marked_missed(self):
-        """
-        Placeholder hook for marking a track as 'missed' (unmatched on this frame).
+    @staticmethod
+    def overlap_group(det: Detection, overlap_skip_threshold: float) -> list[int]:
+        # Return det_idx values from det.meta["overlap_relations"]
+        # whose IoU is stronger than overlap_skip_threshold.
+        group: list[int] = []
 
-        Currently does nothing, but can be extended in the future if additional
-        bookkeeping is needed when a track is not updated by any detection.
-        """
+        for rel in det.meta.get("overlap_relations", []) or []:
+            try:
+                det_idx = int(rel.get("det_idx"))
+                iou = float(rel.get("iou", 0.0))
+            except Exception:
+                continue
+
+            if iou > float(overlap_skip_threshold):
+                group.append(det_idx)
+
+        return group
+
+    def _sync_freeze_counter(self):
+        if self.freeze_sources:
+            self.freeze_frames_left = max(int(v) for v in self.freeze_sources.values())
+        else:
+            self.freeze_frames_left = 0
+
+    def is_frozen(self) -> bool:
+        self._sync_freeze_counter()
+        return self.freeze_frames_left > 0
+
+    def set_cooldown(self, source_track_id: int, frames: int):
+        # Local setter. The tracker decides when to call it.
+        source_track_id = int(source_track_id)
+        frames = max(0, int(frames))
+        if frames <= 0:
+            return
+
+        old_value = int(self.freeze_sources.get(source_track_id, 0))
+        self.freeze_sources[source_track_id] = max(old_value, frames)
+        self._sync_freeze_counter()
+
+    def clear_freeze_source(self, source_track_id: int):
+        # Clear only one source. Example: if source M returned,
+        # clear freeze_sources[M] but keep other sources.
+        self.freeze_sources.pop(int(source_track_id), None)
+        self._sync_freeze_counter()
+
+    def decrease_freeze(self, exclude_sources: Optional[set[int]] = None):
+        # Decrease all source cooldowns by one frame.
+        # exclude_sources are new sources started on this same frame.
+        exclude_sources = {int(x) for x in (exclude_sources or set())}
+
+        for source_track_id, frames_left in list(self.freeze_sources.items()):
+            source_track_id = int(source_track_id)
+
+            if source_track_id in exclude_sources:
+                continue
+
+            frames_left = int(frames_left) - 1
+
+            if frames_left <= 0:
+                self.freeze_sources.pop(source_track_id, None)
+            else:
+                self.freeze_sources[source_track_id] = frames_left
+
+        self._sync_freeze_counter()
+
+    def marked_missed(self):
+        # Compatibility hook. The group-level missed/freeze logic lives in MultiObjectTracker.
         return
 
     def is_dead(self, max_age: int, max_confirmed_age) -> bool:

@@ -31,6 +31,7 @@ class TrackerConfig:
 
     overlap_log_threshold: float = 0.10
     overlap_skip_threshold: float = 0.40
+    overlap_app_freeze_after: int = 5
 
 def openpose_people_to_detections(
     people: List[Dict[str, Any]],
@@ -113,6 +114,130 @@ def _load_tracker_config_from_yaml(
 
 
 class MultiObjectTracker:
+    """
+    Multi-object tracker for boxing-player tracking.
+
+    MultiObjectTracker owns the global tracking state across frames:
+      - active Track objects,
+      - track id allocation,
+      - Kalman prediction/update scheduling,
+      - matching tracks to detections,
+      - spawning new tracks,
+      - removing dead tracks,
+      - reset/epoch bookkeeping,
+      - and the overlap-group appearance cooldown system.
+
+    Separation of responsibilities:
+      Track is local.
+      MultiObjectTracker is global.
+
+    Track stores local state:
+      - Kalman state,
+      - appearance EMA,
+      - overlap_group_ids,
+      - freeze_sources.
+
+    MultiObjectTracker decides global interactions:
+      - which tracks matched this frame,
+      - which tracks were matched last frame,
+      - which tracks disappeared,
+      - which disappeared tracks were in overlap groups,
+      - which nearby tracks must freeze appearance memory,
+      - which freeze sources should be cleared because the source track returned.
+
+    Matching rule:
+      Appearance cooldown never blocks matching.
+
+      Tracks in cooldown still participate in match_tracks_and_detections().
+      If a cooled-down track matches a detection, its Kalman/pose/hits update still runs.
+      Cooldown blocks only app_emb_ema / appearance feature history updates.
+
+    Overlap rule:
+      Detection overlap is computed before tracker.update() and stored in det.meta:
+        - max_overlap_iou
+        - max_overlap_det_idx
+        - overlap_relations
+        - is_overlapping
+
+      The tracker does not recompute IoU.
+      It reads det.meta["overlap_relations"] and converts detection indices
+      into track ids using current frame matches.
+
+    prev_matches:
+      Previous-frame matches:
+          track_id -> det_idx
+
+      Used by compare_matches() to detect which previously matched tracks
+      disappeared on the current frame.
+
+    overlap_group_ids:
+      At the end of every frame, MultiObjectTracker builds current overlap groups.
+
+      Detection overlap groups use det_idx.
+      Tracks need track_id.
+      dets_to_track() performs this conversion.
+
+      Then every Track receives:
+          track.overlap_group_ids = {track ids that overlapped with it now}
+
+      On the next frame, if one of those ids disappears,
+      nearby tracks can be frozen.
+
+    Source-based cooldown:
+      If Track M was in an overlap group on the previous frame and disappears now,
+      then M becomes a freeze source.
+
+      Every affected track receives:
+          track.freeze_sources[M] = overlap_app_freeze_after
+
+      Affected tracks include:
+          - M itself, if still present in self.tracks,
+          - every track whose overlap_group_ids contains M.
+
+    Defreeze rule:
+      A cooldown source is cleared only when that source track matches again.
+
+      Example:
+          N.freeze_sources = {M: 4}
+
+      If N matches:
+          nothing is cleared.
+
+      If M matches:
+          source M is cleared from every track:
+              track.freeze_sources.pop(M, None)
+
+      This is handled by which_defroze().
+
+    Countdown rule:
+      If a source track does not return, its cooldown decreases once per frame:
+          freeze_sources[source] -= 1
+
+      When it reaches zero, that source is removed.
+
+      If no sources remain, appearance updates are allowed again,
+      as long as the current detection has no dangerous overlap.
+
+    High-level update() flow:
+      1. Reset on reset edge if needed.
+      2. Predict all existing tracks.
+      3. Match tracks to detections.
+      4. Build current_matches: track_id -> det_idx.
+      5. which_defroze(): clear freeze sources for source tracks that returned.
+      6. compare_matches(): find track ids that disappeared since prev_matches.
+      7. freeze_track_near_unmatched(): start cooldown for tracks near disappeared sources.
+      8. Update matched tracks.
+      9. Spawn new tracks for unmatched detections.
+      10. dets_to_track(): convert current detection-overlap groups into track-id groups.
+      11. Write overlap_group_ids into Track objects for the next frame.
+      12. decrease_freeze(): decrement active cooldown counters.
+      13. Save prev_matches for the next frame.
+      14. Remove dead tracks.
+
+    Core idea:
+      Motion/pose tracking should continue through overlap and occlusion.
+      Appearance identity memory should be protected from contaminated crops.
+    """
     def __init__(
         self,
         cfg: Optional[TrackerConfig] = None,
@@ -139,6 +264,10 @@ class MultiObjectTracker:
         self._was_reset_mode: bool = False
         self._epoch_id: int = 1
         self._epoch_tracks: Dict[int, Dict[int, Track]] = {self._epoch_id: {}}
+
+        # Previous frame matches: track_id -> det_idx.
+        # Used to detect which previously matched tracks disappeared now.
+        self.prev_matches: Dict[int, int] = {}
 
         raw = self.get_config_dict() or {}
         self.debug: bool = bool(raw.get("tracking", {}).get("debug", False))
@@ -214,6 +343,159 @@ class MultiObjectTracker:
 
         return valid_count >= required
 
+    def compare_matches(
+        self,
+        prev_match: Dict[int, int],
+        current_match: Dict[int, int],
+    ) -> set[int]:
+        # Return track_ids that were matched on the previous frame
+        # but are not matched on the current frame.
+        return set(prev_match.keys()) - set(current_match.keys())
+
+    def dets_to_track(
+        self,
+        matches: Dict[int, int],
+        detections: List[Detection],
+    ) -> Dict[int, set[int]]:
+        # Convert detection overlap groups into track_id overlap groups.
+        #
+        # det.meta["overlap_relations"] stores det_idx.
+        # For cooldown logic we need track_id.
+        #
+        # If an overlapped detection is not matched to any track, it is skipped.
+        det_to_track = {
+            int(det_idx): int(track_id)
+            for track_id, det_idx in matches.items()
+        }
+
+        track_groups: Dict[int, set[int]] = {}
+
+        for track_id, det_idx in matches.items():
+            track_id = int(track_id)
+            det_idx = int(det_idx)
+
+            if not (0 <= det_idx < len(detections)):
+                track_groups[track_id] = set()
+                continue
+
+            det = detections[det_idx]
+            overlap_det_indices = Track.overlap_group(
+                det,
+                overlap_skip_threshold=self.cfg.overlap_skip_threshold,
+            )
+
+            group_track_ids: set[int] = set()
+
+            for other_det_idx in overlap_det_indices:
+                other_track_id = det_to_track.get(int(other_det_idx))
+
+                if other_track_id is None:
+                    continue
+
+                if int(other_track_id) == track_id:
+                    continue
+
+                group_track_ids.add(int(other_track_id))
+
+            track_groups[track_id] = group_track_ids
+
+        return track_groups
+
+    def whether_in_group(
+        self,
+        idx: int,
+        groups: Dict[int, set[int]],
+    ) -> set[int]:
+        # Return all track_ids that are in the same overlap group as idx.
+        idx = int(idx)
+        result: set[int] = set()
+
+        for owner_id, members in groups.items():
+            full_group = {int(owner_id)} | {int(x) for x in members}
+
+            if idx in full_group:
+                result |= full_group
+
+        result.discard(idx)
+        return result
+
+    def set_cooldown(
+        self,
+        track: Track,
+        source_track_id: int,
+    ) -> None:
+        # Set freeze on one track because source_track_id disappeared.
+        track.set_cooldown(
+            source_track_id=int(source_track_id),
+            frames=self.cfg.overlap_app_freeze_after,
+        )
+
+    def freeze_track_near_unmatched(
+        self,
+        absent_ids: set[int],
+        tracks: List[Track],
+    ) -> set[int]:
+        # If source track M disappeared and another track had M in overlap_group_ids,
+        # freeze that other track with source M.
+        #
+        # Also freeze M itself if it still exists.
+        tracks_by_id = {
+            int(track.track_id): track
+            for track in tracks
+        }
+
+        freshly_frozen_sources: set[int] = set()
+
+        for absent_id in {int(x) for x in absent_ids}:
+            affected_ids = {absent_id}
+
+            for track in tracks:
+                if absent_id in getattr(track, "overlap_group_ids", set()):
+                    affected_ids.add(int(track.track_id))
+
+            for affected_id in affected_ids:
+                track = tracks_by_id.get(int(affected_id))
+
+                if track is None:
+                    continue
+
+                self.set_cooldown(
+                    track=track,
+                    source_track_id=absent_id,
+                )
+
+            if affected_ids:
+                freshly_frozen_sources.add(absent_id)
+
+        return freshly_frozen_sources
+
+    def which_defroze(
+        self,
+        matched_track_ids: set[int],
+        tracks: List[Track],
+    ) -> None:
+        # If source track M matched again, clear source M from every track.
+        #
+        # Important:
+        # Track N matching does not clear freeze caused by M.
+        # Only M matching clears freeze source M.
+        for source_track_id in {int(x) for x in matched_track_ids}:
+            for track in tracks:
+                track.clear_freeze_source(source_track_id)
+
+    def decrease_freeze(
+        self,
+        tracks: List[Track],
+        exclude_sources: Optional[set[int]] = None,
+    ) -> None:
+        # Decrease all active freezes by one frame.
+        # Exclude sources that were created on this frame.
+        exclude_sources = {int(x) for x in (exclude_sources or set())}
+
+        for track in tracks:
+            track.decrease_freeze(exclude_sources=exclude_sources)
+
+
     def update(self, detections: List[Detection], reset_mode: bool, g: float = 1.0) -> Dict[str, Any]:
         # Hard reset only on reset edge (False -> True).
         # This avoids clearing tracks on every frame while reset_mode stays True.
@@ -229,6 +511,7 @@ class MultiObjectTracker:
         row_track_ids = [idx2tid[i] for i in range(len(self.tracks))]
 
         # 2) Match
+        # Freeze/cooldown does NOT affect matching.
         matches_idx, um_tr_idx, um_det_idx, C, log = match_tracks_and_detections(
             tracks=self.tracks,
             detections=detections,
@@ -238,27 +521,99 @@ class MultiObjectTracker:
             reset_mode=reset_mode,
         )
 
-        # 3) Update matched
+        current_matches: Dict[int, int] = {
+            int(self.tracks[i_track].track_id): int(j_det)
+            for i_track, j_det in matches_idx
+        }
+
+        matched_track_ids = set(current_matches.keys())
+
+        # 3) If a frozen source returned, defreeze that source globally.
+        self.which_defroze(
+            matched_track_ids=matched_track_ids,
+            tracks=self.tracks,
+        )
+
+        # 4) Detect tracks that disappeared compared to previous frame.
+        absent_ids = self.compare_matches(
+            prev_match=self.prev_matches,
+            current_match=current_matches,
+        )
+
+        # 5) Freeze tracks that were near disappeared tracks on previous frame.
+        freshly_frozen_sources = self.freeze_track_near_unmatched(
+            absent_ids=absent_ids,
+            tracks=self.tracks,
+        )
+
+        # 6) Update matched existing tracks.
         id_pairs: List[Tuple[int, int]] = []
         for i_track, j_det in matches_idx:
             trk = self.tracks[i_track]
             det = detections[j_det]
+
             trk.update(
                 det,
                 ema_alpha=self.cfg.match.emb_ema_alpha,
                 update_app=True,
                 overlap_skip_threshold=self.cfg.overlap_skip_threshold,
             )
+
             id_pairs.append((trk.track_id, j_det))
 
-        # 4) Spawn new tracks
+        # 7) Spawn new tracks for unmatched detections.
+        new_matches: Dict[int, int] = {}
         for j in um_det_idx:
-            self.tracks.append(self._new_track(detections[j]))
+            trk = self._new_track(detections[j])
+            self.tracks.append(trk)
+            new_matches[int(trk.track_id)] = int(j)
 
-        # 5) Remove dead
+        # 8) Build all current matches, including newly spawned tracks.
+        all_current_matches: Dict[int, int] = {
+            **current_matches,
+            **new_matches,
+        }
+
+        # 9) Convert current detection overlap groups to track_id overlap groups.
+        track_groups = self.dets_to_track(
+            matches=all_current_matches,
+            detections=detections,
+        )
+
+        # 10) Store overlap_group_ids inside each Track for the next frame.
+        tracks_by_id = {
+            int(track.track_id): track
+            for track in self.tracks
+        }
+
+        for track_id, group_ids in track_groups.items():
+            track = tracks_by_id.get(int(track_id))
+
+            if track is not None:
+                track.overlap_group_ids = {
+                    int(group_id)
+                    for group_id in group_ids
+                }
+
+        # Tracks that did not appear in current matches should not keep stale groups.
+        for track in self.tracks:
+            if int(track.track_id) not in track_groups:
+                track.overlap_group_ids = set()
+
+        # 11) Decrease active freeze counters.
+        # Newly created freezes are excluded on this same frame.
+        self.decrease_freeze(
+            tracks=self.tracks,
+            exclude_sources=freshly_frozen_sources,
+        )
+
+        # 12) Save matches for the next frame.
+        self.prev_matches = all_current_matches
+
+        # 13) Remove dead
         self._remove_dead()
 
-        unmatched_track_ids = [idx2tid[i] for i in um_tr_idx if i in idx2tid]
+        unmatched_track_ids = sorted(int(x) for x in absent_ids)
 
         active_tracks_summary = [
             {
@@ -269,6 +624,16 @@ class MultiObjectTracker:
                 "time_since_update": t.time_since_update,
                 "state": t.state.tolist(),
                 "pos": t.pos(),
+                "overlap_group_ids": sorted(
+                    int(x)
+                    for x in getattr(t, "overlap_group_ids", set())
+                ),
+                "freeze_sources": {
+                    int(source_id): int(frames_left)
+                    for source_id, frames_left in getattr(t, "freeze_sources", {}).items()
+                },
+                "freeze_frames_left": int(getattr(t, "freeze_frames_left", 0)),
+                "app_emb_history_len": int(len(getattr(t, "app_emb_history", []) or [])),
             }
             for t in self.tracks
             if not t.is_dead(self.cfg.max_age, self.cfg.max_confirmed_age)
@@ -302,6 +667,7 @@ class MultiObjectTracker:
 
         self._epoch_id += 1
         self._epoch_tracks[self._epoch_id] = {}
+        self.prev_matches.clear()
 
     def get_epoch_tracks(self) -> Dict[int, Dict[int, Track]]:
         return {epoch_id: dict(tracks_by_id) for epoch_id, tracks_by_id in self._epoch_tracks.items()}

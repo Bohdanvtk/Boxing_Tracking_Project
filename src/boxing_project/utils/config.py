@@ -100,6 +100,7 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
 
     overlap_log_threshold = float(_get(cfg, "tracking.overlap_log_threshold", 0.10))
     overlap_skip_threshold = float(_get(cfg, "tracking.overlap_skip_threshold", 0.40))
+    overlap_app_freeze_after = int(_get(cfg, "tracking.overlap_app_freeze_after", 5))
 
     max_age = int(_get(cfg, "tracking.tracker.max_age", 10))
     max_confirmed_age = int(_get(cfg, "tracking.tracker.max_confirmed_age", 40))
@@ -122,6 +123,7 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
         save_log=save_log,
         overlap_log_threshold=overlap_log_threshold,
         overlap_skip_threshold=overlap_skip_threshold,
+        overlap_app_freeze_after=overlap_app_freeze_after,
     )
 
 def load_tracking_config(path: str):
