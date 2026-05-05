@@ -492,14 +492,6 @@ def process_frame(
         people[i]["right_glove_crop"] = parts_crops[i]["right_glove"]
         people[i]["shorts_crop"] = parts_crops[i]["shorts"]
 
-    for i in range(n_people):
-        print(f"Person {i}")
-
-        for part_name, crop in parts_crops[i].items():
-            if crop is None:
-                print(f"  {part_name}: None")
-            else:
-                print(f"  {part_name}: {crop.shape}")
 
     detections = openpose_people_to_detections(
         people,

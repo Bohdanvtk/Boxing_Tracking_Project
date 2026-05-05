@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -78,7 +78,21 @@ class InferRunner:
         # NEW: artifacts output dir
         save_dir_raw = data_cfg.get("save_dir", None)
         save_dir = _resolve(pr, save_dir_raw) if save_dir_raw else None
+
         if save_dir is not None:
+            # STRONG safety guard:
+            # allow deletion ONLY for .../boxing_tracker/test
+            if (
+                    save_dir.exists()
+                    and save_dir.name == "test"
+                    and save_dir.parent.name == "boxing_tracker"
+            ):
+                print(f"[INFO] Removing old test directory: {save_dir}")
+                shutil.rmtree(save_dir)
+            else:
+                if save_dir.exists():
+                    print(f"[SAFE] Not deleting directory: {save_dir}")
+
             save_dir.mkdir(parents=True, exist_ok=True)
 
         # ---------- Optional embeddings ----------

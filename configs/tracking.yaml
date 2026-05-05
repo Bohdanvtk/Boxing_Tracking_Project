@@ -2,11 +2,11 @@ tracking:
   debug: true                 # Enable console debug output
   save_log: true              # Save debug logs to disk
   fps: 30                     # Video FPS
-  overlap_log_threshold: 0.10   # IoU threshold used only for debug/logging overlap state
+  overlap_log_threshold: 0.09   # IoU threshold used only for debug/logging overlap state
     # If detection IoU with another detection >= this value,
     # it is marked as overlapping in logs/meta
 
-  overlap_skip_threshold: 0.10  # IoU threshold for freezing appearance-memory updates
+  overlap_skip_threshold: 0.9  # IoU threshold for freezing appearance-memory updates
     # In Track.update(), overlap means:
     # max_overlap_iou > overlap_skip_threshold
     # If matched detection has overlap, skip only app_emb_ema / appearance histories.
@@ -31,6 +31,7 @@ tracking:
                               # Lower -> stricter motion gate
     pose_scale_eps: 1.0e-6    # Small epsilon for pose-related normalization
     greedy_threshold: 4.1     # Max final cost accepted by greedy matcher
+    max_update_cost: 1.2      # Max absolute raw weighted cost allowed for Track update
 
     motion_threshold: 0.09    # Max allowed normalized motion distance
                               # Above this -> reject pair
@@ -45,8 +46,8 @@ tracking:
     large_cost: 880.0         # Sentinel cost for invalid / gated pairs
     min_kp_conf: 0.05         # Minimum keypoint confidence
 
-    w_motion: 5.0             # Weight of relative motion penalty
-    w_pose: 2.0               # Weight of relative pose penalty
+    w_motion: 3.0             # Weight of relative motion penalty
+    w_pose: 1.0               # Weight of relative pose penalty
     w_app: 2.0                # Weight of relative appearance penalty
 
     k_motion: 3.0             # Relative saturation ratio for motion

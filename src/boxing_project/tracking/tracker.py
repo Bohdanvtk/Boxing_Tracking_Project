@@ -495,7 +495,6 @@ class MultiObjectTracker:
         for track in tracks:
             track.decrease_freeze(exclude_sources=exclude_sources)
 
-
     def update(self, detections: List[Detection], reset_mode: bool, g: float = 1.0) -> Dict[str, Any]:
         # Hard reset only on reset edge (False -> True).
         # This avoids clearing tracks on every frame while reset_mode stays True.
@@ -548,9 +547,82 @@ class MultiObjectTracker:
 
         # 6) Update matched existing tracks.
         id_pairs: List[Tuple[int, int]] = []
+        skipped_updates: List[Dict[str, Any]] = []
+
+        max_update_cost = float(getattr(self.cfg.match, "max_update_cost", 1.2))
+
+        # C is row-relative matcher cost.
+        # For update quality we use absolute raw weighted update_cost from matcher.py.
+        motion_matrix = log.meta.get("motion_matrix", None)
+        pose_matrix = log.meta.get("pose_matrix", None)
+        app_matrix = log.meta.get("app_matrix", None)
+        update_cost_matrix = log.meta.get("update_cost_matrix", None)
+
+        if (
+                motion_matrix is None
+                or pose_matrix is None
+                or app_matrix is None
+                or update_cost_matrix is None
+        ):
+            raise RuntimeError(
+                "Missing motion_matrix / pose_matrix / app_matrix / update_cost_matrix in log.meta. "
+                "Check matcher.py build_cost_matrix()."
+            )
+
         for i_track, j_det in matches_idx:
             trk = self.tracks[i_track]
             det = detections[j_det]
+
+            i = int(i_track)
+            j = int(j_det)
+
+            d_motion = float(motion_matrix[i, j])
+            d_pose = float(pose_matrix[i, j])
+            d_app = float(app_matrix[i, j])
+
+            # Standard matcher cost: row-relative cost.
+            # This can be 0 even for non-perfect match.
+            row_cost = float(C[i, j])
+
+            # Absolute weighted raw cost.
+            # This is used for Track update / skip-update decision.
+            update_cost = float(update_cost_matrix[i, j])
+
+            det.meta["match_cost"] = update_cost
+            det.meta["match_row_cost"] = row_cost
+            det.meta["match_update_cost"] = update_cost
+            det.meta["match_d_motion"] = d_motion
+            det.meta["match_d_pose"] = d_pose
+            det.meta["match_d_app"] = d_app
+            det.meta["match_update_threshold"] = max_update_cost
+            det.meta["matched_track_id_before_update"] = int(trk.track_id)
+
+            # Match still exists for visualization / outputs.
+            id_pairs.append((trk.track_id, j_det))
+
+            if update_cost > max_update_cost:
+                det.meta["track_update_skipped"] = True
+                det.meta["track_update_skip_reason"] = "high_match_update_cost"
+                det.meta["track_update_skip_cost"] = update_cost
+                det.meta["track_update_skip_threshold"] = max_update_cost
+
+                skipped_updates.append(
+                    {
+                        "track_id": int(trk.track_id),
+                        "det_idx": int(j_det),
+                        "row_cost": float(row_cost),
+                        "update_cost": float(update_cost),
+                        "d_motion": float(d_motion),
+                        "d_pose": float(d_pose),
+                        "d_app": float(d_app),
+                        "threshold": float(max_update_cost),
+                        "reason": "high_match_update_cost",
+                    }
+                )
+
+                # No Kalman update, no pose update, no appearance update,
+                # no hits increment, no time_since_update reset.
+                continue
 
             trk.update(
                 det,
@@ -558,9 +630,6 @@ class MultiObjectTracker:
                 update_app=True,
                 overlap_skip_threshold=self.cfg.overlap_skip_threshold,
             )
-
-            id_pairs.append((trk.track_id, j_det))
-
         # 7) Spawn new tracks for unmatched detections.
         new_matches: Dict[int, int] = {}
         for j in um_det_idx:
@@ -650,6 +719,7 @@ class MultiObjectTracker:
             "active_tracks": active_tracks_summary,
             "frame_log": log,
             "row_track_ids": row_track_ids,
+            "skipped_updates": skipped_updates,
         }
 
     def get_active_tracks(self, confirmed_only: bool = True) -> List[Track]:

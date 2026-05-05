@@ -26,12 +26,15 @@ class MatrixCell:
     d_pose: float = 0.0
     d_app: float = 0.0
 
+    # absolute raw weighted cost used for Track update decision
+    update_cost: float = 0.0
+
     # row-wise relative penalties
     rel_motion: float = 0.0
     rel_pose: float = 0.0
     rel_app: float = 0.0
 
-    # final cost
+    # final row-relative matcher cost
     cost: float = 0.0
 
     # gating/debug info
@@ -52,7 +55,6 @@ class DebugLog:
     - meta can provide IDs:
         meta["track_ids"] -> list of persistent track_ids aligned with tracks list index i
         meta["det_ids"]   -> list of detection ids aligned with detections list index j
-      (fallbacks are supported: meta["tracks"], meta["detections"], etc.)
     """
     enabled_print: bool = True
     sink: Callable[[str], None] = print
@@ -152,16 +154,15 @@ class DebugLog:
 
         return 0.0, None, 0
 
-
     def show_matrix(self, precision: int = 6) -> None:
         """
         Output format:
-          1) g coefficient + explanation of indices
-          2) Full breakdown PER TRACK over all detections
-          3) Summary: best match per track (row-min)
-          4) Compact cost matrix
-
-        Final cost is RELATIVE-ONLY after hard gating.
+          1) g coefficient + weights
+          2) Explanation of indexes
+          3) Full breakdown PER TRACK over all detections
+          4) Summary: best match per track
+          5) Row-relative cost matrix
+          6) Absolute update cost matrix
         """
         global FRAME_IDX
 
@@ -182,15 +183,40 @@ class DebugLog:
         if g is not None:
             self.section(f"[debug] frame coefficient g = {float(g):.3f}")
 
+        w_motion = self.meta.get("w_motion", None)
+        w_pose = self.meta.get("w_pose", None)
+        w_app = self.meta.get("w_app", None)
+        max_update_cost = self.meta.get("max_update_cost", None)
+
+        if w_motion is not None and w_pose is not None and w_app is not None:
+            self.section("[debug] Matching / update cost weights:")
+            self.line(f"- w_motion = {float(w_motion):.6f}")
+            self.line(f"- w_pose   = {float(w_pose):.6f}")
+            self.line(f"- w_app    = {float(w_app):.6f}")
+            self.line("")
+            self.line("[debug] cost     = row-relative matcher cost")
+            self.line("[debug] upd_cost = absolute raw weighted cost")
+            self.line(
+                "[debug] upd_cost = "
+                f"{float(w_motion):.3f}*d_motion + "
+                f"{float(w_pose):.3f}*d_pose + "
+                f"{float(w_app):.3f}*d_app"
+            )
+
+        if max_update_cost is not None:
+            self.line(f"[debug] max_update_cost = {float(max_update_cost):.6f}")
+
         self.section("[info] Meaning of indexes:")
         self.line("- Track#i = i-th element in the current tracks list (0-based list index)")
         self.line("- Det#j   = j-th element in the current detections list (0-based list index)")
         self.line("- track_id = persistent ID stored inside Track")
         self.line("- det_id   = ID stored for Detection (if available; otherwise j)")
         self.line("")
-        self.line("[debug] Final cost is RELATIVE-ONLY after hard gating.")
+        self.line("[debug] cost is RELATIVE-ONLY after hard gating.")
+        self.line("[debug] upd_cost is ABSOLUTE weighted raw cost.")
         self.line("[debug] Raw d_* values are used for gating and debug.")
-        self.line("[debug] Lower final cost = better. large_cost usually means GATED / INVALID MATCH.")
+        self.line("[debug] Lower cost/upd_cost = better. large_cost usually means GATED / INVALID MATCH.")
+
         self.section("[debug] Detection overlaps:")
         for j in range(self.n_cols):
             max_iou, other_idx, n_rel = self._get_det_overlap(j)
@@ -198,6 +224,7 @@ class DebugLog:
                 f"- Det#{j}: max_overlap_iou={max_iou:.3f}, "
                 f"max_overlap_det_idx={other_idx}, overlaps={n_rel}"
             )
+
         self.section("=" * 80)
         self.line("TRACK DETAILS (full breakdown)")
         self.line("=" * 80)
@@ -252,6 +279,7 @@ class DebugLog:
                 if cell.d2 is not None:
                     self.line(f"    d2       = {cell.d2:.{precision}f}")
                 self.line(f"    cost     = {cell.cost:.{precision}f}{gated}{marker}")
+                self.line(f"    upd_cost = {cell.update_cost:.{precision}f}")
 
             self.line("")
             self.line("-" * 80)
@@ -264,14 +292,18 @@ class DebugLog:
             bj = row_best_j[i]
             did = self._get_det_id(bj)
             bc = row_best_cost[i]
-            self.line(f"Track#{i} (track_id={tid}) -> best Det#{bj} (det_id={did}) with cost={bc:.{precision}f}")
+            self.line(
+                f"Track#{i} (track_id={tid}) -> best Det#{bj} "
+                f"(det_id={did}) with cost={bc:.{precision}f}"
+            )
 
         self.line("")
         self.line("[info] Note: this is per-track best. Final assignment can differ because one detection")
         self.line("       cannot be matched to many tracks at the same time.")
+        self.line("[info] upd_cost is NOT used to choose the match. It is used later to decide Track update.")
 
         self.section("=" * 80)
-        self.line("COST MATRIX (tracks x detections)")
+        self.line("COST MATRIX (row-relative matcher cost)")
         self.line("=" * 80)
 
         header = "           " + " ".join([f"Det#{j:02d}" for j in range(self.n_cols)])
@@ -281,6 +313,22 @@ class DebugLog:
         fmt = f"{{:>{table_precision + 6}.{table_precision}f}}"
         for i in range(self.n_rows):
             row_vals = [fmt.format(float(self.matrix[i][j].cost)) for j in range(self.n_cols)]
+            self.line(f"Track#{i:02d} " + " ".join(row_vals))
+
+        self.section("=" * 80)
+        self.line("UPDATE COST MATRIX (absolute raw weighted cost)")
+        self.line("=" * 80)
+
+        header = "           " + " ".join([f"Det#{j:02d}" for j in range(self.n_cols)])
+        self.line(header)
+
+        table_precision = 3
+        fmt = f"{{:>{table_precision + 6}.{table_precision}f}}"
+        for i in range(self.n_rows):
+            row_vals = [
+                fmt.format(float(self.matrix[i][j].update_cost))
+                for j in range(self.n_cols)
+            ]
             self.line(f"Track#{i:02d} " + " ".join(row_vals))
 
         frame_header(FRAME_IDX)

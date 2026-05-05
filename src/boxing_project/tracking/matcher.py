@@ -53,6 +53,10 @@ class MatchConfig:
     miss_relax_full_after: int = 20
     miss_relax_strength: float = 2.0
 
+    # Absolute weighted raw cost threshold for Track update.
+    # Matching can still happen, but Track memory update is skipped if update_cost is higher.
+    max_update_cost: float = 1.2
+
 
 @dataclass
 class PairwiseArtifacts:
@@ -60,12 +64,18 @@ class PairwiseArtifacts:
     Static pairwise data computed once for the current frame.
     These values are reused both for row-ranking and for column conflict resolution.
     """
-    motion: np.ndarray         # shape (n_tracks, n_dets)
-    pose: np.ndarray           # shape (n_tracks, n_dets)
-    app: np.ndarray            # shape (n_tracks, n_dets)
-    valid: np.ndarray          # shape (n_tracks, n_dets), bool
+    motion: np.ndarray       # shape (n_tracks, n_dets)
+    pose: np.ndarray         # shape (n_tracks, n_dets)
+    app: np.ndarray          # shape (n_tracks, n_dets)
 
-    row_cost: np.ndarray       # row-relative preference cost matrix
+    # Absolute raw weighted cost:
+    # update_cost = w_motion*d_motion + w_pose*d_pose + w_app*d_app
+    # Used only for Track update / skip-update decision.
+    update_cost: np.ndarray  # shape (n_tracks, n_dets)
+
+    valid: np.ndarray        # shape (n_tracks, n_dets), bool
+
+    row_cost: np.ndarray     # row-relative preference cost matrix
     row_preferences: List[List[int]]
 
     log: DebugLog
@@ -123,23 +133,6 @@ def _compute_subset_relative_penalties(
 ) -> np.ndarray:
     """
     Compute relative penalties over an arbitrary subset along one axis.
-
-    Parameters
-    ----------
-    values:
-        1D array of raw distances.
-    active_mask:
-        Boolean mask that marks which entries participate in the comparison.
-    k:
-        Saturation ratio for log-ratio penalty.
-    eps:
-        Numerical epsilon.
-
-    Returns
-    -------
-    penalties:
-        1D float array in [0, 1].
-        Inactive entries get 1.0 by default.
     """
     penalties = np.ones_like(values, dtype=np.float32)
 
@@ -386,6 +379,7 @@ def _miss_relaxation(track: Track, cfg: MatchConfig) -> float:
 
     return float(np.clip(missed / full_after, 0.0, 1.0))
 
+
 def _compute_pairwise_components(
     track: Track,
     det: Detection,
@@ -482,6 +476,7 @@ def _compute_pairwise_components(
         bool(app_ok),
     )
 
+
 def _initialize_debug_log(
     tracks: List[Track],
     detections: List[Detection],
@@ -506,13 +501,13 @@ def _compute_pairwise_matrices(
     detections: List[Detection],
     cfg: MatchConfig,
     log: DebugLog,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Compute raw pairwise matrices once.
 
     Returns
     -------
-    motion, pose, app, valid
+    motion, pose, app, update_cost, valid
     """
     n_t = len(tracks)
     n_d = len(detections)
@@ -520,6 +515,7 @@ def _compute_pairwise_matrices(
     motion = np.full((n_t, n_d), np.inf, dtype=np.float32)
     pose = np.full((n_t, n_d), np.inf, dtype=np.float32)
     app = np.full((n_t, n_d), np.inf, dtype=np.float32)
+    update_cost = np.full((n_t, n_d), np.inf, dtype=np.float32)
     valid = np.zeros((n_t, n_d), dtype=bool)
 
     track_pose = [
@@ -554,21 +550,30 @@ def _compute_pairwise_matrices(
 
             is_valid = bool(allowed and motion_ok and pose_ok and app_ok)
 
+            abs_update_cost = (
+                float(cfg.w_motion) * float(d_motion_norm)
+                + float(cfg.w_pose) * float(pose_cost)
+                + float(cfg.w_app) * float(app_cost)
+            )
+
             motion[i, j] = float(d_motion_norm)
             pose[i, j] = float(pose_cost)
             app[i, j] = float(app_cost)
+            update_cost[i, j] = float(abs_update_cost)
             valid[i, j] = is_valid
 
             cell.d_motion = float(d_motion_norm)
             cell.d_pose = float(pose_cost)
             cell.d_app = float(app_cost)
+            cell.update_cost = float(abs_update_cost)
+
             cell.allowed = bool(allowed)
             cell.d2 = float(d2)
             cell.motion_ok = bool(motion_ok)
             cell.pose_ok = bool(pose_ok)
             cell.app_ok = bool(app_ok)
 
-    return motion, pose, app, valid
+    return motion, pose, app, update_cost, valid
 
 
 # ============================================================================
@@ -681,7 +686,7 @@ def build_cost_matrix(
     artifacts:
         Full static data for the current frame.
     row_cost:
-        Row-relative cost matrix (useful for inspection / return value).
+        Row-relative cost matrix.
     """
     g = float(np.clip(g, 0.0, 1.0))
     log = _initialize_debug_log(
@@ -692,7 +697,7 @@ def build_cost_matrix(
         g=g,
     )
 
-    motion, pose, app, valid = _compute_pairwise_matrices(
+    motion, pose, app, update_cost, valid = _compute_pairwise_matrices(
         tracks=tracks,
         detections=detections,
         cfg=cfg,
@@ -708,6 +713,20 @@ def build_cost_matrix(
         log=log,
     )
 
+    # Store matrices for tracker update-quality decisions and debug.
+    # row_cost is relative; update_cost is absolute raw weighted cost.
+    log.meta["motion_matrix"] = motion
+    log.meta["pose_matrix"] = pose
+    log.meta["app_matrix"] = app
+    log.meta["update_cost_matrix"] = update_cost
+    log.meta["valid_matrix"] = valid
+    log.meta["row_cost_matrix"] = row_cost
+
+    log.meta["w_motion"] = float(cfg.w_motion)
+    log.meta["w_pose"] = float(cfg.w_pose)
+    log.meta["w_app"] = float(cfg.w_app)
+    log.meta["max_update_cost"] = float(cfg.max_update_cost)
+
     row_preferences = _build_row_preferences(
         row_cost=row_cost,
         valid=valid,
@@ -718,6 +737,7 @@ def build_cost_matrix(
         motion=motion,
         pose=pose,
         app=app,
+        update_cost=update_cost,
         valid=valid,
         row_cost=row_cost,
         row_preferences=row_preferences,
@@ -742,21 +762,6 @@ def _compute_column_conflict_costs(
 ) -> Dict[int, float]:
     """
     Resolve a conflict on one detection using column-relative comparison.
-
-    Parameters
-    ----------
-    det_idx:
-        Detection column under conflict.
-    candidate_tracks:
-        Tracks currently competing for this detection.
-    artifacts:
-        Static pairwise data.
-    cfg:
-        Matching config.
-
-    Returns
-    -------
-    dict(track_idx -> column_conflict_cost)
     """
     cand = np.asarray(list(candidate_tracks), dtype=int)
     if cand.size == 0:
@@ -803,13 +808,6 @@ def _choose_detection_owner(
 ) -> int:
     """
     Choose the owner of one detection among current candidate tracks.
-
-    Primary criterion:
-        column-relative conflict cost
-
-    Tie-break:
-        lower static row-relative cost
-        then smaller track index for determinism
     """
     conflict_costs = _compute_column_conflict_costs(
         det_idx=det_idx,
@@ -838,17 +836,8 @@ def deferred_match_with_column_resolution(
 ) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
     """
     Iterative one-to-one matching with:
-
       1. row-relative preference lists per track
       2. column-relative conflict resolution per detection
-
-    High-level logic
-    ----------------
-    - each track proposes to its best remaining detection by row preference
-    - if several tracks want the same detection, that detection chooses the
-      best owner by column-relative comparison among the current contenders
-    - rejected tracks move to their next-best detection
-    - process repeats until no free track can propose anymore
     """
     n_tracks, n_dets = artifacts.row_cost.shape
 
@@ -865,7 +854,6 @@ def deferred_match_with_column_resolution(
     while free_tracks:
         proposals: Dict[int, List[int]] = {}
 
-        # Each free track proposes to its next preferred detection.
         for track_idx in list(free_tracks):
             prefs = artifacts.row_preferences[track_idx]
 
@@ -876,13 +864,11 @@ def deferred_match_with_column_resolution(
             det_idx = prefs[next_choice_idx[track_idx]]
             proposals.setdefault(det_idx, []).append(track_idx)
 
-        # We rebuild free set from losers of this round.
         free_tracks = set()
 
         for det_idx, proposing_tracks in proposals.items():
             contenders = list(proposing_tracks)
 
-            # Incumbent owner also participates in the comparison.
             if det_idx in det_owner:
                 incumbent = det_owner[det_idx]
                 if incumbent not in contenders:

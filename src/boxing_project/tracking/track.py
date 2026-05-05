@@ -212,8 +212,11 @@ class Track:
             self.confirmed = True
 
         self.last_det_center = det.center
-        self.last_keypoints = None if det.keypoints is None else np.asarray(det.keypoints, dtype=float)
-        self.last_kp_conf = None if det.kp_conf is None else np.asarray(det.kp_conf, dtype=float)
+        # Pose memory is also protected from overlapping detections.
+        # Motion/Kalman is still updated, but pose is not overwritten by risky overlap keypoints.
+        if not current_overlap:
+            self.last_keypoints = None if det.keypoints is None else np.asarray(det.keypoints, dtype=float)
+            self.last_kp_conf = None if det.kp_conf is None else np.asarray(det.kp_conf, dtype=float)
 
         self._sync_freeze_counter()
 
