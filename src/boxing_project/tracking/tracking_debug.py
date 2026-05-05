@@ -187,6 +187,9 @@ class DebugLog:
         w_pose = self.meta.get("w_pose", None)
         w_app = self.meta.get("w_app", None)
         max_update_cost = self.meta.get("max_update_cost", None)
+        max_update_motion = self.meta.get("max_update_motion", None)
+        max_update_pose = self.meta.get("max_update_pose", None)
+        max_update_app = self.meta.get("max_update_app", None)
 
         if w_motion is not None and w_pose is not None and w_app is not None:
             self.section("[debug] Matching / update cost weights:")
@@ -204,7 +207,13 @@ class DebugLog:
             )
 
         if max_update_cost is not None:
-            self.line(f"[debug] max_update_cost = {float(max_update_cost):.6f}")
+            self.line(f"[debug] max_update_cost   = {float(max_update_cost):.6f}")
+        if max_update_motion is not None:
+            self.line(f"[debug] max_update_motion = {float(max_update_motion):.6f}")
+        if max_update_pose is not None:
+            self.line(f"[debug] max_update_pose   = {float(max_update_pose):.6f}")
+        if max_update_app is not None:
+            self.line(f"[debug] max_update_app    = {float(max_update_app):.6f}")
 
         self.section("[info] Meaning of indexes:")
         self.line("- Track#i = i-th element in the current tracks list (0-based list index)")

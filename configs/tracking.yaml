@@ -31,9 +31,13 @@ tracking:
                               # Lower -> stricter motion gate
     pose_scale_eps: 1.0e-6    # Small epsilon for pose-related normalization
     greedy_threshold: 4.1     # Max final cost accepted by greedy matcher
-    max_update_cost: 1.2      # Max absolute raw weighted cost allowed for Track update
+    max_update_cost: 1.2      # Max absolute weighted cost allowed for Track update.
 
-    motion_threshold: 0.09    # Max allowed normalized motion distance
+    max_update_motion: 0.08   # If d_motion is above this, skip Kalman/motion update.
+    max_update_pose: 0.30     # If d_pose is above this, skip pose memory update.
+    max_update_app: 0.12      # If d_app is above this, skip appearance EMA update.
+
+    motion_threshold: 0.08    # Max allowed normalized motion distance
                               # Above this -> reject pair
     pose_threshold: 0.4       # Max allowed pose distance
                               # Above this -> reject pair
@@ -57,9 +61,14 @@ tracking:
     k_app: 3.0                # Relative saturation ratio for appearance
                               # 3x worse than best -> near max penalty
 
+    miss_relax_full_after: 20   # Number of consecutive missed frames needed to reach full relaxation.
+                                # Relaxation grows gradually: missed / full_after.
+                                # Larger value = slower relaxation after track is lost.
 
-    miss_relax_full_after: 20
-    miss_relax_strength: 2.0
+    miss_relax_strength: 0.3    # Maximum threshold expansion at full relaxation.
+                                # Effective threshold = base_threshold * (1 + strength * relax).
+                                # 0.3 means max +30% looser matching, not 3x or 1.5x.
+
 
     min_core_kps: 7           # Minimum valid core keypoints for reliable pose matching
 
@@ -84,9 +93,9 @@ tracking:
       - 5   # Left Shoulder
 
   tracker:
-    max_age: 20                # Max missed frames for unconfirmed track
+    max_age: 15                # Max missed frames for unconfirmed track
     max_confirmed_age: 75     # Max missed frames for confirmed track
-    min_hits: 20              # Matches needed to confirm a track
+    min_hits: 15             # Matches needed to confirm a track
     min_kp_conf: 0.009         # Minimum keypoint confidence for track update
     reset_g_threshold: 0.32   # If g < threshold -> activate reset mode
 

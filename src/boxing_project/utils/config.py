@@ -34,6 +34,9 @@ def make_match_config(cfg: dict) -> MatchConfig:
     motion_threshold = float(_get(cfg, "tracking.matching.motion_threshold", 1.0))
     pose_threshold = float(_get(cfg, "tracking.matching.pose_threshold", 1.0))
     appearance_threshold = float(_get(cfg, "tracking.matching.appearance_threshold", 1.0))
+    max_update_motion = float(_get(cfg, "tracking.matching.max_update_motion", motion_threshold))
+    max_update_pose = float(_get(cfg, "tracking.matching.max_update_pose", pose_threshold))
+    max_update_app = float(_get(cfg, "tracking.matching.max_update_app", appearance_threshold))
     emb_ema_alpha = float(_get(cfg, "tracking.matching.emb_ema_alpha", 0.9))
     keypoint_weights = _get(cfg, "tracking.matching.keypoint_weights", None)
     w_motion = _get(cfg, "tracking.matching.w_motion", 3)
@@ -69,6 +72,9 @@ def make_match_config(cfg: dict) -> MatchConfig:
         motion_threshold=motion_threshold,
         pose_threshold=pose_threshold,
         appearance_threshold=appearance_threshold,
+        max_update_motion=max_update_motion,
+        max_update_pose=max_update_pose,
+        max_update_app=max_update_app,
 
         emb_ema_alpha=emb_ema_alpha,
         w_motion=w_motion,

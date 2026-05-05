@@ -292,6 +292,8 @@ class MultiObjectTracker:
         trk.update(
             det,
             ema_alpha=self.cfg.match.emb_ema_alpha,
+            update_motion=True,
+            update_pose=True,
             update_app=self._has_base_keypoints(det),
             overlap_skip_threshold=self.cfg.overlap_skip_threshold,
         )
@@ -550,6 +552,9 @@ class MultiObjectTracker:
         skipped_updates: List[Dict[str, Any]] = []
 
         max_update_cost = float(getattr(self.cfg.match, "max_update_cost", 1.2))
+        max_update_motion = float(getattr(self.cfg.match, "max_update_motion", getattr(self.cfg.match, "motion_threshold", 1.0)))
+        max_update_pose = float(getattr(self.cfg.match, "max_update_pose", getattr(self.cfg.match, "pose_threshold", 1.0)))
+        max_update_app = float(getattr(self.cfg.match, "max_update_app", getattr(self.cfg.match, "appearance_threshold", 1.0)))
 
         # C is row-relative matcher cost.
         # For update quality we use absolute raw weighted update_cost from matcher.py.
@@ -594,18 +599,46 @@ class MultiObjectTracker:
             det.meta["match_d_motion"] = d_motion
             det.meta["match_d_pose"] = d_pose
             det.meta["match_d_app"] = d_app
-            det.meta["match_update_threshold"] = max_update_cost
+            det.meta["max_update_cost"] = max_update_cost
+            det.meta["max_update_motion"] = max_update_motion
+            det.meta["max_update_pose"] = max_update_pose
+            det.meta["max_update_app"] = max_update_app
             det.meta["matched_track_id_before_update"] = int(trk.track_id)
+
+            allow_motion_update = (
+                update_cost <= max_update_cost
+                and d_motion <= max_update_motion
+            )
+            allow_pose_update = (
+                allow_motion_update
+                and d_pose <= max_update_pose
+            )
+            allow_app_update = (
+                allow_motion_update
+                and d_app <= max_update_app
+            )
+
+            det.meta["allow_motion_update"] = bool(allow_motion_update)
+            det.meta["allow_pose_update"] = bool(allow_pose_update)
+            det.meta["allow_app_update_by_threshold"] = bool(allow_app_update)
+
+            skip_reasons = []
+            if update_cost > max_update_cost:
+                skip_reasons.append("high_update_cost")
+            if d_motion > max_update_motion:
+                skip_reasons.append("high_update_motion")
+            if d_pose > max_update_pose:
+                skip_reasons.append("high_update_pose")
+            if d_app > max_update_app:
+                skip_reasons.append("high_update_app")
+
+            det.meta["track_update_skip_reason"] = ",".join(skip_reasons) if skip_reasons else None
+            det.meta["track_update_skipped"] = not bool(allow_motion_update)
 
             # Match still exists for visualization / outputs.
             id_pairs.append((trk.track_id, j_det))
 
-            if update_cost > max_update_cost:
-                det.meta["track_update_skipped"] = True
-                det.meta["track_update_skip_reason"] = "high_match_update_cost"
-                det.meta["track_update_skip_cost"] = update_cost
-                det.meta["track_update_skip_threshold"] = max_update_cost
-
+            if skip_reasons:
                 skipped_updates.append(
                     {
                         "track_id": int(trk.track_id),
@@ -615,19 +648,23 @@ class MultiObjectTracker:
                         "d_motion": float(d_motion),
                         "d_pose": float(d_pose),
                         "d_app": float(d_app),
-                        "threshold": float(max_update_cost),
-                        "reason": "high_match_update_cost",
+                        "max_update_cost": float(max_update_cost),
+                        "max_update_motion": float(max_update_motion),
+                        "max_update_pose": float(max_update_pose),
+                        "max_update_app": float(max_update_app),
+                        "allow_motion_update": bool(allow_motion_update),
+                        "allow_pose_update": bool(allow_pose_update),
+                        "allow_app_update": bool(allow_app_update),
+                        "reason": "|".join(skip_reasons),
                     }
                 )
-
-                # No Kalman update, no pose update, no appearance update,
-                # no hits increment, no time_since_update reset.
-                continue
 
             trk.update(
                 det,
                 ema_alpha=self.cfg.match.emb_ema_alpha,
-                update_app=True,
+                update_motion=allow_motion_update,
+                update_pose=allow_pose_update,
+                update_app=allow_app_update,
                 overlap_skip_threshold=self.cfg.overlap_skip_threshold,
             )
         # 7) Spawn new tracks for unmatched detections.
