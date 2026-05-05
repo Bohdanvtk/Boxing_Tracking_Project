@@ -11,7 +11,9 @@ import numpy as np
 from boxing_project.kalman_filter.kalman import KalmanTracker
 from .track import Track, Detection
 from .matcher import MatchConfig, match_tracks_and_detections
-from . import DEFAULT_TRACKING_CONFIG_PATH
+from .birth_manager import BirthConfig, BirthManager
+from .tracking_debug import append_birth_debug
+from . import DEFAULT_TRACKING_CONFIG_PATH, DEFAULT_BIRTH_CONFIG_PATH
 
 
 @dataclass
@@ -268,9 +270,28 @@ class MultiObjectTracker:
         # Previous frame matches: track_id -> det_idx.
         # Used to detect which previously matched tracks disappeared now.
         self.prev_matches: Dict[int, int] = {}
+        self._frame_idx: int = 0
 
         raw = self.get_config_dict() or {}
         self.debug: bool = bool(raw.get("tracking", {}).get("debug", False))
+        from boxing_project.utils.config import load_birth_config
+        birth_cfg = load_birth_config(str(DEFAULT_BIRTH_CONFIG_PATH))
+        if birth_cfg.chi2_gating <= 0:
+            birth_cfg.chi2_gating = float(self.cfg.match.chi2_gating)
+        if birth_cfg.emb_ema_alpha <= 0:
+            birth_cfg.emb_ema_alpha = float(self.cfg.match.emb_ema_alpha)
+        if birth_cfg.min_kp_conf <= 0:
+            birth_cfg.min_kp_conf = float(self.cfg.match.min_kp_conf)
+        if birth_cfg.min_core_kps <= 0:
+            birth_cfg.min_core_kps = int(self.cfg.match.min_core_kps)
+        self.birth_manager = BirthManager(
+            cfg=birth_cfg,
+            dt=float(self.cfg.dt),
+            process_var=float(self.cfg.process_var),
+            measure_var=float(self.cfg.measure_var),
+            p0=float(self.cfg.p0),
+            pose_core=list(self.cfg.match.pose_core),
+        )
 
     def get_config_dict(self) -> Optional[Dict[str, Any]]:
         if self._raw_config is None:
@@ -498,6 +519,7 @@ class MultiObjectTracker:
             track.decrease_freeze(exclude_sources=exclude_sources)
 
     def update(self, detections: List[Detection], reset_mode: bool, g: float = 1.0) -> Dict[str, Any]:
+        self._frame_idx += 1
         # Hard reset only on reset edge (False -> True).
         # This avoids clearing tracks on every frame while reset_mode stays True.
         if reset_mode and not self._was_reset_mode:
@@ -667,26 +689,37 @@ class MultiObjectTracker:
                 update_app=allow_app_update,
                 overlap_skip_threshold=self.cfg.overlap_skip_threshold,
             )
-        # 7) Spawn new tracks for unmatched detections.
+        # 7) Birth manager: unmatched detections become pending candidates first.
+        birth_result = self.birth_manager.update(
+            unmatched_det_indices=um_det_idx,
+            detections=detections,
+            existing_tracks=self.tracks,
+            frame_idx=self._frame_idx,
+            g=g,
+        )
+        log.meta["birth_debug"] = birth_result.debug_info
+        append_birth_debug(birth_result.debug_info)
+
+        # 8) Spawn new tracks only for confirmed births.
         new_matches: Dict[int, int] = {}
-        for j in um_det_idx:
+        for j in birth_result.confirmed_birth_det_indices:
             trk = self._new_track(detections[j])
             self.tracks.append(trk)
             new_matches[int(trk.track_id)] = int(j)
 
-        # 8) Build all current matches, including newly spawned tracks.
+        # 9) Build all current matches, including newly spawned tracks.
         all_current_matches: Dict[int, int] = {
             **current_matches,
             **new_matches,
         }
 
-        # 9) Convert current detection overlap groups to track_id overlap groups.
+        # 10) Convert current detection overlap groups to track_id overlap groups.
         track_groups = self.dets_to_track(
             matches=all_current_matches,
             detections=detections,
         )
 
-        # 10) Store overlap_group_ids inside each Track for the next frame.
+        # 11) Store overlap_group_ids inside each Track for the next frame.
         tracks_by_id = {
             int(track.track_id): track
             for track in self.tracks
@@ -706,17 +739,17 @@ class MultiObjectTracker:
             if int(track.track_id) not in track_groups:
                 track.overlap_group_ids = set()
 
-        # 11) Decrease active freeze counters.
+        # 12) Decrease active freeze counters.
         # Newly created freezes are excluded on this same frame.
         self.decrease_freeze(
             tracks=self.tracks,
             exclude_sources=freshly_frozen_sources,
         )
 
-        # 12) Save matches for the next frame.
+        # 13) Save matches for the next frame.
         self.prev_matches = all_current_matches
 
-        # 13) Remove dead
+        # 14) Remove dead
         self._remove_dead()
 
         unmatched_track_ids = sorted(int(x) for x in absent_ids)
@@ -775,6 +808,7 @@ class MultiObjectTracker:
         self._epoch_id += 1
         self._epoch_tracks[self._epoch_id] = {}
         self.prev_matches.clear()
+        self.birth_manager.pending.clear()
 
     def get_epoch_tracks(self) -> Dict[int, Dict[int, Track]]:
         return {epoch_id: dict(tracks_by_id) for epoch_id, tracks_by_id in self._epoch_tracks.items()}

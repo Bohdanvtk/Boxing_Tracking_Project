@@ -1,5 +1,6 @@
 import yaml, random, numpy as np
 import tensorflow as tf
+from pathlib import Path
 
 def load_cfg(path: str) -> dict:
     with open(path, "r") as f:
@@ -21,6 +22,7 @@ def _get(d: dict, path: str, default=None):
 
 from boxing_project.tracking.matcher import MatchConfig
 from boxing_project.tracking.tracker import TrackerConfig
+from boxing_project.tracking.birth_manager import BirthConfig
 
 
 
@@ -140,4 +142,27 @@ def load_tracking_config(path: str):
     tracker_cfg = make_tracker_config(cfg, match_cfg)
     return tracker_cfg, match_cfg, cfg
 
+
+def load_birth_config(path: str) -> BirthConfig:
+    cfg = load_cfg(path) if Path(path).exists() else {}
+    b = _get(cfg, "birth_manager", {}) or {}
+    return BirthConfig(
+        chi2_gating=float(b.get("chi2_gating", 9.4877)),
+        max_pending_age=int(b.get("max_pending_age", 4)),
+        max_pending_misses=int(b.get("max_pending_misses", 2)),
+        very_close_threshold=float(b.get("very_close_threshold", 0.04)),
+        near_threshold=float(b.get("near_threshold", 0.15)),
+        pending_motion_threshold=float(b.get("pending_motion_threshold", 0.20)),
+        normal_confirm_hits=int(b.get("normal_confirm_hits", 2)),
+        near_confirm_hits=int(b.get("near_confirm_hits", 4)),
+        emb_ema_alpha=float(b.get("emb_ema_alpha", 0.9)),
+        min_kp_conf=float(b.get("min_kp_conf", 0.05)),
+        min_core_kps=int(b.get("min_core_kps", 3)),
+        pose_missing_penalty=float(b.get("pose_missing_penalty", 0.05)),
+        pose_bad_penalty=float(b.get("pose_bad_penalty", 0.18)),
+        app_missing_penalty=float(b.get("app_missing_penalty", 0.03)),
+        app_bad_penalty=float(b.get("app_bad_penalty", 0.12)),
+        app_bad_threshold=float(b.get("app_bad_threshold", 0.35)),
+        near_existing_penalty=float(b.get("near_existing_penalty", 0.03)),
+    )
 

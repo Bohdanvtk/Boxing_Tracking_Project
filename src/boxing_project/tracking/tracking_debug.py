@@ -340,6 +340,32 @@ class DebugLog:
             ]
             self.line(f"Track#{i:02d} " + " ".join(row_vals))
 
+        birth_debug = self.meta.get("birth_debug", None)
+        if isinstance(birth_debug, dict):
+            self.section("=" * 80)
+            self.line("BIRTH DEBUG")
+            self.line("=" * 80)
+            for item in birth_debug.get("detections", []):
+                det_idx = item.get("det_idx", "N/A")
+                self.line(f"Det#{det_idx}:")
+                for key in (
+                    "action", "reason", "nearest_existing_track_id", "nearest_existing_d_motion",
+                    "closeness_status", "pending_id", "required_confirm_hits", "hits",
+                    "misses", "age", "birth_score", "d_motion", "pose_status",
+                    "pose_penalty", "app_status", "app_penalty", "will_create_new_track",
+                ):
+                    if key in item:
+                        self.line(f"  {key} = {item.get(key)}")
+            for conf in birth_debug.get("confirmed", []):
+                self.line("")
+                self.line("CONFIRMED BIRTH:")
+                for key in (
+                    "pending_id", "source_det_idx", "reason", "hits", "age",
+                    "required_confirm_hits", "will_create_new_track",
+                ):
+                    if key in conf:
+                        self.line(f"  {key} = {conf.get(key)}")
+
         frame_header(FRAME_IDX)
         FRAME_IDX += 1
         GENERAL_LOG.extend(self.buffer)
@@ -363,3 +389,31 @@ def print_tracking_results(log: dict, iteration: int, show_pose_tables: bool = F
         tid = t.get("track_id", "N/A") if isinstance(t, dict) else getattr(t, "track_id", "N/A")
         pos = t.get("pos", None) if isinstance(t, dict) else getattr(t, "pos", None)
         print(f"  - Track {tid} pos={pos}")
+
+
+def append_birth_debug(birth_debug: Dict[str, Any]) -> None:
+    if not isinstance(birth_debug, dict):
+        return
+    GENERAL_LOG.append("=" * 80)
+    GENERAL_LOG.append("BIRTH DEBUG")
+    GENERAL_LOG.append("=" * 80)
+    for item in birth_debug.get("detections", []):
+        det_idx = item.get("det_idx", "N/A")
+        GENERAL_LOG.append(f"Det#{det_idx}:")
+        for key in (
+            "action", "reason", "nearest_existing_track_id", "nearest_existing_d_motion",
+            "closeness_status", "pending_id", "required_confirm_hits", "hits",
+            "misses", "age", "birth_score", "d_motion", "pose_status",
+            "pose_penalty", "app_status", "app_penalty", "will_create_new_track",
+        ):
+            if key in item:
+                GENERAL_LOG.append(f"  {key} = {item.get(key)}")
+    for conf in birth_debug.get("confirmed", []):
+        GENERAL_LOG.append("")
+        GENERAL_LOG.append("CONFIRMED BIRTH:")
+        for key in (
+            "pending_id", "source_det_idx", "reason", "hits", "age",
+            "required_confirm_hits", "will_create_new_track",
+        ):
+            if key in conf:
+                GENERAL_LOG.append(f"  {key} = {conf.get(key)}")

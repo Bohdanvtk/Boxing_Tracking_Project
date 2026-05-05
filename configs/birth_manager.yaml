@@ -1,0 +1,59 @@
+# BirthManager controls when unmatched detections are allowed to become real tracks.
+# The unmatched detection flow is:
+# unmatched det -> pending candidate -> (stable across frames) -> confirmed birth -> new Track ID
+birth_manager:
+  # Chi-square gating value used to normalize Kalman gating distance:
+  # d_motion = d2 / chi2_gating
+  chi2_gating: 9.4877
+
+  # Maximum total lifetime (in frames) of a pending candidate before it is dropped.
+  max_pending_age: 4
+
+  # Maximum number of consecutive misses allowed for a pending candidate.
+  max_pending_misses: 2
+
+  # If nearest existing-track normalized motion distance <= very_close_threshold,
+  # the unmatched detection is considered too close to an existing track and is blocked.
+  very_close_threshold: 0.04
+
+  # If very_close_threshold < nearest existing-track distance <= near_threshold,
+  # candidate is allowed but requires stricter confirmation.
+  near_threshold: 0.15
+
+  # Motion gate for matching current unmatched detections to existing pending candidates.
+  # Pairs above this normalized distance are invalid.
+  pending_motion_threshold: 0.20
+
+  # Required matched hits for a normal/far pending candidate to confirm birth.
+  normal_confirm_hits: 2
+
+  # Required matched hits for near-existing pending candidate to confirm birth.
+  near_confirm_hits: 4
+
+  # EMA alpha used to update pending candidate appearance embedding when e_app exists.
+  emb_ema_alpha: 0.90
+
+  # Minimum keypoint confidence to treat keypoints as valid for pose comparability checks.
+  min_kp_conf: 0.05
+
+  # Minimum number of shared valid core keypoints required to run pose penalty check.
+  min_core_kps: 3
+
+  # Penalty added to birth score when pose cannot be reliably compared.
+  pose_missing_penalty: 0.05
+
+  # Penalty added to birth score when pose is comparable but considered inconsistent.
+  pose_bad_penalty: 0.18
+
+  # Penalty added when appearance embedding is missing in either candidate or detection.
+  app_missing_penalty: 0.03
+
+  # Penalty added when appearance is present but similarity is too low.
+  app_bad_penalty: 0.12
+
+  # Threshold for normalized appearance distance d_app=(1-cos_sim)/2.
+  # d_app <= app_bad_threshold means appearance is treated as acceptable.
+  app_bad_threshold: 0.35
+
+  # Extra penalty for near-existing candidates to reduce accidental duplicate births.
+  near_existing_penalty: 0.03
