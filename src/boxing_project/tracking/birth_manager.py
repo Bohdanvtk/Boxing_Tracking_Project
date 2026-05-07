@@ -74,19 +74,37 @@ class BirthManager:
         self._next_pending_id += 1
         return pid
 
-    def _motion_dist(self, kf: KalmanTracker, center: Tuple[float, float]) -> float:
+    def _motion_detail(self, kf: KalmanTracker, center: Tuple[float, float]) -> Tuple[float, float]:
         d2 = float(kf.gating_distance(np.asarray(center, dtype=float)))
-        return d2 / float(max(self.cfg.chi2_gating, 1e-6))
+        return d2, d2 / float(max(self.cfg.chi2_gating, 1e-6))
 
-    def _nearest_existing(self, det: Detection, tracks: Sequence[Track]) -> Tuple[Optional[int], float]:
-        best_id = None
-        best = float("inf")
-        for t in tracks:
-            d = self._motion_dist(t.kf, det.center)
-            if d < best:
-                best = d
-                best_id = int(t.track_id)
-        return best_id, (best if np.isfinite(best) else float("inf"))
+    def _motion_dist(self, kf: KalmanTracker, center: Tuple[float, float]) -> float:
+        return self._motion_detail(kf, center)[1]
+
+    def _nearest_existing(self, det: Detection, tracks: Sequence[Track]) -> Dict[str, Any]:
+        best = {
+            "nearest_existing_track_idx": None,
+            "nearest_existing_track_id": None,
+            "nearest_existing_d2": None,
+            "nearest_existing_d_motion": float("inf"),
+        }
+        for idx, t in enumerate(tracks):
+            d2, d_motion = self._motion_detail(t.kf, det.center)
+            if d_motion < float(best["nearest_existing_d_motion"]):
+                best = {
+                    "nearest_existing_track_idx": int(idx),
+                    "nearest_existing_track_id": int(t.track_id),
+                    "nearest_existing_d2": d2,
+                    "nearest_existing_d_motion": d_motion,
+                }
+        return best
+
+    def _closeness_status(self, d_motion: float) -> str:
+        if d_motion <= self.cfg.very_close_threshold:
+            return "very_close"
+        if d_motion <= self.cfg.near_threshold:
+            return "near"
+        return "far"
 
     def _pose_penalty(self, cand: PendingCandidate, det: Detection) -> Tuple[str, float]:
         common = get_common_valid_joints(
@@ -119,7 +137,19 @@ class BirthManager:
         return "bad", float(self.cfg.app_bad_penalty)
 
     def update(self, unmatched_det_indices: Sequence[int], detections: Sequence[Detection], existing_tracks: Sequence[Track], frame_idx: int, g: float = 1.0) -> BirthResult:
-        debug: Dict[str, Any] = {"frame_idx": int(frame_idx), "detections": [], "confirmed": [], "candidates": []}
+        debug: Dict[str, Any] = {
+            "frame_idx": int(frame_idx),
+            "summary": {
+                "incoming_unmatched_count": int(len(unmatched_det_indices)),
+                "existing_tracks_count": int(len(existing_tracks)),
+                "pending_count_before": int(len(self.pending)),
+            },
+            "detections": [],
+            "confirmed": [],
+            "candidate_events": [],
+            "pending_comparisons": [],
+            "candidates": [],
+        }
 
         for c in self.pending.values():
             c.kf.predict()
@@ -128,14 +158,24 @@ class BirthManager:
         for pid, c in self.pending.items():
             for j in unmatched_det_indices:
                 det = detections[int(j)]
-                d_motion = self._motion_dist(c.kf, det.center)
-                if d_motion > self.cfg.pending_motion_threshold:
+                d2, d_motion = self._motion_detail(c.kf, det.center)
+                motion_passed = d_motion <= self.cfg.pending_motion_threshold
+                comp = {
+                    "pending_id": pid, "det_idx": int(j), "d2": d2, "d_motion": d_motion,
+                    "motion_threshold": float(self.cfg.pending_motion_threshold),
+                    "motion_passed": bool(motion_passed), "matched_to_pending": False,
+                    "pose_status": "not_checked", "app_status": "not_checked",
+                }
+                if not motion_passed:
+                    debug["pending_comparisons"].append(comp)
                     continue
                 pose_status, pose_penalty = self._pose_penalty(c, det)
                 app_status, app_penalty = self._app_penalty(c, det)
                 near_pen = self.cfg.near_existing_penalty if c.status == "near_existing" else 0.0
                 score = float(d_motion + pose_penalty + app_penalty + near_pen)
-                pair_rows.append((score, pid, int(j), d_motion, pose_status, pose_penalty, app_status, app_penalty))
+                comp.update({"pose_status": pose_status, "app_status": app_status, "birth_score": score})
+                debug["pending_comparisons"].append(comp)
+                pair_rows.append((score, pid, int(j), d2, d_motion, pose_status, pose_penalty, app_status, app_penalty))
 
         pair_rows.sort(key=lambda x: x[0])
         taken_p, taken_d, matched = set(), set(), {}
@@ -144,10 +184,13 @@ class BirthManager:
             if pid in taken_p or j in taken_d:
                 continue
             taken_p.add(pid); taken_d.add(j); matched[pid] = row
+            for comp in debug["pending_comparisons"]:
+                if comp.get("pending_id") == pid and int(comp.get("det_idx", -1)) == int(j):
+                    comp["matched_to_pending"] = True
 
         for pid, c in list(self.pending.items()):
             if pid in matched:
-                _, _, j, d_motion, pose_status, pose_penalty, app_status, app_penalty = matched[pid]
+                _, _, j, d2, d_motion, pose_status, pose_penalty, app_status, app_penalty = matched[pid]
                 det = detections[j]
                 c.kf.update(np.asarray(det.center, dtype=float))
                 c.last_detection = det
@@ -160,21 +203,75 @@ class BirthManager:
                     e = np.asarray(emb, dtype=np.float32)
                     c.app_emb_ema = e if c.app_emb_ema is None else (self.cfg.emb_ema_alpha * c.app_emb_ema + (1.0 - self.cfg.emb_ema_alpha) * e)
                 c.hits += 1; c.misses = 0; c.age += 1; c.last_seen_frame = int(frame_idx)
-                debug["detections"].append({"det_idx": int(j), "action": "pending_matched", "pending_id": pid, "hits": c.hits, "misses": c.misses, "age": c.age, "d_motion": d_motion, "pose_status": pose_status, "pose_penalty": pose_penalty, "app_status": app_status, "app_penalty": app_penalty, "birth_score": matched[pid][0]})
+                debug["candidate_events"].append({
+                    "pending_id": pid,
+                    "event": "matched_detection",
+                    "det_idx": int(j),
+                    "status": c.status,
+                    "hits": c.hits,
+                    "misses": c.misses,
+                    "age": c.age,
+                    "required_confirm_hits": c.required_confirm_hits,
+                })
+                nearest = self._nearest_existing(det, existing_tracks)
+                debug["detections"].append({
+                    "det_idx": int(j), "det_center": tuple(map(float, det.center)),
+                    "action": "pending_matched", "reason": "matched_existing_pending_candidate",
+                    **nearest, "closeness_status": self._closeness_status(float(nearest["nearest_existing_d_motion"])),
+                    "very_close_threshold": float(self.cfg.very_close_threshold), "near_threshold": float(self.cfg.near_threshold),
+                    "pending_id": pid, "hits": c.hits, "misses": c.misses, "age": c.age,
+                    "pending_comparison": {
+                        "pending_id": pid, "det_idx": int(j), "d2": d2, "d_motion": d_motion,
+                        "motion_threshold": float(self.cfg.pending_motion_threshold), "motion_passed": True,
+                        "pose_status": pose_status, "app_status": app_status,
+                        "birth_score": matched[pid][0], "matched_to_pending": True,
+                    },
+                    "d_motion": d_motion, "pose_status": pose_status, "pose_penalty": pose_penalty,
+                    "app_status": app_status, "app_penalty": app_penalty, "birth_score": matched[pid][0],
+                })
             else:
                 c.misses += 1; c.age += 1
+                debug["candidate_events"].append({
+                    "pending_id": pid,
+                    "event": "missed_this_frame",
+                    "status": c.status,
+                    "hits": c.hits,
+                    "misses": c.misses,
+                    "age": c.age,
+                    "required_confirm_hits": c.required_confirm_hits,
+                })
 
             if c.status == "blocked":
-                nearest_id, nearest_d = self._nearest_existing(c.last_detection, existing_tracks)
+                nearest = self._nearest_existing(c.last_detection, existing_tracks)
+                nearest_id = nearest["nearest_existing_track_id"]
+                nearest_d = float(nearest["nearest_existing_d_motion"])
                 c.nearest_existing_track_id = nearest_id
                 c.nearest_existing_d_motion = nearest_d
                 if nearest_d > self.cfg.very_close_threshold:
+                    old_status = c.status
                     c.status = "near_existing" if nearest_d <= self.cfg.near_threshold else "normal"
+                    if c.status != old_status:
+                        debug["candidate_events"].append({
+                            "pending_id": pid,
+                            "event": "status_changed",
+                            "from_status": old_status,
+                            "to_status": c.status,
+                            "nearest_existing_track_id": nearest_id,
+                            "nearest_existing_d_motion": nearest_d,
+                        })
 
             if c.hits >= c.required_confirm_hits and c.status != "blocked" and c.age <= self.cfg.max_pending_age:
                 debug["confirmed"].append({"pending_id": pid, "source_det_idx": int(c.last_det_idx), "reason": "stable_pending_candidate", "hits": c.hits, "age": c.age, "required_confirm_hits": c.required_confirm_hits, "will_create_new_track": True})
 
             if c.age > self.cfg.max_pending_age or c.misses > self.cfg.max_pending_misses:
+                debug["candidate_events"].append({
+                    "pending_id": pid,
+                    "event": "removed",
+                    "reason": "expired_pending_candidate",
+                    "hits": c.hits,
+                    "misses": c.misses,
+                    "age": c.age,
+                })
                 self.pending.pop(pid, None)
 
         confirmed = []
@@ -188,7 +285,9 @@ class BirthManager:
             if int(j) in taken_d:
                 continue
             det = detections[int(j)]
-            nearest_id, nearest_d = self._nearest_existing(det, existing_tracks)
+            nearest = self._nearest_existing(det, existing_tracks)
+            nearest_id = nearest["nearest_existing_track_id"]
+            nearest_d = float(nearest["nearest_existing_d_motion"])
             if nearest_d <= self.cfg.very_close_threshold:
                 status = "blocked"; action = "blocked_pending"; reason = "very_close_to_existing_track"; req = 999
             elif nearest_d <= self.cfg.near_threshold:
@@ -201,7 +300,34 @@ class BirthManager:
             emb = det.meta.get("e_app") if isinstance(det.meta, dict) else None
             cand = PendingCandidate(pid, kf, det, int(j), det.center, None if det.keypoints is None else np.asarray(det.keypoints, dtype=float), None if det.kp_conf is None else np.asarray(det.kp_conf, dtype=float), None if emb is None else np.asarray(emb, dtype=np.float32), hits=1, misses=0, age=1, first_seen_frame=int(frame_idx), last_seen_frame=int(frame_idx), status=status, nearest_existing_track_id=nearest_id, nearest_existing_d_motion=nearest_d, required_confirm_hits=int(req))
             self.pending[pid] = cand
-            debug["detections"].append({"det_idx": int(j), "action": action, "reason": reason, "nearest_existing_track_id": nearest_id, "nearest_existing_d_motion": nearest_d, "closeness_status": "very_close" if nearest_d <= self.cfg.very_close_threshold else ("near" if nearest_d <= self.cfg.near_threshold else "far"), "pending_id": pid, "required_confirm_hits": int(req), "hits": 1, "misses": 0, "age": 1, "will_create_new_track": False})
+            debug["candidate_events"].append({
+                "pending_id": pid,
+                "event": "created",
+                "det_idx": int(j),
+                "status": status,
+                "required_confirm_hits": int(req),
+                "nearest_existing_track_id": nearest_id,
+                "nearest_existing_d_motion": nearest_d,
+            })
+            debug["detections"].append({
+                "det_idx": int(j), "det_center": tuple(map(float, det.center)),
+                "action": action, "reason": reason, **nearest,
+                "closeness_status": self._closeness_status(nearest_d),
+                "very_close_threshold": float(self.cfg.very_close_threshold),
+                "near_threshold": float(self.cfg.near_threshold),
+                "pending_id": pid, "required_confirm_hits": int(req),
+                "hits": 1, "misses": 0, "age": 1, "will_create_new_track": False,
+            })
 
-        debug["candidates"] = [{"pending_id": c.pending_id, "status": c.status, "hits": c.hits, "misses": c.misses, "age": c.age, "required_confirm_hits": c.required_confirm_hits, "nearest_existing_track_id": c.nearest_existing_track_id, "nearest_existing_d_motion": c.nearest_existing_d_motion} for c in self.pending.values()]
+        debug["candidates"] = [{
+            "pending_id": c.pending_id, "status": c.status, "hits": c.hits,
+            "misses": c.misses, "age": c.age,
+            "required_confirm_hits": c.required_confirm_hits,
+            "last_det_idx": int(c.last_det_idx),
+            "last_center": tuple(map(float, c.last_center)),
+            "nearest_existing_track_id": c.nearest_existing_track_id,
+            "nearest_existing_d_motion": c.nearest_existing_d_motion,
+        } for c in self.pending.values()]
+        debug["summary"]["confirmed_count"] = int(len(confirmed))
+        debug["summary"]["pending_count_after"] = int(len(self.pending))
         return BirthResult(confirmed_birth_det_indices=sorted(set(confirmed)), debug_info=debug)

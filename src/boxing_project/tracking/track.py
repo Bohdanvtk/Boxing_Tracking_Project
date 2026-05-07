@@ -193,112 +193,45 @@ class Track:
             update_app: bool = True,
             overlap_skip_threshold: float = 0.40,
     ):
-        # Matched detection update.
-        #
-        # update_motion:
-        #   controls Kalman / hits / time_since_update / last_det_center.
-        #
-        # update_pose:
-        #   controls last_keypoints / last_kp_conf.
-        #
-        # update_app:
-        #   controls app_emb_ema / appearance feature histories.
-        #
-        # Conservative rule:
-        #   if motion is not trusted, do not update pose or appearance either.
-
+        # Component gates and overlap can skip contaminated updates.
         max_overlap_iou = float(det.meta.get("max_overlap_iou", 0.0))
         current_overlap = max_overlap_iou > float(overlap_skip_threshold)
 
-        update_motion = bool(update_motion)
-
-        # Critical safety rule:
-        # if Kalman/motion update is not allowed, this detection is not trusted enough
-        # to update pose or identity memory.
-        if not update_motion:
+        if current_overlap:
+            update_motion = False
+            update_pose = False
+            update_app = False
+        elif not bool(update_motion):
             update_pose = False
             update_app = False
 
-        update_pose = bool(update_pose)
-        update_app = bool(update_app)
+        disabled_reasons = list(det.meta.get("track_update_disabled_reasons", []) or [])
+        if current_overlap and "overlap_update_disabled" not in disabled_reasons:
+            disabled_reasons.append("overlap_update_disabled")
 
-        # Preserve reasons already written by tracker.py.
-        existing_reason = det.meta.get("track_update_skip_reason", None)
-        reasons = []
-
-        if isinstance(existing_reason, str) and existing_reason.strip():
-            reasons.extend(
-                r.strip()
-                for r in existing_reason.split(",")
-                if r.strip()
-            )
-
-        if not update_motion:
-            reasons.append("motion_update_disabled")
-
-        if not update_pose:
-            reasons.append("pose_update_disabled")
-
-        if not update_app:
-            reasons.append("app_update_disabled")
-
-        # Remove duplicate reasons while preserving order.
-        deduped_reasons = []
-        seen = set()
-        for reason in reasons:
-            if reason not in seen:
-                deduped_reasons.append(reason)
-                seen.add(reason)
-
-        det.meta["track_update_skipped"] = bool(deduped_reasons)
-        det.meta["track_update_fully_skipped"] = bool(
-            not update_motion and not update_pose and not update_app
-        )
-        det.meta["track_update_partially_skipped"] = bool(
-            deduped_reasons and not det.meta["track_update_fully_skipped"]
-        )
-        det.meta["track_update_skip_reason"] = (
-            ",".join(deduped_reasons) if deduped_reasons else None
-        )
-
+        det.meta["track_update_motion_allowed"] = bool(update_motion)
+        det.meta["track_update_pose_allowed"] = bool(update_pose)
+        det.meta["track_update_app_requested"] = bool(update_app)
+        det.meta["track_update_disabled_reasons"] = disabled_reasons
+        det.meta["track_update_skip_reason"] = ",".join(disabled_reasons) if disabled_reasons else None
+        det.meta["track_update_skipped"] = not (bool(update_motion) and bool(update_pose) and bool(update_app))
+        det.meta["track_update_fully_skipped"] = not bool(update_motion)
+        det.meta["track_update_partially_skipped"] = bool(update_motion) and (not bool(update_pose) or not bool(update_app))
         det.meta["track_match_had_overlap"] = bool(current_overlap)
 
-        det.meta["track_motion_update_allowed"] = bool(update_motion)
-        det.meta["track_pose_update_allowed"] = bool(update_pose and not current_overlap)
-        det.meta["track_app_update_requested"] = bool(update_app)
-
-        # Default return values if Kalman is not updated.
-        # IMPORTANT:
-        # self.kf is KalmanTracker, so use get_state()/get_cov().
-        state = self.kf.get_state()
-        cov = self.kf.get_cov()
-
-        # Motion/Kalman update.
-        # This is the only branch that resets time_since_update and increments hits.
         if update_motion:
             state, cov = self.kf.update(np.asarray(det.center, dtype=float))
-
             self.time_since_update = 0
             self.hits += 1
-
             if not self.confirmed and self.hits >= self.min_hits:
                 self.confirmed = True
-
             self.last_det_center = det.center
+        else:
+            state, cov = self.kf.get_state(), self.kf.get_cov()
 
-        # Pose memory update.
-        # Even if pose update is allowed by thresholds, overlap can still block it.
         if update_pose and not current_overlap:
-            self.last_keypoints = (
-                None
-                if det.keypoints is None
-                else np.asarray(det.keypoints, dtype=float)
-            )
-            self.last_kp_conf = (
-                None
-                if det.kp_conf is None
-                else np.asarray(det.kp_conf, dtype=float)
-            )
+            self.last_keypoints = None if det.keypoints is None else np.asarray(det.keypoints, dtype=float)
+            self.last_kp_conf = None if det.kp_conf is None else np.asarray(det.kp_conf, dtype=float)
 
         self._sync_freeze_counter()
 
@@ -306,18 +239,15 @@ class Track:
         freeze_active = self.is_frozen()
 
         allow_app_update = (
-                bool(update_app)
-                and e_app is not None
-                and not current_overlap
-                and not freeze_active
+            bool(update_app)
+            and e_app is not None
+            and not current_overlap
+            and not freeze_active
         )
 
         det.meta["track_app_update_allowed"] = bool(allow_app_update)
         det.meta["track_freeze_frames_left"] = int(self.freeze_frames_left)
-        det.meta["track_freeze_source_ids"] = sorted(
-            int(source_id)
-            for source_id in self.freeze_sources.keys()
-        )
+        det.meta["track_freeze_source_ids"] = sorted(int(source_id) for source_id in self.freeze_sources.keys())
 
         if allow_app_update:
             e_app = np.asarray(e_app, dtype=np.float32)
@@ -325,10 +255,7 @@ class Track:
             if self.app_emb_ema is None:
                 self.app_emb_ema = e_app
             else:
-                self.app_emb_ema = (
-                        ema_alpha * self.app_emb_ema
-                        + (1.0 - ema_alpha) * e_app
-                )
+                self.app_emb_ema = ema_alpha * self.app_emb_ema + (1.0 - ema_alpha) * e_app
 
             self.app_emb_history.append(e_app.copy())
 
@@ -345,14 +272,13 @@ class Track:
                 self.shorts_features_history.append(sf)
 
             det.meta["track_app_update_block_reason"] = None
-
         else:
-            if not bool(update_app):
+            if current_overlap:
+                reason = "current_detection_overlap"
+            elif not bool(update_app):
                 reason = "update_app_false"
             elif e_app is None:
                 reason = "missing_e_app"
-            elif current_overlap:
-                reason = "current_detection_overlap"
             elif freeze_active:
                 reason = "freeze_source_active"
             else:
@@ -361,6 +287,7 @@ class Track:
             det.meta["track_app_update_block_reason"] = reason
 
         return state, cov
+
     @staticmethod
     def overlap_group(det: Detection, overlap_skip_threshold: float) -> list[int]:
         # Return det_idx values from det.meta["overlap_relations"]

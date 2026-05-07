@@ -187,9 +187,6 @@ class DebugLog:
         w_pose = self.meta.get("w_pose", None)
         w_app = self.meta.get("w_app", None)
         max_update_cost = self.meta.get("max_update_cost", None)
-        max_update_motion = self.meta.get("max_update_motion", None)
-        max_update_pose = self.meta.get("max_update_pose", None)
-        max_update_app = self.meta.get("max_update_app", None)
 
         if w_motion is not None and w_pose is not None and w_app is not None:
             self.section("[debug] Matching / update cost weights:")
@@ -207,13 +204,7 @@ class DebugLog:
             )
 
         if max_update_cost is not None:
-            self.line(f"[debug] max_update_cost   = {float(max_update_cost):.6f}")
-        if max_update_motion is not None:
-            self.line(f"[debug] max_update_motion = {float(max_update_motion):.6f}")
-        if max_update_pose is not None:
-            self.line(f"[debug] max_update_pose   = {float(max_update_pose):.6f}")
-        if max_update_app is not None:
-            self.line(f"[debug] max_update_app    = {float(max_update_app):.6f}")
+            self.line(f"[debug] max_update_cost = {float(max_update_cost):.6f}")
 
         self.section("[info] Meaning of indexes:")
         self.line("- Track#i = i-th element in the current tracks list (0-based list index)")
@@ -391,29 +382,139 @@ def print_tracking_results(log: dict, iteration: int, show_pose_tables: bool = F
         print(f"  - Track {tid} pos={pos}")
 
 
+def format_track_update_debug_lines(records: List[Dict[str, Any]]) -> List[str]:
+    if not records:
+        return []
+    lines = ["=" * 80, "TRACK UPDATE DEBUG", "=" * 80]
+    for rec in records:
+        def _cmp(value_key: str, threshold_key: str, flag_key: str) -> str:
+            value = float(rec.get(value_key, 0.0))
+            threshold = float(rec.get(threshold_key, 0.0))
+            op = "<=" if value <= threshold else ">"
+            flag = str(bool(rec.get(flag_key, False))).lower()
+            return f"{value_key}={value:.6f} {op} {threshold_key}={threshold:.6f} -> {flag_key}={flag}"
+
+        lines.append(f"Track#{rec.get('track_idx')} track_id={rec.get('track_id')} <- Det#{rec.get('det_idx')}:")
+        lines.append(f"  {_cmp('d_motion', 'max_update_motion', 'update_motion')}")
+        lines.append(f"  {_cmp('d_pose', 'max_update_pose', 'update_pose')}")
+        lines.append(f"  {_cmp('d_app', 'max_update_app', 'update_app')}")
+        lines.append(f"  row_cost={float(rec.get('row_cost', 0.0)):.6f}")
+        lines.append(
+            f"  update_cost={float(rec.get('update_cost', 0.0)):.6f} / "
+            f"max_update_cost={float(rec.get('max_update_cost', 0.0)):.6f}"
+        )
+        lines.append(f"  overlap={str(bool(rec.get('track_match_had_overlap', False))).lower()}")
+        lines.append(f"  skipped={str(bool(rec.get('track_update_skipped', False))).lower()}")
+        lines.append(f"  skip_reason={rec.get('track_update_skip_reason')}")
+        lines.append(f"  app_allowed={str(bool(rec.get('track_app_update_allowed', False))).lower()}")
+        lines.append(f"  app_block_reason={rec.get('track_app_update_block_reason')}")
+    return lines
+
+
+def format_freeze_debug_lines(records: List[Dict[str, Any]]) -> List[str]:
+    if not records:
+        return []
+    lines = ["=" * 80, "FREEZE DEBUG", "=" * 80]
+    for rec in records:
+        lines.append(
+            f"Track#{rec.get('track_idx')} track_id={rec.get('track_id')}: "
+            f"freeze_active={str(bool(rec.get('freeze_active', False))).lower()}, "
+            f"frames_left={rec.get('freeze_frames_left')}, "
+            f"freeze_sources={rec.get('freeze_sources')}, "
+            f"overlap_group_ids={rec.get('overlap_group_ids')}"
+        )
+    return lines
+
 def append_birth_debug(birth_debug: Dict[str, Any]) -> None:
     if not isinstance(birth_debug, dict):
         return
-    GENERAL_LOG.append("=" * 80)
-    GENERAL_LOG.append("BIRTH DEBUG")
-    GENERAL_LOG.append("=" * 80)
+    GENERAL_LOG.extend(format_birth_debug_lines(birth_debug))
+
+
+def format_birth_debug_lines(birth_debug: Dict[str, Any]) -> List[str]:
+    lines: List[str] = []
+    if not isinstance(birth_debug, dict):
+        return lines
+
+    def _f(value: Any) -> str:
+        return "None" if value is None else f"{float(value):.6f}"
+
+    lines.extend(["=" * 80, "BIRTH DEBUG", "=" * 80])
+    summary = birth_debug.get("summary", {})
+    if isinstance(summary, dict) and summary:
+        lines.append(
+            "summary: "
+            f"incoming_unmatched={summary.get('incoming_unmatched_count', 0)}, "
+            f"existing_tracks={summary.get('existing_tracks_count', 0)}, "
+            f"pending_before={summary.get('pending_count_before', 0)}, "
+            f"confirmed={summary.get('confirmed_count', 0)}, "
+            f"pending_after={summary.get('pending_count_after', 0)}"
+        )
+
     for item in birth_debug.get("detections", []):
         det_idx = item.get("det_idx", "N/A")
-        GENERAL_LOG.append(f"Det#{det_idx}:")
-        for key in (
-            "action", "reason", "nearest_existing_track_id", "nearest_existing_d_motion",
-            "closeness_status", "pending_id", "required_confirm_hits", "hits",
-            "misses", "age", "birth_score", "d_motion", "pose_status",
-            "pose_penalty", "app_status", "app_penalty", "will_create_new_track",
-        ):
-            if key in item:
-                GENERAL_LOG.append(f"  {key} = {item.get(key)}")
+        center = item.get("det_center")
+        lines.append(f"Unmatched Det#{det_idx} center={center}:")
+        lines.append(f"  action={item.get('action')}")
+        lines.append(f"  reason={item.get('reason')}")
+        lines.append("  nearest existing track:")
+        lines.append(
+            f"    Track#{item.get('nearest_existing_track_idx')} "
+            f"track_id={item.get('nearest_existing_track_id')}"
+        )
+        lines.append(f"    d2={_f(item.get('nearest_existing_d2'))}")
+        lines.append(f"    d_motion={_f(item.get('nearest_existing_d_motion'))}")
+        lines.append(f"    closeness={item.get('closeness_status')}")
+        lines.append(
+            f"    thresholds: very_close={_f(item.get('very_close_threshold'))}, "
+            f"near={_f(item.get('near_threshold'))}"
+        )
+        comp = item.get("pending_comparison")
+        if isinstance(comp, dict):
+            lines.append("  pending comparison:")
+            lines.append(f"    pending_id={comp.get('pending_id')}")
+            lines.append(f"    d2={_f(comp.get('d2'))}")
+            lines.append(f"    d_motion={_f(comp.get('d_motion'))}")
+            lines.append(f"    motion_threshold={_f(comp.get('motion_threshold'))}")
+            lines.append(f"    motion_passed={str(bool(comp.get('motion_passed', False))).lower()}")
+            lines.append(f"    pose_status={comp.get('pose_status')}")
+            lines.append(f"    app_status={comp.get('app_status')}")
+            if "birth_score" in comp:
+                lines.append(f"    birth_score={_f(comp.get('birth_score'))}")
+            lines.append(f"    matched_to_pending={str(bool(comp.get('matched_to_pending', False))).lower()}")
+
+    comps = birth_debug.get("pending_comparisons", [])
+    if isinstance(comps, list) and comps:
+        lines.append("Pending comparisons:")
+        for comp in comps:
+            lines.append(
+                f"  {comp.get('pending_id')} vs Det#{comp.get('det_idx')}: "
+                f"d2={_f(comp.get('d2'))}, d_motion={_f(comp.get('d_motion'))}, "
+                f"thr={_f(comp.get('motion_threshold'))}, motion_passed={str(bool(comp.get('motion_passed', False))).lower()}, "
+                f"pose={comp.get('pose_status')}, app={comp.get('app_status')}, "
+                f"score={_f(comp.get('birth_score'))}, matched={str(bool(comp.get('matched_to_pending', False))).lower()}"
+            )
+
+    candidates = birth_debug.get("candidates", [])
+    if isinstance(candidates, list) and candidates:
+        lines.append("Pending candidates:")
+        for cand in candidates:
+            lines.append(f"  {cand.get('pending_id')}:")
+            lines.append(f"    status={cand.get('status')}")
+            lines.append(
+                f"    hits={cand.get('hits')} misses={cand.get('misses')} age={cand.get('age')} "
+                f"required_confirm_hits={cand.get('required_confirm_hits')}"
+            )
+            lines.append(f"    last_det_idx={cand.get('last_det_idx')}")
+            lines.append(f"    last_center={cand.get('last_center')}")
+
     for conf in birth_debug.get("confirmed", []):
-        GENERAL_LOG.append("")
-        GENERAL_LOG.append("CONFIRMED BIRTH:")
+        lines.append("")
+        lines.append("CONFIRMED BIRTH:")
         for key in (
             "pending_id", "source_det_idx", "reason", "hits", "age",
             "required_confirm_hits", "will_create_new_track",
         ):
             if key in conf:
-                GENERAL_LOG.append(f"  {key} = {conf.get(key)}")
+                lines.append(f"  {key} = {conf.get(key)}")
+    return lines

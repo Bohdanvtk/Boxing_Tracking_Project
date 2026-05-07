@@ -12,7 +12,12 @@ from boxing_project.kalman_filter.kalman import KalmanTracker
 from .track import Track, Detection
 from .matcher import MatchConfig, match_tracks_and_detections
 from .birth_manager import BirthConfig, BirthManager
-from .tracking_debug import append_birth_debug
+from .tracking_debug import (
+    append_birth_debug,
+    format_birth_debug_lines,
+    format_freeze_debug_lines,
+    format_track_update_debug_lines,
+)
 from . import DEFAULT_TRACKING_CONFIG_PATH, DEFAULT_BIRTH_CONFIG_PATH
 
 
@@ -313,8 +318,6 @@ class MultiObjectTracker:
         trk.update(
             det,
             ema_alpha=self.cfg.match.emb_ema_alpha,
-            update_motion=True,
-            update_pose=True,
             update_app=self._has_base_keypoints(det),
             overlap_skip_threshold=self.cfg.overlap_skip_threshold,
         )
@@ -574,9 +577,10 @@ class MultiObjectTracker:
         skipped_updates: List[Dict[str, Any]] = []
 
         max_update_cost = float(getattr(self.cfg.match, "max_update_cost", 1.2))
-        max_update_motion = float(getattr(self.cfg.match, "max_update_motion", getattr(self.cfg.match, "motion_threshold", 1.0)))
-        max_update_pose = float(getattr(self.cfg.match, "max_update_pose", getattr(self.cfg.match, "pose_threshold", 1.0)))
-        max_update_app = float(getattr(self.cfg.match, "max_update_app", getattr(self.cfg.match, "appearance_threshold", 1.0)))
+        max_update_motion = float(self.cfg.match.max_update_motion)
+        max_update_pose = float(self.cfg.match.max_update_pose)
+        max_update_app = float(self.cfg.match.max_update_app)
+        track_update_debug: List[Dict[str, Any]] = []
 
         # C is row-relative matcher cost.
         # For update quality we use absolute raw weighted update_cost from matcher.py.
@@ -621,74 +625,68 @@ class MultiObjectTracker:
             det.meta["match_d_motion"] = d_motion
             det.meta["match_d_pose"] = d_pose
             det.meta["match_d_app"] = d_app
-            det.meta["max_update_cost"] = max_update_cost
-            det.meta["max_update_motion"] = max_update_motion
-            det.meta["max_update_pose"] = max_update_pose
-            det.meta["max_update_app"] = max_update_app
+            det.meta["match_update_threshold"] = max_update_cost
             det.meta["matched_track_id_before_update"] = int(trk.track_id)
-
-            allow_motion_update = (
-                update_cost <= max_update_cost
-                and d_motion <= max_update_motion
-            )
-            allow_pose_update = (
-                allow_motion_update
-                and d_pose <= max_update_pose
-            )
-            allow_app_update = (
-                allow_motion_update
-                and d_app <= max_update_app
-            )
-
-            det.meta["allow_motion_update"] = bool(allow_motion_update)
-            det.meta["allow_pose_update"] = bool(allow_pose_update)
-            det.meta["allow_app_update_by_threshold"] = bool(allow_app_update)
-
-            skip_reasons = []
-            if update_cost > max_update_cost:
-                skip_reasons.append("high_update_cost")
-            if d_motion > max_update_motion:
-                skip_reasons.append("high_update_motion")
-            if d_pose > max_update_pose:
-                skip_reasons.append("high_update_pose")
-            if d_app > max_update_app:
-                skip_reasons.append("high_update_app")
-
-            det.meta["track_update_skip_reason"] = ",".join(skip_reasons) if skip_reasons else None
-            det.meta["track_update_skipped"] = not bool(allow_motion_update)
 
             # Match still exists for visualization / outputs.
             id_pairs.append((trk.track_id, j_det))
 
-            if skip_reasons:
-                skipped_updates.append(
-                    {
-                        "track_id": int(trk.track_id),
-                        "det_idx": int(j_det),
-                        "row_cost": float(row_cost),
-                        "update_cost": float(update_cost),
-                        "d_motion": float(d_motion),
-                        "d_pose": float(d_pose),
-                        "d_app": float(d_app),
-                        "max_update_cost": float(max_update_cost),
-                        "max_update_motion": float(max_update_motion),
-                        "max_update_pose": float(max_update_pose),
-                        "max_update_app": float(max_update_app),
-                        "allow_motion_update": bool(allow_motion_update),
-                        "allow_pose_update": bool(allow_pose_update),
-                        "allow_app_update": bool(allow_app_update),
-                        "reason": "|".join(skip_reasons),
-                    }
-                )
+            update_motion = d_motion <= max_update_motion
+            update_pose = d_pose <= max_update_pose
+            update_app = d_app <= max_update_app
+            disabled_reasons = []
+            if not update_motion:
+                disabled_reasons.append("motion_update_disabled")
+            if not update_pose:
+                disabled_reasons.append("pose_update_disabled")
+            if not update_app:
+                disabled_reasons.append("app_update_disabled")
+
+            det.meta["track_update_skip_reason"] = ",".join(disabled_reasons) if disabled_reasons else None
+            det.meta["track_update_disabled_reasons"] = disabled_reasons
 
             trk.update(
                 det,
                 ema_alpha=self.cfg.match.emb_ema_alpha,
-                update_motion=allow_motion_update,
-                update_pose=allow_pose_update,
-                update_app=allow_app_update,
+                update_motion=update_motion,
+                update_pose=update_pose,
+                update_app=update_app,
                 overlap_skip_threshold=self.cfg.overlap_skip_threshold,
             )
+
+            rec = {
+                "track_idx": i,
+                "track_id": int(trk.track_id),
+                "det_idx": j,
+                "d_motion": d_motion,
+                "d_pose": d_pose,
+                "d_app": d_app,
+                "max_update_motion": max_update_motion,
+                "max_update_pose": max_update_pose,
+                "max_update_app": max_update_app,
+                "update_motion": bool(det.meta.get("track_update_motion_allowed", update_motion)),
+                "update_pose": bool(det.meta.get("track_update_pose_allowed", update_pose)),
+                "update_app": bool(det.meta.get("track_update_app_requested", update_app)),
+                "track_match_had_overlap": bool(det.meta.get("track_match_had_overlap", False)),
+                "row_cost": row_cost,
+                "update_cost": update_cost,
+                "max_update_cost": max_update_cost,
+                "track_update_skipped": bool(det.meta.get("track_update_skipped", False)),
+                "track_update_fully_skipped": bool(det.meta.get("track_update_fully_skipped", False)),
+                "track_update_partially_skipped": bool(det.meta.get("track_update_partially_skipped", False)),
+                "track_update_skip_reason": det.meta.get("track_update_skip_reason"),
+                "track_app_update_allowed": bool(det.meta.get("track_app_update_allowed", False)),
+                "track_app_update_block_reason": det.meta.get("track_app_update_block_reason"),
+            }
+            track_update_debug.append(rec)
+            if rec["track_update_skipped"]:
+                skipped_updates.append(rec)
+
+        log.meta["track_update_debug"] = track_update_debug
+        track_update_lines = format_track_update_debug_lines(track_update_debug)
+        if track_update_lines and hasattr(log, "buffer") and isinstance(log.buffer, list):
+            log.buffer.extend(["", *track_update_lines])
+
         # 7) Birth manager: unmatched detections become pending candidates first.
         birth_result = self.birth_manager.update(
             unmatched_det_indices=um_det_idx,
@@ -699,6 +697,8 @@ class MultiObjectTracker:
         )
         log.meta["birth_debug"] = birth_result.debug_info
         append_birth_debug(birth_result.debug_info)
+        if hasattr(log, "buffer") and isinstance(log.buffer, list):
+            log.buffer.extend(["", *format_birth_debug_lines(birth_result.debug_info)])
 
         # 8) Spawn new tracks only for confirmed births.
         new_matches: Dict[int, int] = {}
@@ -745,6 +745,27 @@ class MultiObjectTracker:
             tracks=self.tracks,
             exclude_sources=freshly_frozen_sources,
         )
+
+        freeze_debug = [
+            {
+                "track_idx": int(idx),
+                "track_id": int(track.track_id),
+                "freeze_active": bool(track.is_frozen()),
+                "freeze_frames_left": int(getattr(track, "freeze_frames_left", 0)),
+                "freeze_sources": {
+                    int(source_id): int(frames_left)
+                    for source_id, frames_left in getattr(track, "freeze_sources", {}).items()
+                },
+                "overlap_group_ids": sorted(
+                    int(x) for x in getattr(track, "overlap_group_ids", set())
+                ),
+            }
+            for idx, track in enumerate(self.tracks)
+        ]
+        log.meta["freeze_debug"] = freeze_debug
+        freeze_debug_lines = format_freeze_debug_lines(freeze_debug)
+        if freeze_debug_lines and hasattr(log, "buffer") and isinstance(log.buffer, list):
+            log.buffer.extend(["", *freeze_debug_lines])
 
         # 13) Save matches for the next frame.
         self.prev_matches = all_current_matches

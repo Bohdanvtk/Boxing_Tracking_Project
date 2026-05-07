@@ -56,9 +56,9 @@ class MatchConfig:
     # Absolute weighted raw cost threshold for Track update.
     # Matching can still happen, but Track memory update is skipped if update_cost is higher.
     max_update_cost: float = 1.2
-    max_update_motion: float = 0.09
+    max_update_motion: float = 0.08
     max_update_pose: float = 0.30
-    max_update_app: float = 0.20
+    max_update_app: float = 0.12
 
 
 @dataclass
@@ -729,9 +729,6 @@ def build_cost_matrix(
     log.meta["w_pose"] = float(cfg.w_pose)
     log.meta["w_app"] = float(cfg.w_app)
     log.meta["max_update_cost"] = float(cfg.max_update_cost)
-    log.meta["max_update_motion"] = float(cfg.max_update_motion)
-    log.meta["max_update_pose"] = float(cfg.max_update_pose)
-    log.meta["max_update_app"] = float(cfg.max_update_app)
 
     row_preferences = _build_row_preferences(
         row_cost=row_cost,
