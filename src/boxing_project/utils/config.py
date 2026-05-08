@@ -108,7 +108,14 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
     save_log = bool(_get(cfg, "tracking.save_log", True))
 
     overlap_log_threshold = float(_get(cfg, "tracking.overlap_log_threshold", 0.10))
-    overlap_skip_threshold = float(_get(cfg, "tracking.overlap_skip_threshold", 0.40))
+    # Keep defaults here so older YAMLs still load.
+    adaptive_overlap_center_near = float(_get(cfg, "tracking.adaptive_overlap_center_near", 0.55))
+    adaptive_overlap_center_mid = float(_get(cfg, "tracking.adaptive_overlap_center_mid", 0.85))
+    adaptive_overlap_center_far = float(_get(cfg, "tracking.adaptive_overlap_center_far", 1.20))
+    adaptive_overlap_iou_near = float(_get(cfg, "tracking.adaptive_overlap_iou_near", 0.03))
+    adaptive_overlap_iou_mid = float(_get(cfg, "tracking.adaptive_overlap_iou_mid", 0.06))
+    adaptive_overlap_iou_far = float(_get(cfg, "tracking.adaptive_overlap_iou_far", 0.08))
+    adaptive_overlap_iou_default = float(_get(cfg, "tracking.adaptive_overlap_iou_default", 0.12))
     overlap_app_freeze_after = int(_get(cfg, "tracking.overlap_app_freeze_after", 5))
 
     max_age = int(_get(cfg, "tracking.tracker.max_age", 10))
@@ -131,7 +138,13 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
         debug=debug,
         save_log=save_log,
         overlap_log_threshold=overlap_log_threshold,
-        overlap_skip_threshold=overlap_skip_threshold,
+        adaptive_overlap_center_near=adaptive_overlap_center_near,
+        adaptive_overlap_center_mid=adaptive_overlap_center_mid,
+        adaptive_overlap_center_far=adaptive_overlap_center_far,
+        adaptive_overlap_iou_near=adaptive_overlap_iou_near,
+        adaptive_overlap_iou_mid=adaptive_overlap_iou_mid,
+        adaptive_overlap_iou_far=adaptive_overlap_iou_far,
+        adaptive_overlap_iou_default=adaptive_overlap_iou_default,
         overlap_app_freeze_after=overlap_app_freeze_after,
     )
 

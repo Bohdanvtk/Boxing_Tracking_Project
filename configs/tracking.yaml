@@ -6,9 +6,21 @@ tracking:
     # If detection IoU with another detection >= this value,
     # it is marked as overlapping in logs/meta
 
-  overlap_skip_threshold: 0.9  # IoU threshold for skipping matched Track.update components
-    # In Track.update(), overlap means max_overlap_iou > overlap_skip_threshold.
-    # Overlap disables motion, pose, and appearance updates for that match.
+  adaptive_overlap_center_near: 0.55
+    # Very close detection centers relative to bbox pair scale.
+  adaptive_overlap_center_mid: 0.85
+    # Medium-close detection centers relative to bbox pair scale.
+  adaptive_overlap_center_far: 1.20
+    # Far-but-still-relevant detection centers relative to bbox pair scale.
+
+  adaptive_overlap_iou_near: 0.03
+    # IoU threshold when centers are very close.
+  adaptive_overlap_iou_mid: 0.06
+    # IoU threshold when centers are medium-close.
+  adaptive_overlap_iou_far: 0.08
+    # IoU threshold when centers are far-but-still-relevant.
+  adaptive_overlap_iou_default: 0.12
+    # IoU threshold when centers are farther than adaptive_overlap_center_far.
 
   overlap_app_freeze_after: 5
     # Source-based cooldown length.

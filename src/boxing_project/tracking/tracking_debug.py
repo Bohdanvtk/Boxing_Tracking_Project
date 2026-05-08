@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+import numpy as np
+
 
 GENERAL_LOG: list[str] = []  # saved later into file by inference_utils
 FRAME_IDX: int = 1  # inner frame count (independent from infer_utils)
@@ -138,21 +140,25 @@ class DebugLog:
             pass
         return f"det_index={j}"
 
-    def _get_det_overlap(self, j: int) -> tuple[float, Any, int]:
+    def _get_det_overlap(self, j: int) -> Dict[str, Any]:
         try:
             detections = self.meta.get("detections", None)
             if isinstance(detections, (list, tuple)) and 0 <= j < len(detections):
                 det = detections[j]
                 meta = getattr(det, "meta", {}) if not isinstance(det, dict) else det.get("meta", {})
-                return (
-                    float(meta.get("max_overlap_iou", 0.0)),
-                    meta.get("max_overlap_det_idx", None),
-                    len(meta.get("overlap_relations", []) or []),
-                )
+                return {
+                    "max_iou": float(meta.get("max_overlap_iou", 0.0)),
+                    "other_idx": meta.get("max_overlap_det_idx", None),
+                    "n_rel": len(meta.get("overlap_relations", []) or []),
+                    "min_cdn": meta.get("min_center_dist_norm", None),
+                    "cdn_idx": meta.get("center_dist_norm_det_idx", None),
+                    "thr": meta.get("active_overlap_threshold", None),
+                    "zone": meta.get("adaptive_overlap_zone", None),
+                }
         except Exception:
             pass
 
-        return 0.0, None, 0
+        return {"max_iou": 0.0, "other_idx": None, "n_rel": 0}
 
     def show_matrix(self, precision: int = 6) -> None:
         """
@@ -219,10 +225,15 @@ class DebugLog:
 
         self.section("[debug] Detection overlaps:")
         for j in range(self.n_cols):
-            max_iou, other_idx, n_rel = self._get_det_overlap(j)
+            ov = self._get_det_overlap(j)
+            min_cdn = ov.get("min_cdn")
+            thr = ov.get("thr")
+            cdn = "inf" if min_cdn is None or not np.isfinite(float(min_cdn)) else f"{float(min_cdn):.2f}"
+            thr_s = "n/a" if thr is None else f"{float(thr):.3f}"
             self.line(
-                f"- Det#{j}: max_overlap_iou={max_iou:.3f}, "
-                f"max_overlap_det_idx={other_idx}, overlaps={n_rel}"
+                f"- Det#{j}: max_iou={float(ov.get('max_iou', 0.0)):.3f}, "
+                f"other={ov.get('other_idx')}, rels={ov.get('n_rel', 0)}, "
+                f"min_cdn={cdn}->Det#{ov.get('cdn_idx')}, thr={thr_s}, zone={ov.get('zone')}"
             )
 
         self.section("=" * 80)
@@ -404,6 +415,13 @@ def format_track_update_debug_lines(records: List[Dict[str, Any]]) -> List[str]:
             f"max_update_cost={float(rec.get('max_update_cost', 0.0)):.6f}"
         )
         lines.append(f"  overlap={str(bool(rec.get('track_match_had_overlap', False))).lower()}")
+        if rec.get("active_overlap_threshold") is not None or rec.get("adaptive_overlap_zone") is not None:
+            min_cdn = rec.get("min_center_dist_norm")
+            cdn = "inf" if min_cdn is None or not np.isfinite(float(min_cdn)) else f"{float(min_cdn):.2f}"
+            lines.append(
+                f"  adaptive_overlap: zone={rec.get('adaptive_overlap_zone')}, "
+                f"min_cdn={cdn}, thr={float(rec.get('active_overlap_threshold', 0.0)):.3f}"
+            )
         lines.append(f"  skipped={str(bool(rec.get('track_update_skipped', False))).lower()}")
         lines.append(f"  skip_reason={rec.get('track_update_skip_reason')}")
         lines.append(f"  app_allowed={str(bool(rec.get('track_app_update_allowed', False))).lower()}")

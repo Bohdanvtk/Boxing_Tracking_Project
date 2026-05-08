@@ -61,11 +61,8 @@ class Track:
       Appearance memory is updated only when:
         - update_app is True,
         - det.meta["e_app"] exists,
-        - current detection has no dangerous overlap,
+        - current detection has no dangerous adaptive overlap,
         - this track has no active freeze source.
-
-    Dangerous overlap means:
-        det.meta["max_overlap_iou"] > overlap_skip_threshold
 
     bbox_quality is intentionally NOT used to block appearance updates.
     If e_app exists and the crop is not blocked by overlap/cooldown,
@@ -191,11 +188,40 @@ class Track:
             update_motion: bool = True,
             update_pose: bool = True,
             update_app: bool = True,
-            overlap_skip_threshold: float = 0.40,
+            adaptive_overlap_center_near: float = 0.55,
+            adaptive_overlap_center_mid: float = 0.85,
+            adaptive_overlap_center_far: float = 1.20,
+            adaptive_overlap_iou_near: float = 0.03,
+            adaptive_overlap_iou_mid: float = 0.06,
+            adaptive_overlap_iou_far: float = 0.08,
+            adaptive_overlap_iou_default: float = 0.12,
     ):
-        # Component gates and overlap can skip contaminated updates.
+        # Adaptive overlap can skip contaminated motion/pose/app updates.
         max_overlap_iou = float(det.meta.get("max_overlap_iou", 0.0))
-        current_overlap = max_overlap_iou > float(overlap_skip_threshold)
+        center_dist_norm = float(det.meta.get("min_center_dist_norm", float("inf")))
+
+        if center_dist_norm <= adaptive_overlap_center_near:
+            active_overlap_threshold = adaptive_overlap_iou_near
+            adaptive_overlap_zone = "near"
+
+        elif center_dist_norm <= adaptive_overlap_center_mid:
+            active_overlap_threshold = adaptive_overlap_iou_mid
+            adaptive_overlap_zone = "mid"
+
+        elif center_dist_norm <= adaptive_overlap_center_far:
+            active_overlap_threshold = adaptive_overlap_iou_far
+            adaptive_overlap_zone = "far"
+
+        else:
+            active_overlap_threshold = adaptive_overlap_iou_default
+            adaptive_overlap_zone = "default"
+        # Disabled adaptive overlap means no overlap-based update blocking.
+        current_overlap = max_overlap_iou > float(active_overlap_threshold)
+
+        det.meta["adaptive_overlap_zone"] = adaptive_overlap_zone
+        det.meta["active_overlap_threshold"] = float(active_overlap_threshold)
+        det.meta["min_center_dist_norm"] = center_dist_norm
+        det.meta["center_dist_norm_det_idx"] = det.meta.get("center_dist_norm_det_idx")
 
         if current_overlap:
             update_motion = False
@@ -289,20 +315,16 @@ class Track:
         return state, cov
 
     @staticmethod
-    def overlap_group(det: Detection, overlap_skip_threshold: float) -> list[int]:
-        # Return det_idx values from det.meta["overlap_relations"]
-        # whose IoU is stronger than overlap_skip_threshold.
+    def overlap_group(det: Detection) -> list[int]:
+        # Return det_idx values whose relation is risky under adaptive overlap.
         group: list[int] = []
 
         for rel in det.meta.get("overlap_relations", []) or []:
             try:
-                det_idx = int(rel.get("det_idx"))
-                iou = float(rel.get("iou", 0.0))
+                if bool(rel.get("adaptive_overlap_risk", False)):
+                    group.append(int(rel.get("det_idx")))
             except Exception:
                 continue
-
-            if iou > float(overlap_skip_threshold):
-                group.append(det_idx)
 
         return group
 

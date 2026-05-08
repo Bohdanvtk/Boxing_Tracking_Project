@@ -37,7 +37,14 @@ class TrackerConfig:
     save_log: bool
 
     overlap_log_threshold: float = 0.10
-    overlap_skip_threshold: float = 0.40
+    # Center-distance adaptive overlap gating.
+    adaptive_overlap_center_near: float = 0.55
+    adaptive_overlap_center_mid: float = 0.85
+    adaptive_overlap_center_far: float = 1.20
+    adaptive_overlap_iou_near: float = 0.03
+    adaptive_overlap_iou_mid: float = 0.06
+    adaptive_overlap_iou_far: float = 0.08
+    adaptive_overlap_iou_default: float = 0.12
     overlap_app_freeze_after: int = 5
 
 def openpose_people_to_detections(
@@ -319,7 +326,13 @@ class MultiObjectTracker:
             det,
             ema_alpha=self.cfg.match.emb_ema_alpha,
             update_app=self._has_base_keypoints(det),
-            overlap_skip_threshold=self.cfg.overlap_skip_threshold,
+            adaptive_overlap_center_near=self.cfg.adaptive_overlap_center_near,
+            adaptive_overlap_center_mid=self.cfg.adaptive_overlap_center_mid,
+            adaptive_overlap_center_far=self.cfg.adaptive_overlap_center_far,
+            adaptive_overlap_iou_near=self.cfg.adaptive_overlap_iou_near,
+            adaptive_overlap_iou_mid=self.cfg.adaptive_overlap_iou_mid,
+            adaptive_overlap_iou_far=self.cfg.adaptive_overlap_iou_far,
+            adaptive_overlap_iou_default=self.cfg.adaptive_overlap_iou_default,
         )
         return trk
 
@@ -405,10 +418,7 @@ class MultiObjectTracker:
                 continue
 
             det = detections[det_idx]
-            overlap_det_indices = Track.overlap_group(
-                det,
-                overlap_skip_threshold=self.cfg.overlap_skip_threshold,
-            )
+            overlap_det_indices = Track.overlap_group(det)
 
             group_track_ids: set[int] = set()
 
@@ -651,7 +661,13 @@ class MultiObjectTracker:
                 update_motion=update_motion,
                 update_pose=update_pose,
                 update_app=update_app,
-                overlap_skip_threshold=self.cfg.overlap_skip_threshold,
+                adaptive_overlap_center_near=self.cfg.adaptive_overlap_center_near,
+                adaptive_overlap_center_mid=self.cfg.adaptive_overlap_center_mid,
+                adaptive_overlap_center_far=self.cfg.adaptive_overlap_center_far,
+                adaptive_overlap_iou_near=self.cfg.adaptive_overlap_iou_near,
+                adaptive_overlap_iou_mid=self.cfg.adaptive_overlap_iou_mid,
+                adaptive_overlap_iou_far=self.cfg.adaptive_overlap_iou_far,
+                adaptive_overlap_iou_default=self.cfg.adaptive_overlap_iou_default,
             )
 
             rec = {
@@ -677,6 +693,11 @@ class MultiObjectTracker:
                 "track_update_skip_reason": det.meta.get("track_update_skip_reason"),
                 "track_app_update_allowed": bool(det.meta.get("track_app_update_allowed", False)),
                 "track_app_update_block_reason": det.meta.get("track_app_update_block_reason"),
+                "min_center_dist_norm": det.meta.get("min_center_dist_norm"),
+                "center_dist_norm_det_idx": det.meta.get("center_dist_norm_det_idx"),
+                "active_overlap_threshold": det.meta.get("active_overlap_threshold"),
+                "adaptive_overlap_zone": det.meta.get("adaptive_overlap_zone"),
+                "adaptive_overlap_enabled": det.meta.get("adaptive_overlap_enabled"),
             }
             track_update_debug.append(rec)
             if rec["track_update_skipped"]:
