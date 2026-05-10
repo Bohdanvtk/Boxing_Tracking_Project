@@ -154,6 +154,8 @@ class DebugLog:
                     "cdn_idx": meta.get("center_dist_norm_det_idx", None),
                     "thr": meta.get("active_overlap_threshold", None),
                     "zone": meta.get("adaptive_overlap_zone", None),
+                    "enabled": meta.get("adaptive_overlap_enabled", None),
+                    "reason": meta.get("adaptive_overlap_reason", None),
                 }
         except Exception:
             pass
@@ -232,8 +234,9 @@ class DebugLog:
             thr_s = "n/a" if thr is None else f"{float(thr):.3f}"
             self.line(
                 f"- Det#{j}: max_iou={float(ov.get('max_iou', 0.0)):.3f}, "
-                f"other={ov.get('other_idx')}, rels={ov.get('n_rel', 0)}, "
-                f"min_cdn={cdn}->Det#{ov.get('cdn_idx')}, thr={thr_s}, zone={ov.get('zone')}"
+                f"other=Det#{ov.get('other_idx')}, rels={ov.get('n_rel', 0)}, "
+                f"min_cdn={cdn}->Det#{ov.get('cdn_idx')}, thr={thr_s}, "
+                f"zone={ov.get('zone')}, enabled={ov.get('enabled')}, reason={ov.get('reason')}"
             )
 
         self.section("=" * 80)
@@ -406,6 +409,11 @@ def format_track_update_debug_lines(records: List[Dict[str, Any]]) -> List[str]:
             return f"{value_key}={value:.6f} {op} {threshold_key}={threshold:.6f} -> {flag_key}={flag}"
 
         lines.append(f"Track#{rec.get('track_idx')} track_id={rec.get('track_id')} <- Det#{rec.get('det_idx')}:")
+        lines.append(
+            f"  hits: before={rec.get('hits_before_update')} after={rec.get('hits_after_update')}; "
+            f"sub_confirmed: before={rec.get('sub_confirmed_before_update')} after={rec.get('sub_confirmed_after_update')}; "
+            f"confirmed: before={rec.get('confirmed_before_update')} after={rec.get('confirmed_after_update')}"
+        )
         lines.append(f"  {_cmp('d_motion', 'max_update_motion', 'update_motion')}")
         lines.append(f"  {_cmp('d_pose', 'max_update_pose', 'update_pose')}")
         lines.append(f"  {_cmp('d_app', 'max_update_app', 'update_app')}")
@@ -414,20 +422,30 @@ def format_track_update_debug_lines(records: List[Dict[str, Any]]) -> List[str]:
             f"  update_cost={float(rec.get('update_cost', 0.0)):.6f} / "
             f"max_update_cost={float(rec.get('max_update_cost', 0.0)):.6f}"
         )
-        lines.append(f"  overlap={str(bool(rec.get('track_match_had_overlap', False))).lower()}")
-        if rec.get("active_overlap_threshold") is not None or rec.get("adaptive_overlap_zone") is not None:
-            min_cdn = rec.get("min_center_dist_norm")
-            cdn = "inf" if min_cdn is None or not np.isfinite(float(min_cdn)) else f"{float(min_cdn):.2f}"
-            lines.append(
-                f"  adaptive_overlap: zone={rec.get('adaptive_overlap_zone')}, "
-                f"min_cdn={cdn}, thr={float(rec.get('active_overlap_threshold', 0.0)):.3f}"
-            )
+        min_cdn = rec.get("min_center_dist_norm")
+        cdn = "inf" if min_cdn is None or not np.isfinite(float(min_cdn)) else f"{float(min_cdn):.2f}"
+        lines.append(
+            f"  overlap: had={str(bool(rec.get('track_match_had_overlap', False))).lower()}, "
+            f"max_iou={float(rec.get('max_overlap_iou', 0.0)):.3f}->Det#{rec.get('max_overlap_det_idx')}, "
+            f"min_cdn={cdn}->Det#{rec.get('center_dist_norm_det_idx')}, "
+            f"thr={float(rec.get('active_overlap_threshold', 0.0)):.3f}, "
+            f"zone={rec.get('adaptive_overlap_zone')}, enabled={rec.get('adaptive_overlap_enabled')}, "
+            f"reason={rec.get('adaptive_overlap_reason')}"
+        )
         lines.append(f"  skipped={str(bool(rec.get('track_update_skipped', False))).lower()}")
         lines.append(f"  skip_reason={rec.get('track_update_skip_reason')}")
         lines.append(f"  app_allowed={str(bool(rec.get('track_app_update_allowed', False))).lower()}")
         lines.append(f"  app_block_reason={rec.get('track_app_update_block_reason')}")
     return lines
 
+
+def format_used_config_lines(config: Dict[str, Any]) -> List[str]:
+    if not isinstance(config, dict) or not config:
+        return []
+    lines = ["=" * 80, "CONFIG VALUES USED", "=" * 80]
+    for key in sorted(config):
+        lines.append(f"{key}: {config.get(key)}")
+    return lines
 
 def format_freeze_debug_lines(records: List[Dict[str, Any]]) -> List[str]:
     if not records:

@@ -8,6 +8,8 @@ from typing import Any
 import cv2
 import numpy as np
 
+from boxing_project.tracking.tracking_debug import format_used_config_lines
+
 
 def _json_safe(value):
     """Convert numpy/NaN values to JSON-safe Python objects."""
@@ -128,6 +130,10 @@ def _save_frame_debug_txt(*, debug_dir: Path, frame_idx: int, frame_log) -> None
     lines = list(getattr(frame_log, "buffer", []) or [])
     if not lines:
         return
+
+    cfg_lines = format_used_config_lines(getattr(frame_log, "meta", {}).get("used_config", {}))
+    if cfg_lines:
+        lines.extend(["", *cfg_lines])
 
     txt = "\n".join([f"FRAME {int(frame_idx):06d}", "=" * 80, "", *lines, "", "=" * 80])
     (debug_dir / "tracking_debug.txt").write_text(txt, encoding="utf-8")

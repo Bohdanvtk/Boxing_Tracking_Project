@@ -30,6 +30,7 @@ class TrackerConfig:
     max_age: int
     max_confirmed_age: int
     min_hits: int
+    min_hits_sub: int
     match: MatchConfig
     min_kp_conf: float
     reset_g_threshold: float
@@ -318,23 +319,82 @@ class MultiObjectTracker:
             measure_var=self.cfg.measure_var,
             p0=self.cfg.p0,
         )
-        trk = Track(track_id=self._next_id, kf=kf, min_hits=self.cfg.min_hits, epoch_id=self._epoch_id)
+        trk = Track(track_id=self._next_id, kf=kf, min_hits=self.cfg.min_hits, min_hits_sub=self.cfg.min_hits_sub, epoch_id=self._epoch_id)
         self._next_id += 1
         self._segment_tracks[trk.track_id] = trk
         self._epoch_tracks.setdefault(self._epoch_id, {})[trk.track_id] = trk
+        active_overlap_threshold = self._prepare_overlap_update_meta(trk, det)
         trk.update(
             det,
             ema_alpha=self.cfg.match.emb_ema_alpha,
             update_app=self._has_base_keypoints(det),
-            adaptive_overlap_center_near=self.cfg.adaptive_overlap_center_near,
-            adaptive_overlap_center_mid=self.cfg.adaptive_overlap_center_mid,
-            adaptive_overlap_center_far=self.cfg.adaptive_overlap_center_far,
-            adaptive_overlap_iou_near=self.cfg.adaptive_overlap_iou_near,
-            adaptive_overlap_iou_mid=self.cfg.adaptive_overlap_iou_mid,
-            adaptive_overlap_iou_far=self.cfg.adaptive_overlap_iou_far,
-            adaptive_overlap_iou_default=self.cfg.adaptive_overlap_iou_default,
+            active_overlap_threshold=active_overlap_threshold,
         )
         return trk
+
+    def _prepare_overlap_update_meta(self, trk: Track, det: Detection) -> float:
+        max_overlap_iou = float(det.meta.get("max_overlap_iou", 0.0))
+        center_dist_norm = float(det.meta.get("min_center_dist_norm", float("inf")))
+
+        if trk.confirmed:
+            adaptive_overlap_enabled = True
+            adaptive_overlap_reason = "confirmed_adaptive"
+        elif trk.sub_confirmed:
+            adaptive_overlap_enabled = True
+            adaptive_overlap_reason = "sub_confirmed_adaptive"
+        else:
+            adaptive_overlap_enabled = False
+            adaptive_overlap_reason = "pending_default_only"
+
+        if adaptive_overlap_enabled and center_dist_norm <= self.cfg.adaptive_overlap_center_near:
+            active_overlap_threshold = self.cfg.adaptive_overlap_iou_near
+            adaptive_overlap_zone = "near"
+        elif adaptive_overlap_enabled and center_dist_norm <= self.cfg.adaptive_overlap_center_mid:
+            active_overlap_threshold = self.cfg.adaptive_overlap_iou_mid
+            adaptive_overlap_zone = "mid"
+        elif adaptive_overlap_enabled and center_dist_norm <= self.cfg.adaptive_overlap_center_far:
+            active_overlap_threshold = self.cfg.adaptive_overlap_iou_far
+            adaptive_overlap_zone = "far"
+        else:
+            active_overlap_threshold = self.cfg.adaptive_overlap_iou_default
+            adaptive_overlap_zone = "default"
+
+        det.meta["track_hits_before_update"] = int(trk.hits)
+        det.meta["track_sub_confirmed_before_update"] = bool(trk.sub_confirmed)
+        det.meta["track_confirmed_before_update"] = bool(trk.confirmed)
+        det.meta["adaptive_overlap_enabled"] = bool(adaptive_overlap_enabled)
+        det.meta["adaptive_overlap_reason"] = adaptive_overlap_reason
+        det.meta["active_overlap_threshold"] = float(active_overlap_threshold)
+        det.meta["adaptive_overlap_zone"] = adaptive_overlap_zone
+        det.meta["max_overlap_iou"] = max_overlap_iou
+        det.meta["max_overlap_det_idx"] = det.meta.get("max_overlap_det_idx")
+        det.meta["min_center_dist_norm"] = center_dist_norm
+        det.meta["center_dist_norm_det_idx"] = det.meta.get("center_dist_norm_det_idx")
+        return float(active_overlap_threshold)
+
+    def _used_config_debug(self) -> Dict[str, Any]:
+        cfg = self.cfg
+        used = {
+            "tracking.min_hits": int(cfg.min_hits),
+            "tracking.min_hits_sub": int(cfg.min_hits_sub),
+            "tracking.max_age": int(cfg.max_age),
+            "tracking.max_confirmed_age": int(cfg.max_confirmed_age),
+            "tracking.adaptive_overlap_center_near": float(cfg.adaptive_overlap_center_near),
+            "tracking.adaptive_overlap_center_mid": float(cfg.adaptive_overlap_center_mid),
+            "tracking.adaptive_overlap_center_far": float(cfg.adaptive_overlap_center_far),
+            "tracking.adaptive_overlap_iou_near": float(cfg.adaptive_overlap_iou_near),
+            "tracking.adaptive_overlap_iou_mid": float(cfg.adaptive_overlap_iou_mid),
+            "tracking.adaptive_overlap_iou_far": float(cfg.adaptive_overlap_iou_far),
+            "tracking.adaptive_overlap_iou_default": float(cfg.adaptive_overlap_iou_default),
+            "tracking.overlap_app_freeze_after": int(cfg.overlap_app_freeze_after),
+        }
+        for name, value in vars(cfg.match).items():
+            used[f"match.{name}"] = value
+        birth_cfg = getattr(self.birth_manager, "cfg", None)
+        if birth_cfg is not None:
+            for name, value in vars(birth_cfg).items():
+                used[f"birth.{name}"] = value
+        return used
 
     def _remove_dead(self):
         self.tracks = [t for t in self.tracks if not t.is_dead(self.cfg.max_age, self.cfg.max_confirmed_age)]
@@ -655,25 +715,26 @@ class MultiObjectTracker:
             det.meta["track_update_skip_reason"] = ",".join(disabled_reasons) if disabled_reasons else None
             det.meta["track_update_disabled_reasons"] = disabled_reasons
 
+            active_overlap_threshold = self._prepare_overlap_update_meta(trk, det)
             trk.update(
                 det,
                 ema_alpha=self.cfg.match.emb_ema_alpha,
                 update_motion=update_motion,
                 update_pose=update_pose,
                 update_app=update_app,
-                adaptive_overlap_center_near=self.cfg.adaptive_overlap_center_near,
-                adaptive_overlap_center_mid=self.cfg.adaptive_overlap_center_mid,
-                adaptive_overlap_center_far=self.cfg.adaptive_overlap_center_far,
-                adaptive_overlap_iou_near=self.cfg.adaptive_overlap_iou_near,
-                adaptive_overlap_iou_mid=self.cfg.adaptive_overlap_iou_mid,
-                adaptive_overlap_iou_far=self.cfg.adaptive_overlap_iou_far,
-                adaptive_overlap_iou_default=self.cfg.adaptive_overlap_iou_default,
+                active_overlap_threshold=active_overlap_threshold,
             )
 
             rec = {
                 "track_idx": i,
                 "track_id": int(trk.track_id),
                 "det_idx": j,
+                "hits_before_update": det.meta.get("track_hits_before_update"),
+                "hits_after_update": int(trk.hits),
+                "sub_confirmed_before_update": det.meta.get("track_sub_confirmed_before_update"),
+                "sub_confirmed_after_update": bool(trk.sub_confirmed),
+                "confirmed_before_update": det.meta.get("track_confirmed_before_update"),
+                "confirmed_after_update": bool(trk.confirmed),
                 "d_motion": d_motion,
                 "d_pose": d_pose,
                 "d_app": d_app,
@@ -693,16 +754,20 @@ class MultiObjectTracker:
                 "track_update_skip_reason": det.meta.get("track_update_skip_reason"),
                 "track_app_update_allowed": bool(det.meta.get("track_app_update_allowed", False)),
                 "track_app_update_block_reason": det.meta.get("track_app_update_block_reason"),
+                "max_overlap_iou": det.meta.get("max_overlap_iou"),
+                "max_overlap_det_idx": det.meta.get("max_overlap_det_idx"),
                 "min_center_dist_norm": det.meta.get("min_center_dist_norm"),
                 "center_dist_norm_det_idx": det.meta.get("center_dist_norm_det_idx"),
                 "active_overlap_threshold": det.meta.get("active_overlap_threshold"),
                 "adaptive_overlap_zone": det.meta.get("adaptive_overlap_zone"),
                 "adaptive_overlap_enabled": det.meta.get("adaptive_overlap_enabled"),
+                "adaptive_overlap_reason": det.meta.get("adaptive_overlap_reason"),
             }
             track_update_debug.append(rec)
             if rec["track_update_skipped"]:
                 skipped_updates.append(rec)
 
+        log.meta["used_config"] = self._used_config_debug()
         log.meta["track_update_debug"] = track_update_debug
         track_update_lines = format_track_update_debug_lines(track_update_debug)
         if track_update_lines and hasattr(log, "buffer") and isinstance(log.buffer, list):
@@ -799,9 +864,10 @@ class MultiObjectTracker:
         active_tracks_summary = [
             {
                 "track_id": t.track_id,
+                "sub_confirmed": t.sub_confirmed,
+                "hits": t.hits,
                 "confirmed": t.confirmed,
                 "age": t.age,
-                "hits": t.hits,
                 "time_since_update": t.time_since_update,
                 "state": t.state.tolist(),
                 "pos": t.pos(),

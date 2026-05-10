@@ -121,6 +121,7 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
     max_age = int(_get(cfg, "tracking.tracker.max_age", 10))
     max_confirmed_age = int(_get(cfg, "tracking.tracker.max_confirmed_age", 40))
     min_hits = int(_get(cfg, "tracking.tracker.min_hits", 3))
+    min_hits_sub = int(_get(cfg, "tracking.tracker.min_hits_sub", max(1, min_hits - 1)))
     min_kp_conf = float(_get(cfg, "tracking.tracker.min_kp_conf", 0.05))
     reset_g_threshold = float(_get(cfg, "tracking.tracker.reset_g_threshold", 0.7))
 
@@ -132,6 +133,7 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
         max_age=max_age,
         max_confirmed_age=max_confirmed_age,
         min_hits=min_hits,
+        min_hits_sub=min_hits_sub,
         match=match_cfg,
         min_kp_conf=min_kp_conf,
         reset_g_threshold=reset_g_threshold,

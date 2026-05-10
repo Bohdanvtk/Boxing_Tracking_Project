@@ -6,20 +6,20 @@ tracking:
     # If detection IoU with another detection >= this value,
     # it is marked as overlapping in logs/meta
 
-  adaptive_overlap_center_near: 0.55
+  adaptive_overlap_center_near: 0.8
     # Very close detection centers relative to bbox pair scale.
-  adaptive_overlap_center_mid: 0.85
+  adaptive_overlap_center_mid: 1.3
     # Medium-close detection centers relative to bbox pair scale.
-  adaptive_overlap_center_far: 1.20
+  adaptive_overlap_center_far: 1.8
     # Far-but-still-relevant detection centers relative to bbox pair scale.
 
-  adaptive_overlap_iou_near: 0.03
+  adaptive_overlap_iou_near: 0.0000
     # IoU threshold when centers are very close.
-  adaptive_overlap_iou_mid: 0.06
+  adaptive_overlap_iou_mid: 0.0001
     # IoU threshold when centers are medium-close.
   adaptive_overlap_iou_far: 0.08
     # IoU threshold when centers are far-but-still-relevant.
-  adaptive_overlap_iou_default: 0.12
+  adaptive_overlap_iou_default: 0.09
     # IoU threshold when centers are farther than adaptive_overlap_center_far.
 
   overlap_app_freeze_after: 5
@@ -44,7 +44,7 @@ tracking:
     max_update_cost: 1.2      # Max absolute raw weighted cost allowed for Track update
     max_update_motion: 0.08  # If d_motion is above this, skip Kalman/motion update
     max_update_pose: 0.30    # If d_pose is above this, skip pose memory update
-    max_update_app: 0.12     # If d_app is above this, skip appearance EMA update
+    max_update_app: 0.002     # If d_app is above this, skip appearance EMA update
 
     motion_threshold: 0.09    # Max allowed normalized motion distance
                               # Above this -> reject pair
@@ -100,6 +100,7 @@ tracking:
     max_age: 20                # Max missed frames for unconfirmed track
     max_confirmed_age: 75     # Max missed frames for confirmed track
     min_hits: 20              # Matches needed to confirm a track
+    min_hits_sub: 4          # Matches needed for sub-confirmed adaptive overlap
     min_kp_conf: 0.009         # Minimum keypoint confidence for track update
     reset_g_threshold: 0.32   # If g < threshold -> activate reset mode
 

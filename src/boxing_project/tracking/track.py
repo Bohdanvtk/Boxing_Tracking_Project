@@ -136,6 +136,7 @@ class Track:
     track_id: int
     kf: KalmanTracker
     min_hits: int
+    min_hits_sub: int = 1
     epoch_id: int = 1
 
     age: int = 0
@@ -143,6 +144,7 @@ class Track:
     hits: int = 0
     time_since_update: int = 0
     confirmed: bool = False
+    sub_confirmed: bool = False
 
     last_keypoints: Optional[np.ndarray] = None
     last_kp_conf: Optional[np.ndarray] = None
@@ -188,40 +190,13 @@ class Track:
             update_motion: bool = True,
             update_pose: bool = True,
             update_app: bool = True,
-            adaptive_overlap_center_near: float = 0.55,
-            adaptive_overlap_center_mid: float = 0.85,
-            adaptive_overlap_center_far: float = 1.20,
-            adaptive_overlap_iou_near: float = 0.03,
-            adaptive_overlap_iou_mid: float = 0.06,
-            adaptive_overlap_iou_far: float = 0.08,
-            adaptive_overlap_iou_default: float = 0.12,
+            active_overlap_threshold: float = 0.12,
     ):
-        # Adaptive overlap can skip contaminated motion/pose/app updates.
+        # Tracker selects the active overlap threshold; Track only applies blocking.
         max_overlap_iou = float(det.meta.get("max_overlap_iou", 0.0))
-        center_dist_norm = float(det.meta.get("min_center_dist_norm", float("inf")))
-
-        if center_dist_norm <= adaptive_overlap_center_near:
-            active_overlap_threshold = adaptive_overlap_iou_near
-            adaptive_overlap_zone = "near"
-
-        elif center_dist_norm <= adaptive_overlap_center_mid:
-            active_overlap_threshold = adaptive_overlap_iou_mid
-            adaptive_overlap_zone = "mid"
-
-        elif center_dist_norm <= adaptive_overlap_center_far:
-            active_overlap_threshold = adaptive_overlap_iou_far
-            adaptive_overlap_zone = "far"
-
-        else:
-            active_overlap_threshold = adaptive_overlap_iou_default
-            adaptive_overlap_zone = "default"
-        # Disabled adaptive overlap means no overlap-based update blocking.
-        current_overlap = max_overlap_iou > float(active_overlap_threshold)
-
-        det.meta["adaptive_overlap_zone"] = adaptive_overlap_zone
-        det.meta["active_overlap_threshold"] = float(active_overlap_threshold)
-        det.meta["min_center_dist_norm"] = center_dist_norm
-        det.meta["center_dist_norm_det_idx"] = det.meta.get("center_dist_norm_det_idx")
+        active_overlap_threshold = float(active_overlap_threshold)
+        current_overlap = max_overlap_iou > active_overlap_threshold
+        det.meta["active_overlap_threshold"] = active_overlap_threshold
 
         if current_overlap:
             update_motion = False
@@ -249,6 +224,8 @@ class Track:
             state, cov = self.kf.update(np.asarray(det.center, dtype=float))
             self.time_since_update = 0
             self.hits += 1
+            if not self.sub_confirmed and self.hits >= self.min_hits_sub:
+                self.sub_confirmed = True
             if not self.confirmed and self.hits >= self.min_hits:
                 self.confirmed = True
             self.last_det_center = det.center
