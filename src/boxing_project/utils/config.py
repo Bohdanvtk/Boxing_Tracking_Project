@@ -169,6 +169,7 @@ def load_birth_config(path: str) -> BirthConfig:
         pending_motion_threshold=float(b.get("pending_motion_threshold", 0.20)),
         normal_confirm_hits=int(b.get("normal_confirm_hits", 2)),
         near_confirm_hits=int(b.get("near_confirm_hits", 4)),
+        very_close_confirm_hits=int(b.get("very_close_confirm_hits", 999)),
         emb_ema_alpha=float(b.get("emb_ema_alpha", 0.9)),
         min_kp_conf=float(b.get("min_kp_conf", 0.05)),
         min_core_kps=int(b.get("min_core_kps", 3)),
@@ -179,4 +180,3 @@ def load_birth_config(path: str) -> BirthConfig:
         app_bad_threshold=float(b.get("app_bad_threshold", 0.35)),
         near_existing_penalty=float(b.get("near_existing_penalty", 0.03)),
     )
-

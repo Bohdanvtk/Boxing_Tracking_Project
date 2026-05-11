@@ -30,6 +30,11 @@ birth_manager:
   # Required matched hits for near-existing pending candidate to confirm birth.
   near_confirm_hits: 4
 
+  # Required matched hits for a very-close pending candidate.
+  # By default this is very high, so very-close detections stay effectively blocked.
+  # so this mainly removes the hardcoded 999 into config without changing behavior.
+  very_close_confirm_hits: 6
+
   # EMA alpha used to update pending candidate appearance embedding when e_app exists.
   emb_ema_alpha: 0.90
 
