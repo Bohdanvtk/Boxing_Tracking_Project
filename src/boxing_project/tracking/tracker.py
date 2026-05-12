@@ -47,6 +47,11 @@ class TrackerConfig:
     adaptive_overlap_iou_far: float = 0.08
     adaptive_overlap_iou_default: float = 0.12
     overlap_app_freeze_after: int = 5
+    w_body: float = 1.0
+    w_left_glove: float = 0.5
+    w_right_glove: float = 0.5
+    w_shorts: float = 0.75
+
 
 def openpose_people_to_detections(
     people: List[Dict[str, Any]],
@@ -178,6 +183,21 @@ class MultiObjectTracker:
       It reads det.meta["overlap_relations"] and converts detection indices
       into track ids using current frame matches.
 
+    Adaptive overlap rule:
+      adaptive_overlap_enabled = True only when:
+        1. current track is sub_confirmed or confirmed
+        AND
+        2. the current detection overlaps with at least one other detection
+           that is matched to a sub_confirmed or confirmed track.
+
+      Otherwise adaptive_overlap_iou_default is used.
+
+      Examples:
+        confirmed track + confirmed/sub_confirmed overlap -> adaptive
+        confirmed track + pending/unmatched overlap -> default
+        pending track + confirmed/sub_confirmed overlap -> default
+        pending track + pending/unmatched overlap -> default
+
     prev_matches:
       Previous-frame matches:
           track_id -> det_idx
@@ -238,21 +258,23 @@ class MultiObjectTracker:
       2. Predict all existing tracks.
       3. Match tracks to detections.
       4. Build current_matches: track_id -> det_idx.
-      5. which_defroze(): clear freeze sources for source tracks that returned.
-      6. compare_matches(): find track ids that disappeared since prev_matches.
-      7. freeze_track_near_unmatched(): start cooldown for tracks near disappeared sources.
-      8. Update matched tracks.
-      9. Spawn new tracks for unmatched detections.
-      10. dets_to_track(): convert current detection-overlap groups into track-id groups.
-      11. Write overlap_group_ids into Track objects for the next frame.
-      12. decrease_freeze(): decrement active cooldown counters.
-      13. Save prev_matches for the next frame.
-      14. Remove dead tracks.
+      5. Build det_idx_to_track: det_idx -> Track.
+      6. which_defroze(): clear freeze sources for source tracks that returned.
+      7. compare_matches(): find track ids that disappeared since prev_matches.
+      8. freeze_track_near_unmatched(): start cooldown for tracks near disappeared sources.
+      9. Update matched tracks.
+      10. Spawn new tracks for unmatched detections.
+      11. dets_to_track(): convert current detection-overlap groups into track-id groups.
+      12. Write overlap_group_ids into Track objects for the next frame.
+      13. decrease_freeze(): decrement active cooldown counters.
+      14. Save prev_matches for the next frame.
+      15. Remove dead tracks.
 
     Core idea:
       Motion/pose tracking should continue through overlap and occlusion.
       Appearance identity memory should be protected from contaminated crops.
     """
+
     def __init__(
         self,
         cfg: Optional[TrackerConfig] = None,
@@ -287,8 +309,11 @@ class MultiObjectTracker:
 
         raw = self.get_config_dict() or {}
         self.debug: bool = bool(raw.get("tracking", {}).get("debug", False))
+
         from boxing_project.utils.config import load_birth_config
+
         birth_cfg = load_birth_config(str(DEFAULT_BIRTH_CONFIG_PATH))
+
         if birth_cfg.chi2_gating <= 0:
             birth_cfg.chi2_gating = float(self.cfg.match.chi2_gating)
         if birth_cfg.emb_ema_alpha <= 0:
@@ -297,6 +322,7 @@ class MultiObjectTracker:
             birth_cfg.min_kp_conf = float(self.cfg.match.min_kp_conf)
         if birth_cfg.min_core_kps <= 0:
             birth_cfg.min_core_kps = int(self.cfg.match.min_core_kps)
+
         self.birth_manager = BirthManager(
             cfg=birth_cfg,
             dt=float(self.cfg.dt),
@@ -310,6 +336,65 @@ class MultiObjectTracker:
         if self._raw_config is None:
             return None
         return copy.deepcopy(self._raw_config)
+
+    def _build_det_idx_to_track(
+        self,
+        matches_idx: List[Tuple[int, int]],
+    ) -> Dict[int, Track]:
+        """
+        Build reverse mapping for current-frame matches.
+
+        matches_idx contains:
+            (track_row_idx, det_idx)
+
+        This returns:
+            det_idx -> Track object
+
+        This is needed because overlap metadata stores detection indices,
+        but adaptive overlap logic needs to know which Track owns each detection.
+        """
+        return {
+            int(j_det): self.tracks[int(i_track)]
+            for i_track, j_det in matches_idx
+        }
+
+    def _has_stable_overlap_counterpart(
+        self,
+        det: Detection,
+        det_idx_to_track: Optional[Dict[int, Track]] = None,
+    ) -> bool:
+        """
+        Return True if this detection overlaps with at least one other detection
+        that is matched to a stable track.
+
+        Stable track means:
+            track.sub_confirmed or track.confirmed
+
+        Important:
+            - unmatched detections do not count
+            - BirthManager pending candidates do not count
+            - pending/not-sub-confirmed tracks do not count
+        """
+        if det_idx_to_track is None:
+            return False
+
+        overlap_relations = det.meta.get("overlap_relations", []) or []
+
+        for rel in overlap_relations:
+            other_det_idx = rel.get("det_idx", None)
+
+            if other_det_idx is None:
+                continue
+
+            other_track = det_idx_to_track.get(int(other_det_idx))
+
+            if other_track is None:
+                continue
+
+            if bool(other_track.sub_confirmed or other_track.confirmed):
+                return True
+
+        return False
 
     def _new_track(self, det: Detection) -> Track:
         kf = KalmanTracker(
@@ -333,13 +418,15 @@ class MultiObjectTracker:
         self._epoch_tracks.setdefault(self._epoch_id, {})[trk.track_id] = trk
 
         ignore_overlap_on_birth = (
-                det.meta.get("birth_mode") == "easy_start"
-                and bool(det.meta.get("ignore_overlap_on_birth", False))
+            det.meta.get("birth_mode") == "easy_start"
+            and bool(det.meta.get("ignore_overlap_on_birth", False))
         )
 
         det.meta["ignore_overlap_on_birth"] = bool(ignore_overlap_on_birth)
         det.meta["birth_base_kps_bypass"] = bool(ignore_overlap_on_birth)
 
+        # New tracks do not have current-frame match context here.
+        # Therefore adaptive overlap normally falls back to default.
         active_overlap_threshold = self._prepare_overlap_update_meta(trk, det)
 
         trk.update(
@@ -352,19 +439,53 @@ class MultiObjectTracker:
 
         return trk
 
-    def _prepare_overlap_update_meta(self, trk: Track, det: Detection) -> float:
+    def _prepare_overlap_update_meta(
+        self,
+        trk: Track,
+        det: Detection,
+        det_idx_to_track: Optional[Dict[int, Track]] = None,
+    ) -> float:
+        """
+        Decide which overlap threshold should be used for Track.update().
+
+        This function does not recompute IoU.
+        It only reads overlap metadata already attached to det.meta.
+
+        Rule:
+            adaptive_overlap_enabled = True only if:
+                current track is stable
+                AND
+                this detection overlaps with at least one detection
+                assigned to a stable track.
+
+        Stable track:
+            sub_confirmed or confirmed
+
+        If the condition is not satisfied:
+            use adaptive_overlap_iou_default.
+        """
         max_overlap_iou = float(det.meta.get("max_overlap_iou", 0.0))
         center_dist_norm = float(det.meta.get("min_center_dist_norm", float("inf")))
 
-        if trk.confirmed:
-            adaptive_overlap_enabled = True
-            adaptive_overlap_reason = "confirmed_adaptive"
-        elif trk.sub_confirmed:
-            adaptive_overlap_enabled = True
-            adaptive_overlap_reason = "sub_confirmed_adaptive"
+        current_track_stable = bool(trk.sub_confirmed or trk.confirmed)
+
+        overlap_has_stable_track = self._has_stable_overlap_counterpart(
+            det=det,
+            det_idx_to_track=det_idx_to_track,
+        )
+
+        adaptive_overlap_enabled = bool(
+            current_track_stable and overlap_has_stable_track
+        )
+
+        if not current_track_stable:
+            adaptive_overlap_reason = "current_track_pending_default_only"
+        elif not overlap_has_stable_track:
+            adaptive_overlap_reason = "no_stable_overlap_counterpart_default_only"
+        elif trk.confirmed:
+            adaptive_overlap_reason = "confirmed_with_stable_overlap_adaptive"
         else:
-            adaptive_overlap_enabled = False
-            adaptive_overlap_reason = "pending_default_only"
+            adaptive_overlap_reason = "sub_confirmed_with_stable_overlap_adaptive"
 
         if adaptive_overlap_enabled and center_dist_norm <= self.cfg.adaptive_overlap_center_near:
             active_overlap_threshold = self.cfg.adaptive_overlap_iou_near
@@ -382,14 +503,20 @@ class MultiObjectTracker:
         det.meta["track_hits_before_update"] = int(trk.hits)
         det.meta["track_sub_confirmed_before_update"] = bool(trk.sub_confirmed)
         det.meta["track_confirmed_before_update"] = bool(trk.confirmed)
+
         det.meta["adaptive_overlap_enabled"] = bool(adaptive_overlap_enabled)
         det.meta["adaptive_overlap_reason"] = adaptive_overlap_reason
+        det.meta["current_track_stable_for_overlap"] = bool(current_track_stable)
+        det.meta["overlap_has_stable_track"] = bool(overlap_has_stable_track)
+
         det.meta["active_overlap_threshold"] = float(active_overlap_threshold)
         det.meta["adaptive_overlap_zone"] = adaptive_overlap_zone
+
         det.meta["max_overlap_iou"] = max_overlap_iou
         det.meta["max_overlap_det_idx"] = det.meta.get("max_overlap_det_idx")
         det.meta["min_center_dist_norm"] = center_dist_norm
         det.meta["center_dist_norm_det_idx"] = det.meta.get("center_dist_norm_det_idx")
+
         return float(active_overlap_threshold)
 
     def _used_config_debug(self) -> Dict[str, Any]:
@@ -408,56 +535,59 @@ class MultiObjectTracker:
             "tracking.adaptive_overlap_iou_default": float(cfg.adaptive_overlap_iou_default),
             "tracking.overlap_app_freeze_after": int(cfg.overlap_app_freeze_after),
         }
+
         for name, value in vars(cfg.match).items():
             used[f"match.{name}"] = value
+
         birth_cfg = getattr(self.birth_manager, "cfg", None)
+
         if birth_cfg is not None:
             for name, value in vars(birth_cfg).items():
                 used[f"birth.{name}"] = value
+
         return used
 
     def _remove_dead(self):
-        self.tracks = [t for t in self.tracks if not t.is_dead(self.cfg.max_age, self.cfg.max_confirmed_age)]
+        self.tracks = [
+            t for t in self.tracks
+            if not t.is_dead(self.cfg.max_age, self.cfg.max_confirmed_age)
+        ]
 
-    def _has_base_keypoints(self, det: Detection, min_core_kps: Optional[int] = None) -> bool:
+    def _has_base_keypoints(
+        self,
+        det: Detection,
+        min_core_kps: Optional[int] = None,
+    ) -> bool:
         """
-        Check whether a detection contains enough valid keypoints from the configured core set.
+        Check whether a detection contains enough valid keypoints
+        from the configured core set.
 
-        Modes:
-          - Strict (min_core_kps is None): require ALL core keypoints to be valid.
-          - Relaxed (min_core_kps is int): require at least `min_core_kps` valid core keypoints.
+        Strict mode:
+            min_core_kps is None -> require all configured core keypoints.
 
-        A keypoint is considered valid if its (x, y) coordinates are finite.
-
-        Returns:
-            True  -> requirement satisfied
-            False -> not satisfied
+        Relaxed mode:
+            min_core_kps is int -> require at least this many valid core keypoints.
         """
-
         core = self.cfg.match.pose_core
+
         if not core:
-            # No core configured => accept by default
             return True
 
         if det.keypoints is None:
-            # No keypoints => cannot satisfy core requirement
             return False
 
         kps = np.asarray(det.keypoints, dtype=float)
+
         if kps.ndim != 2 or kps.shape[1] < 2:
-            # Expect shape (K, >=2)
             return False
 
-        # Keep only core indices that exist in this detection's keypoint array
         core = np.asarray(core, dtype=int).ravel()
         core = core[(0 <= core) & (core < kps.shape[0])]
+
         if core.size == 0:
             return False
 
-        # Count valid core keypoints (finite x,y)
         valid_count = int(np.isfinite(kps[core, :2]).all(axis=1).sum())
-
-        # Default behavior: strict mode (require all core keypoints)
         required = int(core.size) if min_core_kps is None else int(min_core_kps)
 
         return valid_count >= required
@@ -467,8 +597,7 @@ class MultiObjectTracker:
         prev_match: Dict[int, int],
         current_match: Dict[int, int],
     ) -> set[int]:
-        # Return track_ids that were matched on the previous frame
-        # but are not matched on the current frame.
+        # Tracks matched in the previous frame but not matched now.
         return set(prev_match.keys()) - set(current_match.keys())
 
     def dets_to_track(
@@ -476,12 +605,14 @@ class MultiObjectTracker:
         matches: Dict[int, int],
         detections: List[Detection],
     ) -> Dict[int, set[int]]:
-        # Convert detection overlap groups into track_id overlap groups.
-        #
-        # det.meta["overlap_relations"] stores det_idx.
-        # For cooldown logic we need track_id.
-        #
-        # If an overlapped detection is not matched to any track, it is skipped.
+        """
+        Convert detection overlap groups into track-id overlap groups.
+
+        det.meta["overlap_relations"] stores det_idx.
+        For cooldown logic we need track_id.
+
+        If an overlapped detection is not matched to any track, it is skipped.
+        """
         det_to_track = {
             int(det_idx): int(track_id)
             for track_id, det_idx in matches.items()
@@ -551,10 +682,12 @@ class MultiObjectTracker:
         absent_ids: set[int],
         tracks: List[Track],
     ) -> set[int]:
-        # If source track M disappeared and another track had M in overlap_group_ids,
-        # freeze that other track with source M.
-        #
-        # Also freeze M itself if it still exists.
+        """
+        If source track M disappeared and another track had M in overlap_group_ids,
+        freeze that other track with source M.
+
+        Also freeze M itself if it still exists.
+        """
         tracks_by_id = {
             int(track.track_id): track
             for track in tracks
@@ -590,11 +723,12 @@ class MultiObjectTracker:
         matched_track_ids: set[int],
         tracks: List[Track],
     ) -> None:
-        # If source track M matched again, clear source M from every track.
-        #
-        # Important:
-        # Track N matching does not clear freeze caused by M.
-        # Only M matching clears freeze source M.
+        """
+        If source track M matched again, clear source M from every track.
+
+        Track N matching does not clear freeze caused by M.
+        Only M matching clears freeze source M.
+        """
         for source_track_id in {int(x) for x in matched_track_ids}:
             for track in tracks:
                 track.clear_freeze_source(source_track_id)
@@ -611,22 +745,35 @@ class MultiObjectTracker:
         for track in tracks:
             track.decrease_freeze(exclude_sources=exclude_sources)
 
-    def update(self, detections: List[Detection], reset_mode: bool, g: float = 1.0) -> Dict[str, Any]:
+    def update(
+        self,
+        detections: List[Detection],
+        reset_mode: bool,
+        g: float = 1.0,
+    ) -> Dict[str, Any]:
         self._frame_idx += 1
-        # Hard reset only on reset edge (False -> True).
+
+        # Hard reset only on reset edge.
         # This avoids clearing tracks on every frame while reset_mode stays True.
         if reset_mode and not self._was_reset_mode:
             self.reset()
 
-        # 1) Predict step
+        # 1. Predict all active tracks.
         for trk in self.tracks:
             trk.predict()
 
-        # snapshot: row index -> track_id
-        idx2tid = {i: t.track_id for i, t in enumerate(self.tracks)}
-        row_track_ids = [idx2tid[i] for i in range(len(self.tracks))]
+        # Snapshot: row index -> track_id.
+        idx2tid = {
+            i: t.track_id
+            for i, t in enumerate(self.tracks)
+        }
 
-        # 2) Match
+        row_track_ids = [
+            idx2tid[i]
+            for i in range(len(self.tracks))
+        ]
+
+        # 2. Match tracks to detections.
         # Freeze/cooldown does NOT affect matching.
         matches_idx, um_tr_idx, um_det_idx, C, log = match_tracks_and_detections(
             tracks=self.tracks,
@@ -637,32 +784,37 @@ class MultiObjectTracker:
             reset_mode=reset_mode,
         )
 
+        # track_id -> det_idx
         current_matches: Dict[int, int] = {
             int(self.tracks[i_track].track_id): int(j_det)
             for i_track, j_det in matches_idx
         }
 
+        # det_idx -> Track
+        # Needed by adaptive overlap logic.
+        det_idx_to_track = self._build_det_idx_to_track(matches_idx)
+
         matched_track_ids = set(current_matches.keys())
 
-        # 3) If a frozen source returned, defreeze that source globally.
+        # 3. If a frozen source returned, defreeze that source globally.
         self.which_defroze(
             matched_track_ids=matched_track_ids,
             tracks=self.tracks,
         )
 
-        # 4) Detect tracks that disappeared compared to previous frame.
+        # 4. Detect tracks that disappeared compared to previous frame.
         absent_ids = self.compare_matches(
             prev_match=self.prev_matches,
             current_match=current_matches,
         )
 
-        # 5) Freeze tracks that were near disappeared tracks on previous frame.
+        # 5. Freeze tracks that were near disappeared tracks on previous frame.
         freshly_frozen_sources = self.freeze_track_near_unmatched(
             absent_ids=absent_ids,
             tracks=self.tracks,
         )
 
-        # 6) Update matched existing tracks.
+        # 6. Update matched existing tracks.
         id_pairs: List[Tuple[int, int]] = []
         skipped_updates: List[Dict[str, Any]] = []
 
@@ -670,6 +822,7 @@ class MultiObjectTracker:
         max_update_motion = float(self.cfg.match.max_update_motion)
         max_update_pose = float(self.cfg.match.max_update_pose)
         max_update_app = float(self.cfg.match.max_update_app)
+
         track_update_debug: List[Dict[str, Any]] = []
 
         # C is row-relative matcher cost.
@@ -680,10 +833,10 @@ class MultiObjectTracker:
         update_cost_matrix = log.meta.get("update_cost_matrix", None)
 
         if (
-                motion_matrix is None
-                or pose_matrix is None
-                or app_matrix is None
-                or update_cost_matrix is None
+            motion_matrix is None
+            or pose_matrix is None
+            or app_matrix is None
+            or update_cost_matrix is None
         ):
             raise RuntimeError(
                 "Missing motion_matrix / pose_matrix / app_matrix / update_cost_matrix in log.meta. "
@@ -702,7 +855,6 @@ class MultiObjectTracker:
             d_app = float(app_matrix[i, j])
 
             # Standard matcher cost: row-relative cost.
-            # This can be 0 even for non-perfect match.
             row_cost = float(C[i, j])
 
             # Absolute weighted raw cost.
@@ -724,7 +876,9 @@ class MultiObjectTracker:
             update_motion = d_motion <= max_update_motion
             update_pose = d_pose <= max_update_pose
             update_app = d_app <= max_update_app
+
             disabled_reasons = []
+
             if not update_motion:
                 disabled_reasons.append("motion_update_disabled")
             if not update_pose:
@@ -732,10 +886,21 @@ class MultiObjectTracker:
             if not update_app:
                 disabled_reasons.append("app_update_disabled")
 
-            det.meta["track_update_skip_reason"] = ",".join(disabled_reasons) if disabled_reasons else None
+            det.meta["track_update_skip_reason"] = (
+                ",".join(disabled_reasons)
+                if disabled_reasons
+                else None
+            )
             det.meta["track_update_disabled_reasons"] = disabled_reasons
 
-            active_overlap_threshold = self._prepare_overlap_update_meta(trk, det)
+            # Adaptive overlap now requires:
+            # current track stable AND at least one stable overlapping counterpart.
+            active_overlap_threshold = self._prepare_overlap_update_meta(
+                trk=trk,
+                det=det,
+                det_idx_to_track=det_idx_to_track,
+            )
+
             trk.update(
                 det,
                 ema_alpha=self.cfg.match.emb_ema_alpha,
@@ -783,18 +948,24 @@ class MultiObjectTracker:
                 "adaptive_overlap_zone": det.meta.get("adaptive_overlap_zone"),
                 "adaptive_overlap_enabled": det.meta.get("adaptive_overlap_enabled"),
                 "adaptive_overlap_reason": det.meta.get("adaptive_overlap_reason"),
+                "current_track_stable_for_overlap": det.meta.get("current_track_stable_for_overlap"),
+                "overlap_has_stable_track": det.meta.get("overlap_has_stable_track"),
             }
+
             track_update_debug.append(rec)
+
             if rec["track_update_skipped"]:
                 skipped_updates.append(rec)
 
         log.meta["used_config"] = self._used_config_debug()
         log.meta["track_update_debug"] = track_update_debug
+
         track_update_lines = format_track_update_debug_lines(track_update_debug)
+
         if track_update_lines and hasattr(log, "buffer") and isinstance(log.buffer, list):
             log.buffer.extend(["", *track_update_lines])
 
-        # 7) Birth manager: unmatched detections become pending candidates first.
+        # 7. Birth manager: unmatched detections become pending candidates first.
         birth_result = self.birth_manager.update(
             unmatched_det_indices=um_det_idx,
             detections=detections,
@@ -802,31 +973,34 @@ class MultiObjectTracker:
             frame_idx=self._frame_idx,
             g=g,
         )
+
         log.meta["birth_debug"] = birth_result.debug_info
         append_birth_debug(birth_result.debug_info)
+
         if hasattr(log, "buffer") and isinstance(log.buffer, list):
             log.buffer.extend(["", *format_birth_debug_lines(birth_result.debug_info)])
 
-        # 8) Spawn new tracks only for confirmed births.
+        # 8. Spawn new tracks only for confirmed births.
         new_matches: Dict[int, int] = {}
+
         for j in birth_result.confirmed_birth_det_indices:
             trk = self._new_track(detections[j])
             self.tracks.append(trk)
             new_matches[int(trk.track_id)] = int(j)
 
-        # 9) Build all current matches, including newly spawned tracks.
+        # 9. Build all current matches, including newly spawned tracks.
         all_current_matches: Dict[int, int] = {
             **current_matches,
             **new_matches,
         }
 
-        # 10) Convert current detection overlap groups to track_id overlap groups.
+        # 10. Convert current detection-overlap groups into track-id groups.
         track_groups = self.dets_to_track(
             matches=all_current_matches,
             detections=detections,
         )
 
-        # 11) Store overlap_group_ids inside each Track for the next frame.
+        # 11. Store overlap_group_ids inside each Track for the next frame.
         tracks_by_id = {
             int(track.track_id): track
             for track in self.tracks
@@ -846,7 +1020,7 @@ class MultiObjectTracker:
             if int(track.track_id) not in track_groups:
                 track.overlap_group_ids = set()
 
-        # 12) Decrease active freeze counters.
+        # 12. Decrease active freeze counters.
         # Newly created freezes are excluded on this same frame.
         self.decrease_freeze(
             tracks=self.tracks,
@@ -864,20 +1038,24 @@ class MultiObjectTracker:
                     for source_id, frames_left in getattr(track, "freeze_sources", {}).items()
                 },
                 "overlap_group_ids": sorted(
-                    int(x) for x in getattr(track, "overlap_group_ids", set())
+                    int(x)
+                    for x in getattr(track, "overlap_group_ids", set())
                 ),
             }
             for idx, track in enumerate(self.tracks)
         ]
+
         log.meta["freeze_debug"] = freeze_debug
+
         freeze_debug_lines = format_freeze_debug_lines(freeze_debug)
+
         if freeze_debug_lines and hasattr(log, "buffer") and isinstance(log.buffer, list):
             log.buffer.extend(["", *freeze_debug_lines])
 
-        # 13) Save matches for the next frame.
+        # 13. Save matches for next frame.
         self.prev_matches = all_current_matches
 
-        # 14) Remove dead
+        # 14. Remove dead tracks.
         self._remove_dead()
 
         unmatched_track_ids = sorted(int(x) for x in absent_ids)
@@ -923,8 +1101,15 @@ class MultiObjectTracker:
 
     def get_active_tracks(self, confirmed_only: bool = True) -> List[Track]:
         if confirmed_only:
-            return [t for t in self.tracks if t.confirmed and not t.is_dead(self.cfg.max_age, self.cfg.max_confirmed_age)]
-        return [t for t in self.tracks if not t.is_dead(self.cfg.max_age, self.cfg.max_confirmed_age)]
+            return [
+                t for t in self.tracks
+                if t.confirmed and not t.is_dead(self.cfg.max_age, self.cfg.max_confirmed_age)
+            ]
+
+        return [
+            t for t in self.tracks
+            if not t.is_dead(self.cfg.max_age, self.cfg.max_confirmed_age)
+        ]
 
     def get_segment_tracks(self) -> List[Track]:
         return list(self._segment_tracks.values())
@@ -936,8 +1121,12 @@ class MultiObjectTracker:
 
         self._epoch_id += 1
         self._epoch_tracks[self._epoch_id] = {}
+
         self.prev_matches.clear()
         self.birth_manager.reset()
 
     def get_epoch_tracks(self) -> Dict[int, Dict[int, Track]]:
-        return {epoch_id: dict(tracks_by_id) for epoch_id, tracks_by_id in self._epoch_tracks.items()}
+        return {
+            epoch_id: dict(tracks_by_id)
+            for epoch_id, tracks_by_id in self._epoch_tracks.items()
+        }

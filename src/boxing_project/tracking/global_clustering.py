@@ -34,64 +34,13 @@ def _mean_l2_feature(history: list[np.ndarray]) -> np.ndarray | None:
 
 
 
-def _track_mean_embedding(
-    track: "Track",
-    *,
-    w_body: float,
-    w_left_glove: float,
-    w_right_glove: float,
-    w_shorts: float,
-) -> np.ndarray | None:
-    """Build one fused descriptor using weighted concatenation."""
-    body_feat = _mean_l2_feature(list(getattr(track, "app_emb_history", []) or []))
-    left_glove_feat = _mean_l2_feature(list(getattr(track, "left_glove_features_history", []) or []))
-    right_glove_feat = _mean_l2_feature(list(getattr(track, "right_glove_features_history", []) or []))
-    shorts_feat = _mean_l2_feature(list(getattr(track, "shorts_features_history", []) or []))
-
-    # Треба мати хоча б body, інакше трек занадто слабко описаний
-    if body_feat is None:
-        return None
-
-    parts = [w_body * body_feat]
-
-    # Якщо якоїсь частини нема — підставляємо нулі того ж розміру
-    if left_glove_feat is not None:
-        parts.append(w_left_glove * left_glove_feat)
-    else:
-        parts.append(np.zeros_like(track.left_glove_features_history[0], dtype=np.float32)
-                     if getattr(track, "left_glove_features_history", None) else np.zeros(32, dtype=np.float32))
-
-    if right_glove_feat is not None:
-        parts.append(w_right_glove * right_glove_feat)
-    else:
-        parts.append(np.zeros_like(track.right_glove_features_history[0], dtype=np.float32)
-                     if getattr(track, "right_glove_features_history", None) else np.zeros(32, dtype=np.float32))
-
-    if shorts_feat is not None:
-        parts.append(w_shorts * shorts_feat)
-    else:
-        parts.append(np.zeros_like(track.shorts_features_history[0], dtype=np.float32)
-                     if getattr(track, "shorts_features_history", None) else np.zeros(32, dtype=np.float32))
-
-    fused = np.concatenate(parts, axis=0)
-
-    if not np.all(np.isfinite(fused)):
-        return None
-
-    norm = float(np.linalg.norm(fused))
-    if norm <= 1e-8:
-        return None
-
-    return (fused / norm).astype(np.float32)
+def _track_mean_embedding(track: "Track") -> np.ndarray | None:
+    # app_emb_history already stores fused e_app descriptors, so global clustering only averages them.
+    return _mean_l2_feature(list(getattr(track, "app_emb_history", []) or []))
 
 
 def build_mean_embeddings(
     epoch_tracks: dict[int, dict[int, "Track"]],
-    *,
-    w_body: float,
-    w_left_glove: float,
-    w_right_glove: float,
-    w_shorts: float,
 ) -> tuple[list[NodeKey], np.ndarray]:
     """
     Build track-level mean embeddings.
@@ -109,13 +58,7 @@ def build_mean_embeddings(
             if not bool(getattr(track, "confirmed", False)):
                 continue
 
-            mean_emb = _track_mean_embedding(
-                track,
-                w_body=w_body,
-                w_left_glove=w_left_glove,
-                w_right_glove=w_right_glove,
-                w_shorts=w_shorts,
-            )
+            mean_emb = _track_mean_embedding(track)
             if mean_emb is None:
                 continue
             nodes.append((int(epoch_id), int(local_id)))
@@ -310,10 +253,6 @@ class GlobalTrackClusterer:
     n_clusters: int = 3
     random_state: int = 42
     assign_labels: str = "kmeans"
-    w_body: float = 1.0
-    w_left_glove: float = 0.25
-    w_right_glove: float = 0.25
-    w_shorts: float = 0.75
 
     def build_mapping(
             self,
@@ -325,13 +264,7 @@ class GlobalTrackClusterer:
         dict[str, list[NodeKey] | np.ndarray],
     ]:
         """Build ``(epoch_id, local_track_id) -> global_track_id`` mapping."""
-        nodes, embs = build_mean_embeddings(
-            epoch_tracks,
-            w_body=self.w_body,
-            w_left_glove=self.w_left_glove,
-            w_right_glove=self.w_right_glove,
-            w_shorts=self.w_shorts,
-        )
+        nodes, embs = build_mean_embeddings(epoch_tracks)
         n_nodes = len(nodes)
 
         if n_nodes == 0:

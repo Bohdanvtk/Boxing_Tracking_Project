@@ -44,13 +44,13 @@ tracking:
     max_update_cost: 1.2      # Max absolute raw weighted cost allowed for Track update
     max_update_motion: 0.08  # If d_motion is above this, skip Kalman/motion update
     max_update_pose: 0.30    # If d_pose is above this, skip pose memory update
-    max_update_app: 0.01     # If d_app is above this, skip appearance EMA update
+    max_update_app: 0.029     # If d_app is above this, skip appearance EMA update
 
     motion_threshold: 0.09    # Max allowed normalized motion distance
                               # Above this -> reject pair
     pose_threshold: 0.4       # Max allowed pose distance
                               # Above this -> reject pair
-    appearance_threshold: 0.3  # Max allowed appearance distance
+    appearance_threshold: 0.2  # Max allowed appearance distance
                               # Above this -> reject pair
 
     emb_ema_alpha: 0.1       # EMA update factor for appearance embedding
@@ -103,6 +103,10 @@ tracking:
     min_hits_sub: 4          # Matches needed for sub-confirmed adaptive overlap
     min_kp_conf: 0.009         # Minimum keypoint confidence for track update
     reset_g_threshold: 0.32   # If g < threshold -> activate reset mode
+    w_body: 1.0               # Weight of body appearance features in fused e_app
+    w_left_glove: 0.25         # Weight of left glove features in fused e_app
+    w_right_glove: 0.25        # Weight of right glove features in fused e_app
+    w_shorts: 0.5           # Weight of shorts features in fused e_app
 
   graph_clustering:
     k: 9                      # Number of neighbors / graph connectivity parameter
@@ -110,7 +114,3 @@ tracking:
     n_clusters: 3             # Number of output clusters
     random_state: 42          # Random seed for reproducibility
     assign_labels: kmeans     # Label assignment strategy
-    w_body: 1.0               # Weight of body appearance features
-    w_left_glove: 0.5         # Weight of left glove features
-    w_right_glove: 0.5        # Weight of right glove features
-    w_shorts: 0.75            # Weight of shorts features

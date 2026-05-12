@@ -117,6 +117,10 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
     adaptive_overlap_iou_far = float(_get(cfg, "tracking.adaptive_overlap_iou_far", 0.08))
     adaptive_overlap_iou_default = float(_get(cfg, "tracking.adaptive_overlap_iou_default", 0.12))
     overlap_app_freeze_after = int(_get(cfg, "tracking.overlap_app_freeze_after", 5))
+    w_body = float(_get(cfg, "tracking.tracker.w_body", 1.0))
+    w_left_glove = float(_get(cfg, "tracking.tracker.w_left_glove", 0.5))
+    w_right_glove = float(_get(cfg, "tracking.tracker.w_right_glove", 0.5))
+    w_shorts = float(_get(cfg, "tracking.tracker.w_shorts", 0.75))
 
     max_age = int(_get(cfg, "tracking.tracker.max_age", 10))
     max_confirmed_age = int(_get(cfg, "tracking.tracker.max_confirmed_age", 40))
@@ -148,6 +152,10 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
         adaptive_overlap_iou_far=adaptive_overlap_iou_far,
         adaptive_overlap_iou_default=adaptive_overlap_iou_default,
         overlap_app_freeze_after=overlap_app_freeze_after,
+        w_body=w_body,
+        w_left_glove=w_left_glove,
+        w_right_glove=w_right_glove,
+        w_shorts=w_shorts,
     )
 
 def load_tracking_config(path: str):

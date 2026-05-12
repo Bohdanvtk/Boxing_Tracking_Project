@@ -151,6 +151,64 @@ def extract_features_with_hsv(image: np.ndarray) -> np.ndarray:
     # Convert to float32 (useful for ML models)
     return hist.astype(np.float32)
 
+
+
+def _l2_normalize_feature(vec):
+    if vec is None:
+        return None
+
+    arr = np.asarray(vec, dtype=np.float32).reshape(-1)
+    if arr.size == 0 or not np.all(np.isfinite(arr)):
+        return None
+
+    norm = float(np.linalg.norm(arr))
+    if norm <= 1e-8:
+        return None
+
+    return (arr / norm).astype(np.float32)
+
+
+def build_fused_appearance_embedding(
+    body_feat,
+    left_glove_feat,
+    right_glove_feat,
+    shorts_feat,
+    *,
+    w_body: float = 1.0,
+    w_left_glove: float = 0.5,
+    w_right_glove: float = 0.5,
+    w_shorts: float = 0.75,
+    part_dim: int = 32,
+) -> np.ndarray | None:
+    body = _l2_normalize_feature(body_feat)
+    if body is None:
+        return None
+
+    part_dim = max(0, int(part_dim))
+
+    def _part_or_zero(part_feat):
+        part = _l2_normalize_feature(part_feat)
+        if part is None or part.size != part_dim:
+            return np.zeros(part_dim, dtype=np.float32)
+        return part
+
+    left = _part_or_zero(left_glove_feat)
+    right = _part_or_zero(right_glove_feat)
+    shorts = _part_or_zero(shorts_feat)
+
+    fused = np.concatenate(
+        [
+            float(w_body) * body,
+            float(w_left_glove) * left,
+            float(w_right_glove) * right,
+            float(w_shorts) * shorts,
+        ],
+        axis=0,
+    ).astype(np.float32)
+
+    return _l2_normalize_feature(fused)
+
+
 def _kp_center(kp: np.ndarray, conf_th: float):
     valid = kp[:, 2] > conf_th
     if not np.any(valid):
@@ -549,7 +607,7 @@ def process_frame(
         bboxes_quality.append(bbox_quality)
 
     for i in range(n_people):
-        people[i]["bbox"] = bboxes[i]
+        people[i]["bbox"] = intersection_bboxes[i]
         people[i]["bbox_for_intersection"] = intersection_bboxes[i]
         people[i]["bbox_quality"] = bboxes_quality[i]
         people[i]["left_glove_crop"] = parts_crops[i]["left_glove"]
@@ -581,23 +639,41 @@ def process_frame(
 
         det.meta["bbox_quality"] = bbox_quality
 
-        if app_embedder is not None and bbox is not None:
-            try:
-                det.meta["e_app"] = app_embedder.embed(original_img, bbox)
-                det.meta["left_glove_features"] = extract_features_with_hsv(left_glove_crop)
-                det.meta["right_glove_features"] = extract_features_with_hsv(right_glove_crop)
-                det.meta["shorts_features"] = extract_features_with_hsv(shorts_crop)
-            except Exception as e:
-                det.meta["e_app"] = None
-                det.meta["left_glove_features"] = None
-                det.meta["right_glove_features"] = None
-                det.meta["shorts_features"] = None
-                det.meta["e_app_error"] = str(e)
-        else:
+        body_feat = None
+        left_glove_features = None
+        right_glove_features = None
+        shorts_features = None
+
+        try:
+            if app_embedder is not None and bbox is not None:
+                body_feat = app_embedder.embed(original_img, bbox)
+
+            left_glove_features = extract_features_with_hsv(left_glove_crop)
+            right_glove_features = extract_features_with_hsv(right_glove_crop)
+            shorts_features = extract_features_with_hsv(shorts_crop)
+
+            det.meta["body_features"] = body_feat
+            det.meta["left_glove_features"] = left_glove_features
+            det.meta["right_glove_features"] = right_glove_features
+            det.meta["shorts_features"] = shorts_features
+            # e_app is the final fused appearance descriptor used by local matching and global clustering.
+            det.meta["e_app"] = build_fused_appearance_embedding(
+                body_feat,
+                left_glove_features,
+                right_glove_features,
+                shorts_features,
+                w_body=getattr(tracker.cfg, "w_body", 1.0),
+                w_left_glove=getattr(tracker.cfg, "w_left_glove", 0.5),
+                w_right_glove=getattr(tracker.cfg, "w_right_glove", 0.5),
+                w_shorts=getattr(tracker.cfg, "w_shorts", 0.75),
+            )
+        except Exception as e:
+            det.meta["body_features"] = body_feat
+            det.meta["left_glove_features"] = left_glove_features
+            det.meta["right_glove_features"] = right_glove_features
+            det.meta["shorts_features"] = shorts_features
             det.meta["e_app"] = None
-            det.meta["left_glove_features"] = extract_features_with_hsv(left_glove_crop)
-            det.meta["right_glove_features"] = extract_features_with_hsv(right_glove_crop)
-            det.meta["shorts_features"] = extract_features_with_hsv(shorts_crop)
+            det.meta["e_app_error"] = str(e)
 
     log = tracker.update(detections, g=g, reset_mode=reset_mode)
 
@@ -750,10 +826,6 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
         n_clusters=int(params.get("n_clusters", 2)),
         random_state=int(params.get("random_state", 42)),
         assign_labels=str(params.get("assign_labels", "kmeans")),
-        w_body=float(params.get("w_body", 1.0)),
-        w_left_glove=float(params.get("w_left_glove", 0.25)),
-        w_right_glove=float(params.get("w_right_glove", 0.25)),
-        w_shorts=float(params.get("w_shorts", 0.75)),
     )
     local_to_global, sim_data = clusterer.build_mapping(
         epoch_tracks=epoch_tracks,
