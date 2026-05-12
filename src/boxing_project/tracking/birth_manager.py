@@ -21,6 +21,8 @@ class BirthConfig:
     normal_confirm_hits: int = 2
     near_confirm_hits: int = 4
     very_close_confirm_hits: int = 999
+    easy_birth_track_limit: int = 0
+    easy_birth_confirm_hits: int = 1
     emb_ema_alpha: float = 0.9
     min_kp_conf: float = 0.05
     min_core_kps: int = 3
@@ -51,6 +53,8 @@ class PendingCandidate:
     nearest_existing_track_id: Optional[int]
     nearest_existing_d_motion: Optional[float]
     required_confirm_hits: int
+    birth_mode: str = "normal"
+    very_close_bypass: bool = False
 
 
 @dataclass
@@ -69,6 +73,20 @@ class BirthManager:
         self.pose_core = np.asarray(pose_core, dtype=int)
         self.pending: Dict[str, PendingCandidate] = {}
         self._next_pending_id = 1
+        self.easy_birth_created_count = 0
+
+    def reset(self) -> None:
+        self.pending.clear()
+        self.easy_birth_created_count = 0
+
+    def _mark_confirmed_birth(self, cand: PendingCandidate) -> Tuple[str, bool]:
+        birth_mode = "easy_start" if cand.birth_mode == "easy_start" else "normal"
+        ignore_overlap = birth_mode == "easy_start"
+        if not isinstance(cand.last_detection.meta, dict):
+            cand.last_detection.meta = {}
+        cand.last_detection.meta["birth_mode"] = birth_mode
+        cand.last_detection.meta["ignore_overlap_on_birth"] = bool(ignore_overlap)
+        return birth_mode, ignore_overlap
 
     def _new_pending_id(self) -> str:
         pid = f"P{self._next_pending_id}"
@@ -155,6 +173,8 @@ class BirthManager:
                 "incoming_unmatched_count": int(len(unmatched_det_indices)),
                 "existing_tracks_count": int(len(existing_tracks)),
                 "pending_count_before": int(len(self.pending)),
+                "easy_birth_created_count": int(self.easy_birth_created_count),
+                "easy_birth_track_limit": int(self.cfg.easy_birth_track_limit),
             },
             "detections": [],
             "confirmed": [],
@@ -252,6 +272,11 @@ class BirthManager:
                     "misses": c.misses,
                     "age": c.age,
                     "required_confirm_hits": c.required_confirm_hits,
+                    "birth_mode": c.birth_mode,
+                    "ignore_overlap_on_birth": c.birth_mode == "easy_start",
+                    "very_close_bypass": bool(c.very_close_bypass),
+                    "easy_birth_created_count": int(self.easy_birth_created_count),
+                    "easy_birth_track_limit": int(self.cfg.easy_birth_track_limit),
                 })
 
                 nearest = self._nearest_existing(det, existing_tracks)
@@ -265,6 +290,11 @@ class BirthManager:
                     "very_close_threshold": float(self.cfg.very_close_threshold),
                     "near_threshold": float(self.cfg.near_threshold),
                     "pending_id": pid,
+                    "birth_mode": c.birth_mode,
+                    "very_close_bypass": bool(c.very_close_bypass),
+                    "required_confirm_hits": c.required_confirm_hits,
+                    "easy_birth_created_count": int(self.easy_birth_created_count),
+                    "easy_birth_track_limit": int(self.cfg.easy_birth_track_limit),
                     "hits": c.hits,
                     "misses": c.misses,
                     "age": c.age,
@@ -299,6 +329,11 @@ class BirthManager:
                     "misses": c.misses,
                     "age": c.age,
                     "required_confirm_hits": c.required_confirm_hits,
+                    "birth_mode": c.birth_mode,
+                    "ignore_overlap_on_birth": c.birth_mode == "easy_start",
+                    "very_close_bypass": bool(c.very_close_bypass),
+                    "easy_birth_created_count": int(self.easy_birth_created_count),
+                    "easy_birth_track_limit": int(self.cfg.easy_birth_track_limit),
                 })
 
             if c.status == "blocked":
@@ -332,6 +367,11 @@ class BirthManager:
                     "hits": c.hits,
                     "age": c.age,
                     "required_confirm_hits": c.required_confirm_hits,
+                    "birth_mode": c.birth_mode,
+                    "ignore_overlap_on_birth": c.birth_mode == "easy_start",
+                    "very_close_bypass": bool(c.very_close_bypass),
+                    "easy_birth_created_count": int(self.easy_birth_created_count),
+                    "easy_birth_track_limit": int(self.cfg.easy_birth_track_limit),
                     "will_create_new_track": True,
                 })
 
@@ -352,7 +392,18 @@ class BirthManager:
         for pid in confirmed_ids:
             c = self.pending.pop(pid, None)
             if c is not None:
+                birth_mode, ignore_overlap_on_birth = self._mark_confirmed_birth(c)
+                if birth_mode == "easy_start":
+                    self.easy_birth_created_count += 1
+                for item in debug["confirmed"]:
+                    if item.get("pending_id") == pid:
+                        item["birth_mode"] = birth_mode
+                        item["ignore_overlap_on_birth"] = bool(ignore_overlap_on_birth)
                 confirmed.append(int(c.last_det_idx))
+
+        easy_birth_reserved_count = sum(
+            1 for c in self.pending.values() if c.birth_mode == "easy_start"
+        )
 
         for j in unmatched_det_indices:
             if int(j) in taken_d:
@@ -363,21 +414,40 @@ class BirthManager:
             nearest_id = nearest["nearest_existing_track_id"]
             nearest_d = float(nearest["nearest_existing_d_motion"])
 
-            if nearest_d <= self.cfg.very_close_threshold:
+            easy_birth_available = (
+                self.cfg.easy_birth_track_limit > 0
+                and self.easy_birth_created_count + easy_birth_reserved_count < self.cfg.easy_birth_track_limit
+            )
+
+            if easy_birth_available:
+                status = "normal"
+                action = "pending_created"
+                reason = "easy_start"
+                req = max(1, int(self.cfg.easy_birth_confirm_hits))
+                birth_mode = "easy_start"
+                very_close_bypass = nearest_d <= self.cfg.very_close_threshold
+                easy_birth_reserved_count += 1
+            elif nearest_d <= self.cfg.very_close_threshold:
                 status = "blocked"
                 action = "blocked_pending"
                 reason = "very_close_to_existing_track"
                 req = self.cfg.very_close_confirm_hits
+                birth_mode = "normal"
+                very_close_bypass = False
             elif nearest_d <= self.cfg.near_threshold:
                 status = "near_existing"
                 action = "pending_created"
                 reason = "near_existing_track_requires_more_confirmation"
                 req = self.cfg.near_confirm_hits
+                birth_mode = "normal"
+                very_close_bypass = False
             else:
                 status = "normal"
                 action = "pending_created"
                 reason = "far_from_existing_track"
                 req = self.cfg.normal_confirm_hits
+                birth_mode = "normal"
+                very_close_bypass = False
 
             pid = self._new_pending_id()
             kf = KalmanTracker(
@@ -408,6 +478,8 @@ class BirthManager:
                 nearest_existing_track_id=nearest_id,
                 nearest_existing_d_motion=nearest_d,
                 required_confirm_hits=int(req),
+                birth_mode=birth_mode,
+                very_close_bypass=very_close_bypass,
             )
             self.pending[pid] = cand
 
@@ -417,6 +489,10 @@ class BirthManager:
                 "det_idx": int(j),
                 "status": status,
                 "required_confirm_hits": int(req),
+                "birth_mode": birth_mode,
+                "very_close_bypass": bool(very_close_bypass),
+                "easy_birth_created_count": int(self.easy_birth_created_count),
+                "easy_birth_track_limit": int(self.cfg.easy_birth_track_limit),
                 "nearest_existing_track_id": nearest_id,
                 "nearest_existing_d_motion": nearest_d,
             })
@@ -434,12 +510,38 @@ class BirthManager:
                 "near_confirm_hits": int(self.cfg.near_confirm_hits),
                 "very_close_confirm_hits": int(self.cfg.very_close_confirm_hits),
                 "pending_id": pid,
+                "birth_mode": birth_mode,
+                "very_close_bypass": bool(very_close_bypass),
                 "required_confirm_hits": int(req),
+                "easy_birth_created_count": int(self.easy_birth_created_count),
+                "easy_birth_track_limit": int(self.cfg.easy_birth_track_limit),
                 "hits": 1,
                 "misses": 0,
                 "age": 1,
                 "will_create_new_track": False,
             })
+
+            if birth_mode == "easy_start" and cand.hits >= cand.required_confirm_hits:
+                self.pending.pop(pid, None)
+                birth_mode, ignore_overlap_on_birth = self._mark_confirmed_birth(cand)
+                self.easy_birth_created_count += 1
+                easy_birth_reserved_count -= 1
+                confirmed.append(int(cand.last_det_idx))
+                debug["confirmed"].append({
+                    "pending_id": pid,
+                    "source_det_idx": int(cand.last_det_idx),
+                    "reason": "stable_pending_candidate",
+                    "status": cand.status,
+                    "hits": cand.hits,
+                    "age": cand.age,
+                    "required_confirm_hits": cand.required_confirm_hits,
+                    "birth_mode": birth_mode,
+                    "ignore_overlap_on_birth": bool(ignore_overlap_on_birth),
+                    "very_close_bypass": bool(cand.very_close_bypass),
+                    "easy_birth_created_count": int(self.easy_birth_created_count),
+                    "easy_birth_track_limit": int(self.cfg.easy_birth_track_limit),
+                    "will_create_new_track": True,
+                })
 
         debug["candidates"] = [{
             "pending_id": c.pending_id,
@@ -448,6 +550,8 @@ class BirthManager:
             "misses": c.misses,
             "age": c.age,
             "required_confirm_hits": c.required_confirm_hits,
+            "birth_mode": c.birth_mode,
+            "very_close_bypass": bool(c.very_close_bypass),
             "last_det_idx": int(c.last_det_idx),
             "last_center": tuple(map(float, c.last_center)),
             "nearest_existing_track_id": c.nearest_existing_track_id,
@@ -456,6 +560,7 @@ class BirthManager:
 
         debug["summary"]["confirmed_count"] = int(len(confirmed))
         debug["summary"]["pending_count_after"] = int(len(self.pending))
+        debug["summary"]["easy_birth_created_count"] = int(self.easy_birth_created_count)
 
         return BirthResult(
             confirmed_birth_det_indices=sorted(set(confirmed)),

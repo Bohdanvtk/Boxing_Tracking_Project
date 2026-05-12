@@ -170,6 +170,8 @@ def load_birth_config(path: str) -> BirthConfig:
         normal_confirm_hits=int(b.get("normal_confirm_hits", 2)),
         near_confirm_hits=int(b.get("near_confirm_hits", 4)),
         very_close_confirm_hits=int(b.get("very_close_confirm_hits", 999)),
+        easy_birth_track_limit=max(0, int(b.get("easy_birth_track_limit", 0))),
+        easy_birth_confirm_hits=max(1, int(b.get("easy_birth_confirm_hits", 1))),
         emb_ema_alpha=float(b.get("emb_ema_alpha", 0.9)),
         min_kp_conf=float(b.get("min_kp_conf", 0.05)),
         min_core_kps=int(b.get("min_core_kps", 3)),

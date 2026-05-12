@@ -319,17 +319,37 @@ class MultiObjectTracker:
             measure_var=self.cfg.measure_var,
             p0=self.cfg.p0,
         )
-        trk = Track(track_id=self._next_id, kf=kf, min_hits=self.cfg.min_hits, min_hits_sub=self.cfg.min_hits_sub, epoch_id=self._epoch_id)
+
+        trk = Track(
+            track_id=self._next_id,
+            kf=kf,
+            min_hits=self.cfg.min_hits,
+            min_hits_sub=self.cfg.min_hits_sub,
+            epoch_id=self._epoch_id,
+        )
+
         self._next_id += 1
         self._segment_tracks[trk.track_id] = trk
         self._epoch_tracks.setdefault(self._epoch_id, {})[trk.track_id] = trk
+
+        ignore_overlap_on_birth = (
+                det.meta.get("birth_mode") == "easy_start"
+                and bool(det.meta.get("ignore_overlap_on_birth", False))
+        )
+
+        det.meta["ignore_overlap_on_birth"] = bool(ignore_overlap_on_birth)
+        det.meta["birth_base_kps_bypass"] = bool(ignore_overlap_on_birth)
+
         active_overlap_threshold = self._prepare_overlap_update_meta(trk, det)
+
         trk.update(
             det,
             ema_alpha=self.cfg.match.emb_ema_alpha,
-            update_app=self._has_base_keypoints(det),
+            update_app=bool(ignore_overlap_on_birth) or self._has_base_keypoints(det),
             active_overlap_threshold=active_overlap_threshold,
+            ignore_overlap=ignore_overlap_on_birth,
         )
+
         return trk
 
     def _prepare_overlap_update_meta(self, trk: Track, det: Detection) -> float:
@@ -745,6 +765,7 @@ class MultiObjectTracker:
                 "update_pose": bool(det.meta.get("track_update_pose_allowed", update_pose)),
                 "update_app": bool(det.meta.get("track_update_app_requested", update_app)),
                 "track_match_had_overlap": bool(det.meta.get("track_match_had_overlap", False)),
+                "birth_overlap_bypass": bool(det.meta.get("birth_overlap_bypass", False)),
                 "row_cost": row_cost,
                 "update_cost": update_cost,
                 "max_update_cost": max_update_cost,
@@ -916,7 +937,7 @@ class MultiObjectTracker:
         self._epoch_id += 1
         self._epoch_tracks[self._epoch_id] = {}
         self.prev_matches.clear()
-        self.birth_manager.pending.clear()
+        self.birth_manager.reset()
 
     def get_epoch_tracks(self) -> Dict[int, Dict[int, Track]]:
         return {epoch_id: dict(tracks_by_id) for epoch_id, tracks_by_id in self._epoch_tracks.items()}

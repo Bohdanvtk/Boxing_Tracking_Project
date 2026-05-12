@@ -35,6 +35,14 @@ birth_manager:
   # so this mainly removes the hardcoded 999 into config without changing behavior.
   very_close_confirm_hits: 6
 
+  # Number of first tracks that may use easier birth confirmation
+  # during startup. Set to 0 to disable.
+  easy_birth_track_limit: 4
+
+  # Required pending hits for those first easy-start tracks.
+  # Values below 1 are clamped to 1 when loaded.
+  easy_birth_confirm_hits: 1
+
   # EMA alpha used to update pending candidate appearance embedding when e_app exists.
   emb_ema_alpha: 0.90
 
