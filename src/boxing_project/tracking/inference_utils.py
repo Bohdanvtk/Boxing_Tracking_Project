@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 from boxing_project.tracking.tracker import openpose_people_to_detections
 from boxing_project.shot_boundary.inference import ShotBoundaryInferencer, ShotBoundaryInferConfig
-from boxing_project.tracking.image_utils import keypoints_to_bbox, render_tracking_overlays, extract_boxing_crops, attach_overlap_info_to_detections, keypoints_to_intersection_bbox, bbox_iou
+from boxing_project.tracking.image_utils import render_tracking_overlays, extract_boxing_crops, attach_overlap_info_to_detections, keypoints_to_intersection_bbox, bbox_iou
 from boxing_project.tracking.saving_utils import FragmentExporter, save_tracking_outputs, save_tracks_similarity
 from boxing_project.tracking.global_clustering import GlobalTrackClusterer
 import matplotlib.pyplot as plt
@@ -563,7 +563,7 @@ def process_frame(
     kps = result.poseKeypoints
 
     top_track_ids_before = _top_track_ids_by_hits(tracker, k=4)
-    extra_n = int(getattr(tracker, "_adaptive_extra_n", 3))
+    extra_n = int(getattr(tracker, "_adaptive_extra_n", 9))
 
     kps = select_top_with_nearest(
         kps,
@@ -584,8 +584,6 @@ def process_frame(
     bboxes_quality = []
 
     for i in range(n_people):
-        # Tight bbox for crop / appearance embedding.
-        bb, bbox_quality = keypoints_to_bbox(kps[i], conf_th, w, h)
 
         # Simple full-keypoint bbox only for IoU / overlap logic.
         intersection_bb = keypoints_to_intersection_bbox(
@@ -601,15 +599,14 @@ def process_frame(
             conf_threshold=conf_th,
         )
 
-        bboxes.append(bb)
+
         intersection_bboxes.append(intersection_bb)
         parts_crops.append(parts)
-        bboxes_quality.append(bbox_quality)
+
 
     for i in range(n_people):
         people[i]["bbox"] = intersection_bboxes[i]
         people[i]["bbox_for_intersection"] = intersection_bboxes[i]
-        people[i]["bbox_quality"] = bboxes_quality[i]
         people[i]["left_glove_crop"] = parts_crops[i]["left_glove"]
         people[i]["right_glove_crop"] = parts_crops[i]["right_glove"]
         people[i]["shorts_crop"] = parts_crops[i]["shorts"]
@@ -631,13 +628,13 @@ def process_frame(
     for det in detections:
         raw = det.meta.get("raw", {})
         bbox = raw.get("bbox", None)
-        bbox_quality = raw.get("bbox_quality", "invalid")
+
 
         left_glove_crop = raw.get("left_glove_crop")
         right_glove_crop = raw.get("right_glove_crop")
         shorts_crop = raw.get("shorts_crop")
 
-        det.meta["bbox_quality"] = bbox_quality
+
 
         body_feat = None
         left_glove_features = None
@@ -687,7 +684,7 @@ def process_frame(
     if missed_top_track_ids:
         tracker._adaptive_extra_n = extra_n + 9
     else:
-        tracker._adaptive_extra_n = 3
+        tracker._adaptive_extra_n = 7
 
     log["adaptive_extra_n_used"] = int(extra_n)
     log["adaptive_extra_n_next"] = int(tracker._adaptive_extra_n)
