@@ -59,6 +59,7 @@ class MatchConfig:
     max_update_motion: float = 0.08
     max_update_pose: float = 0.30
     max_update_app: float = 0.12
+    missing_app_penalty: float = 0.08
 
 
 @dataclass
@@ -88,16 +89,35 @@ class PairwiseArtifacts:
 # Low-level math helpers
 # ============================================================================
 
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+
+def cosine_similarity(a: np.ndarray, b: np.ndarray, mask=None) -> float:
     """
     Cosine similarity in [-1, 1].
 
     -1: opposite direction
      0: weak/random similarity
      1: identical direction
+
+    When ``mask`` is provided and has the same flattened length as both vectors,
+    only masked-in elements are compared. Invalid or empty masks fall back to the
+    original full-vector behavior for backward compatibility.
     """
     a = np.asarray(a, dtype=np.float32).reshape(-1)
     b = np.asarray(b, dtype=np.float32).reshape(-1)
+
+    if a.shape[0] != b.shape[0]:
+        return 0.0
+
+    if mask is not None:
+        try:
+            mask_arr = np.asarray(mask, dtype=bool).reshape(-1)
+        except (TypeError, ValueError):
+            mask_arr = None
+
+        if mask_arr is not None and mask_arr.shape[0] == a.shape[0] and np.any(mask_arr):
+            a = a[mask_arr]
+            b = b[mask_arr]
+
     na = float(np.linalg.norm(a))
     nb = float(np.linalg.norm(b))
     if na < 1e-8 or nb < 1e-8:
@@ -463,9 +483,21 @@ def _compute_pairwise_components(
             det_emb = np.asarray(det_emb, dtype=np.float32).reshape(-1)
 
             if track_emb.shape[0] == det_emb.shape[0]:
-                sim_app = cosine_similarity(track_emb, det_emb)
+                sim_app = cosine_similarity(
+                    track_emb,
+                    det_emb,
+                    mask=det.meta.get("e_app_valid_mask"),
+                )
 
-    app_cost = float((1.0 - sim_app) / 2.0)
+    coverage = float(det.meta.get("e_app_coverage", 1.0)) if isinstance(det.meta, dict) else 1.0
+    coverage = float(np.clip(coverage, 0.0, 1.0))
+    missing_penalty = float(cfg.missing_app_penalty * (1.0 - coverage))
+    app_cost = float(np.clip(((1.0 - sim_app) / 2.0) + missing_penalty, 0.0, 1.0))
+
+    if isinstance(det.meta, dict):
+        det.meta["match_app_coverage"] = coverage
+        det.meta["match_app_missing_penalty"] = missing_penalty
+
     app_ok = app_cost <= cfg.appearance_threshold
 
     return (

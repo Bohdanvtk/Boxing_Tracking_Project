@@ -45,6 +45,7 @@ tracking:
     max_update_motion: 0.08  # If d_motion is above this, skip Kalman/motion update
     max_update_pose: 0.30    # If d_pose is above this, skip pose memory update
     max_update_app: 0.029     # If d_app is above this, skip appearance EMA update
+    missing_app_penalty: 0.08 # Small cost penalty for missing/unknown appearance parts
 
     motion_threshold: 0.09    # Max allowed normalized motion distance
                               # Above this -> reject pair

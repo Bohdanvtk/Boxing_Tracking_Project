@@ -67,7 +67,6 @@ def init_openpose_from_config(openpose_cfg: dict):
     return op_module, opWrapper
 
 
-
 def preprocess_image(opWrapper, img_path: Path, save_width: int, return_img=False):
     """
     Read and resize an image, run OpenPose forward pass.
@@ -152,7 +151,6 @@ def extract_features_with_hsv(image: np.ndarray) -> np.ndarray:
     return hist.astype(np.float32)
 
 
-
 def _l2_normalize_feature(vec):
     if vec is None:
         return None
@@ -207,6 +205,83 @@ def build_fused_appearance_embedding(
     ).astype(np.float32)
 
     return _l2_normalize_feature(fused)
+
+
+def build_fused_appearance_embedding_with_mask(
+    body_feat,
+    left_glove_feat,
+    right_glove_feat,
+    shorts_feat,
+    *,
+    w_body: float = 1.0,
+    w_left_glove: float = 0.5,
+    w_right_glove: float = 0.5,
+    w_shorts: float = 0.75,
+    part_dim: int = 32,
+):
+    """Build fixed-length fused appearance plus valid-part mask and coverage.
+
+    Body appearance is required. Optional part segments are zero-filled when
+    unavailable and marked invalid in the returned mask so matching treats them
+    as unknown rather than different.
+    """
+    body = _l2_normalize_feature(body_feat)
+    if body is None:
+        return None, None, 0.0
+
+    part_dim = max(0, int(part_dim))
+    weights = {
+        "body": float(w_body),
+        "left_glove": float(w_left_glove),
+        "right_glove": float(w_right_glove),
+        "shorts": float(w_shorts),
+    }
+    total_weight = sum(max(weight, 0.0) for weight in weights.values())
+    visible_weight = max(weights["body"], 0.0)
+
+    def _part_or_zero_and_mask(part_feat, weight):
+        nonlocal visible_weight
+        part = _l2_normalize_feature(part_feat)
+        if part is None or part.size != part_dim:
+            return (
+                np.zeros(part_dim, dtype=np.float32),
+                np.zeros(part_dim, dtype=bool),
+            )
+
+        visible_weight += max(float(weight), 0.0)
+        return part, np.ones(part_dim, dtype=bool)
+
+    left, left_mask = _part_or_zero_and_mask(left_glove_feat, weights["left_glove"])
+    right, right_mask = _part_or_zero_and_mask(right_glove_feat, weights["right_glove"])
+    shorts, shorts_mask = _part_or_zero_and_mask(shorts_feat, weights["shorts"])
+
+    fused = np.concatenate(
+        [
+            weights["body"] * body,
+            weights["left_glove"] * left,
+            weights["right_glove"] * right,
+            weights["shorts"] * shorts,
+        ],
+        axis=0,
+    ).astype(np.float32)
+
+    e_app = _l2_normalize_feature(fused)
+    if e_app is None:
+        return None, None, 0.0
+
+    e_app_valid_mask = np.concatenate(
+        [
+            np.ones(body.size, dtype=bool),
+            left_mask,
+            right_mask,
+            shorts_mask,
+        ],
+        axis=0,
+    )
+    e_app_coverage = 0.0 if total_weight <= 1e-12 else visible_weight / total_weight
+    e_app_coverage = float(np.clip(e_app_coverage, 0.0, 1.0))
+
+    return e_app, e_app_valid_mask, e_app_coverage
 
 
 def _kp_center(kp: np.ndarray, conf_th: float):
@@ -654,7 +729,7 @@ def process_frame(
             det.meta["right_glove_features"] = right_glove_features
             det.meta["shorts_features"] = shorts_features
             # e_app is the final fused appearance descriptor used by local matching and global clustering.
-            det.meta["e_app"] = build_fused_appearance_embedding(
+            e_app, e_app_valid_mask, e_app_coverage = build_fused_appearance_embedding_with_mask(
                 body_feat,
                 left_glove_features,
                 right_glove_features,
@@ -664,12 +739,17 @@ def process_frame(
                 w_right_glove=getattr(tracker.cfg, "w_right_glove", 0.5),
                 w_shorts=getattr(tracker.cfg, "w_shorts", 0.75),
             )
+            det.meta["e_app"] = e_app
+            det.meta["e_app_valid_mask"] = e_app_valid_mask
+            det.meta["e_app_coverage"] = e_app_coverage
         except Exception as e:
             det.meta["body_features"] = body_feat
             det.meta["left_glove_features"] = left_glove_features
             det.meta["right_glove_features"] = right_glove_features
             det.meta["shorts_features"] = shorts_features
             det.meta["e_app"] = None
+            det.meta["e_app_valid_mask"] = None
+            det.meta["e_app_coverage"] = 0.0
             det.meta["e_app_error"] = str(e)
 
     log = tracker.update(detections, g=g, reset_mode=reset_mode)

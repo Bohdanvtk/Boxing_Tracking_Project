@@ -36,6 +36,7 @@ def make_match_config(cfg: dict) -> MatchConfig:
     max_update_motion = float(_get(cfg, "tracking.matching.max_update_motion", 0.08))
     max_update_pose = float(_get(cfg, "tracking.matching.max_update_pose", 0.30))
     max_update_app = float(_get(cfg, "tracking.matching.max_update_app", 0.12))
+    missing_app_penalty = float(_get(cfg, "tracking.matching.missing_app_penalty", 0.08))
     motion_threshold = float(_get(cfg, "tracking.matching.motion_threshold", 1.0))
     pose_threshold = float(_get(cfg, "tracking.matching.pose_threshold", 1.0))
     appearance_threshold = float(_get(cfg, "tracking.matching.appearance_threshold", 1.0))
@@ -74,6 +75,7 @@ def make_match_config(cfg: dict) -> MatchConfig:
         max_update_motion=max_update_motion,
         max_update_pose=max_update_pose,
         max_update_app=max_update_app,
+        missing_app_penalty=missing_app_penalty,
         motion_threshold=motion_threshold,
         pose_threshold=pose_threshold,
         appearance_threshold=appearance_threshold,
