@@ -164,17 +164,27 @@ def get_detection_bbox(det: Detection) -> Optional[BBox]:
     return x1, y1, x2, y2
 
 
+def _bbox_pair_scale(box_a: BBox, box_b: BBox, eps: float = 1e-6) -> float:
+    def _scale(box: BBox) -> float:
+        x1, y1, x2, y2 = map(float, box)
+        return float(np.sqrt(max(0.0, x2 - x1) * max(0.0, y2 - y1)))
+
+    return max((_scale(box_a) + _scale(box_b)) / 2.0, float(eps))
+
+
+def _center_dist_norm(det_a: Detection, det_b: Detection, box_a: BBox, box_b: BBox) -> float:
+    dist = np.linalg.norm(np.asarray(det_a.center, dtype=float) - np.asarray(det_b.center, dtype=float))
+    return float(dist / _bbox_pair_scale(box_a, box_b))
+
+
 def compute_detection_iou_relations(
     detections: List[Detection],
     overlap_threshold: float = 0.15,
 ) -> List[Dict[str, Any]]:
     """
-    Compute pairwise IoU relations between all detections.
+    Compute broad pairwise geometry relations between detections.
 
-    For each detection, returns:
-        - max IoU with any other detection
-        - index of the most overlapping detection
-        - list of overlaps above overlap_threshold
+    overlap_threshold is kept only for legacy is_overlapping/debug fields.
     """
     bboxes = [get_detection_bbox(det) for det in detections]
     results: List[Dict[str, Any]] = []
@@ -182,6 +192,8 @@ def compute_detection_iou_relations(
     for i, box_i in enumerate(bboxes):
         max_iou = 0.0
         max_iou_det_idx: Optional[int] = None
+        min_center_dist_norm = float("inf")
+        center_dist_norm_det_idx: Optional[int] = None
         overlaps: List[Dict[str, Any]] = []
 
         if box_i is not None:
@@ -190,16 +202,22 @@ def compute_detection_iou_relations(
                     continue
 
                 iou = bbox_iou(box_i, box_j)
+                cdn = _center_dist_norm(detections[i], detections[j], box_i, box_j)
 
                 if iou > max_iou:
                     max_iou = iou
                     max_iou_det_idx = j
 
-                if iou >= overlap_threshold:
+                if cdn < min_center_dist_norm:
+                    min_center_dist_norm = cdn
+                    center_dist_norm_det_idx = j
+
+                if iou > 0.0:
                     overlaps.append(
                         {
                             "det_idx": int(j),
                             "iou": float(iou),
+                            "center_dist_norm": float(cdn),
                         }
                     )
 
@@ -209,6 +227,8 @@ def compute_detection_iou_relations(
                 "bbox": box_i,
                 "max_iou": float(max_iou),
                 "max_iou_det_idx": max_iou_det_idx,
+                "min_center_dist_norm": float(min_center_dist_norm),
+                "center_dist_norm_det_idx": center_dist_norm_det_idx,
                 "overlaps": overlaps,
                 "is_overlapping": bool(max_iou >= overlap_threshold),
             }
@@ -242,6 +262,8 @@ def attach_overlap_info_to_detections(
         det.meta["max_overlap_det_idx"] = info["max_iou_det_idx"]
         det.meta["overlap_relations"] = info["overlaps"]
         det.meta["is_overlapping"] = info["is_overlapping"]
+        det.meta["min_center_dist_norm"] = info["min_center_dist_norm"]
+        det.meta["center_dist_norm_det_idx"] = info["center_dist_norm_det_idx"]
 
 
 def is_valid_keypoint(kps, keypoint_idx: int, conf_threshold: float) -> bool:

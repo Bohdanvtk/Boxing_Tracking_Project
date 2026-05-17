@@ -430,7 +430,12 @@ def format_track_update_debug_lines(records: List[Dict[str, Any]]) -> List[str]:
             f"min_cdn={cdn}->Det#{rec.get('center_dist_norm_det_idx')}, "
             f"thr={float(rec.get('active_overlap_threshold', 0.0)):.3f}, "
             f"zone={rec.get('adaptive_overlap_zone')}, enabled={rec.get('adaptive_overlap_enabled')}, "
-            f"reason={rec.get('adaptive_overlap_reason')}"
+            f"reason={rec.get('adaptive_overlap_reason')}, "
+            f"risky={rec.get('track_has_risky_overlap')}, "
+            f"risk_count={rec.get('risky_overlap_count')}, "
+            f"risk_idxs={rec.get('risky_overlap_det_indices')}, "
+            f"max_risk_iou={float(rec.get('max_risky_overlap_iou', 0.0)):.3f}, "
+            f"raw_max_iou={float(rec.get('raw_max_overlap_iou', rec.get('max_overlap_iou', 0.0))):.3f}"
         )
         lines.append(f"  skipped={str(bool(rec.get('track_update_skipped', False))).lower()}")
         lines.append(f"  skip_reason={rec.get('track_update_skip_reason')}")

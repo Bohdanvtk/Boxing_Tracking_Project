@@ -2,7 +2,7 @@ tracking:
   debug: true                 # Enable console debug output
   save_log: true              # Save debug logs to disk
   fps: 30                     # Video FPS
-  overlap_log_threshold: 0.09   # IoU threshold used only for debug/logging overlap state
+  overlap_log_threshold: 0.001   # IoU threshold used only for debug/logging overlap state
     # If detection IoU with another detection >= this value,
     # it is marked as overlapping in logs/meta
 
@@ -19,7 +19,7 @@ tracking:
     # IoU threshold when centers are medium-close.
   adaptive_overlap_iou_far: 0.08
     # IoU threshold when centers are far-but-still-relevant.
-  adaptive_overlap_iou_default: 0.01
+  adaptive_overlap_iou_default: 0.2
     # IoU threshold when centers are farther than adaptive_overlap_center_far.
 
   overlap_app_freeze_after: 5
@@ -44,7 +44,7 @@ tracking:
     max_update_cost: 1.2      # Max absolute raw weighted cost allowed for Track update
     max_update_motion: 0.08  # If d_motion is above this, skip Kalman/motion update
     max_update_pose: 0.30    # If d_pose is above this, skip pose memory update
-    max_update_app: 0.029     # If d_app is above this, skip appearance EMA update
+    max_update_app: 0.06     # If d_app is above this, skip appearance EMA update
     missing_app_penalty: 0.08 # Small cost penalty for missing/unknown appearance parts
 
     motion_threshold: 0.09    # Max allowed normalized motion distance
@@ -54,7 +54,7 @@ tracking:
     appearance_threshold: 0.12 # Max allowed appearance distance
                               # Above this -> reject pair
 
-    emb_ema_alpha: 0.6       # EMA update factor for appearance embedding
+    emb_ema_alpha: 0.1       # EMA update factor for appearance embedding
                               # Higher -> faster update to new appearance
     bad_kp_patience: 50       # Frames to wait before updating from bad keypoints
     large_cost: 880.0         # Sentinel cost for invalid / gated pairs

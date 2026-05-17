@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 from boxing_project.tracking.tracker import openpose_people_to_detections
 from boxing_project.shot_boundary.inference import ShotBoundaryInferencer, ShotBoundaryInferConfig
-from boxing_project.tracking.image_utils import render_tracking_overlays, extract_boxing_crops, attach_overlap_info_to_detections, keypoints_to_intersection_bbox, bbox_iou
+from boxing_project.tracking.image_utils import render_tracking_overlays, extract_boxing_crops, attach_overlap_info_to_detections, keypoints_to_intersection_bbox
 from boxing_project.tracking.saving_utils import FragmentExporter, save_tracking_outputs, save_tracks_similarity
 from boxing_project.tracking.global_clustering import GlobalTrackClusterer
 import matplotlib.pyplot as plt
@@ -297,68 +297,12 @@ def _center_dist(a, b) -> float:
     return float(np.linalg.norm(a - b))
 
 
-def compute_bbox_pair_scale(box_a, box_b, eps: float = 1e-6) -> float:
-    """
-    Geometric average body scale for two bboxes.
-    Uses sqrt(width * height) for each bbox and returns their mean.
-    """
-    def _scale(box) -> float:
-        try:
-            x1, y1, x2, y2 = map(float, box)
-            return float(np.sqrt(max(0.0, x2 - x1) * max(0.0, y2 - y1)))
-        except Exception:
-            return float(eps)
-    return max((_scale(box_a) + _scale(box_b)) / 2.0, float(eps))
-
-
-def _raw_overlap_bbox(det):
-    raw = det.meta.get("raw", {})
-    return raw.get("bbox_for_intersection") or raw.get("bbox")
-
-
-def _adaptive_overlap_threshold(cfg, center_dist_norm: float):
-    # Closer centers use stricter IoU thresholds.
-    return next(
-        ((thr, zone) for limit, thr, zone in (
-            (cfg.adaptive_overlap_center_near, cfg.adaptive_overlap_iou_near, "near"),
-            (cfg.adaptive_overlap_center_mid, cfg.adaptive_overlap_iou_mid, "mid"),
-            (cfg.adaptive_overlap_center_far, cfg.adaptive_overlap_iou_far, "far"),
-        ) if center_dist_norm <= limit),
-        (cfg.adaptive_overlap_iou_default, "default"),
-    )
-
-
 def _attach_center_distance_overlap_metadata(detections, cfg) -> None:
-    # Add nearest-center distance and adaptive relation risk for each detection.
-    bboxes = [_raw_overlap_bbox(det) for det in detections]
-    min_center = [(float("inf"), None) for _ in detections]
-    relations = [[] for _ in detections]
-
-    for i in range(len(detections)):
-        for j in range(i + 1, len(detections)):
-            if bboxes[i] is None or bboxes[j] is None:
-                continue
-            try:
-                cdn = float(np.linalg.norm(np.asarray(detections[i].center) - np.asarray(detections[j].center)) / compute_bbox_pair_scale(bboxes[i], bboxes[j]))
-                iou = float(bbox_iou(bboxes[i], bboxes[j]))
-            except Exception:
-                continue
-
-            thr, zone = _adaptive_overlap_threshold(cfg, cdn)
-            rel = {
-                "iou": iou, "center_dist_norm": cdn, "adaptive_iou_threshold": float(thr),
-                "adaptive_overlap_zone": zone, "adaptive_overlap_risk": bool(iou > float(thr)),
-            }
-            for det_idx, other_idx in ((i, j), (j, i)):
-                min_center[det_idx] = min(min_center[det_idx], (cdn, int(other_idx)), key=lambda x: x[0])
-                relations[det_idx].append({"det_idx": int(other_idx), **rel})
-
-    for det, (dist, idx), rels in zip(detections, min_center, relations):
-        det.meta["min_center_dist_norm"] = float(dist)
-        det.meta["center_dist_norm_det_idx"] = idx
-        det.meta["overlap_relations"] = [
-            r for r in rels if r["adaptive_overlap_risk"] or float(r["iou"]) >= float(cfg.overlap_log_threshold)
-        ]
+    # Geometry is attached by image_utils; tracker owns adaptive risk decisions.
+    for det in detections:
+        det.meta.setdefault("min_center_dist_norm", float("inf"))
+        det.meta.setdefault("center_dist_norm_det_idx", None)
+        det.meta.setdefault("overlap_relations", [])
 
 
 def select_top_with_nearest(

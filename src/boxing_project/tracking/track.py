@@ -190,14 +190,11 @@ class Track:
             update_motion: bool = True,
             update_pose: bool = True,
             update_app: bool = True,
-            active_overlap_threshold: float = 0.12,
+            has_overlap: bool = False,
             ignore_overlap: bool = False,
     ):
-        # Tracker selects the active overlap threshold; Track only applies blocking.
-        max_overlap_iou = float(det.meta.get("max_overlap_iou", 0.0))
-        active_overlap_threshold = float(active_overlap_threshold)
-        current_overlap = False if ignore_overlap else max_overlap_iou > active_overlap_threshold
-        det.meta["active_overlap_threshold"] = active_overlap_threshold
+        # Tracker owns overlap decisions; Track only applies blocking.
+        current_overlap = False if ignore_overlap else bool(has_overlap)
         det.meta["birth_overlap_bypass"] = bool(ignore_overlap)
 
         if current_overlap:

@@ -358,43 +358,99 @@ class MultiObjectTracker:
             for i_track, j_det in matches_idx
         }
 
+    def _track_stable(self, track: Optional[Track]) -> bool:
+        return bool(track is not None and (track.sub_confirmed or track.confirmed))
+
     def _has_stable_overlap_counterpart(
         self,
         det: Detection,
         det_idx_to_track: Optional[Dict[int, Track]] = None,
     ) -> bool:
-        """
-        Return True if this detection overlaps with at least one other detection
-        that is matched to a stable track.
-
-        Stable track means:
-            track.sub_confirmed or track.confirmed
-
-        Important:
-            - unmatched detections do not count
-            - BirthManager pending candidates do not count
-            - pending/not-sub-confirmed tracks do not count
-        """
         if det_idx_to_track is None:
             return False
+        return any(
+            self._track_stable(det_idx_to_track.get(int(rel.get("det_idx"))))
+            for rel in det.meta.get("overlap_relations", []) or []
+            if rel.get("det_idx") is not None
+        )
 
-        overlap_relations = det.meta.get("overlap_relations", []) or []
+    def _pair_overlap_threshold(
+        self,
+        current_track: Track,
+        other_track: Optional[Track],
+        center_dist_norm: float,
+    ) -> Tuple[float, str, str]:
+        current_stable = self._track_stable(current_track)
+        other_stable = self._track_stable(other_track)
 
-        for rel in overlap_relations:
-            other_det_idx = rel.get("det_idx", None)
+        if not current_stable:
+            return self.cfg.adaptive_overlap_iou_default, "default", "current_track_pending_default_only"
+        if not other_stable:
+            return self.cfg.adaptive_overlap_iou_default, "default", "other_track_pending_or_unmatched_default_only"
+        if center_dist_norm <= self.cfg.adaptive_overlap_center_near:
+            return self.cfg.adaptive_overlap_iou_near, "near", "stable_pair_adaptive"
+        if center_dist_norm <= self.cfg.adaptive_overlap_center_mid:
+            return self.cfg.adaptive_overlap_iou_mid, "mid", "stable_pair_adaptive"
+        if center_dist_norm <= self.cfg.adaptive_overlap_center_far:
+            return self.cfg.adaptive_overlap_iou_far, "far", "stable_pair_adaptive"
+        return self.cfg.adaptive_overlap_iou_default, "default", "stable_pair_default_far"
 
-            if other_det_idx is None:
-                continue
+    def _evaluate_detection_overlap(
+        self,
+        trk: Track,
+        det: Detection,
+        det_idx_to_track: Optional[Dict[int, Track]] = None,
+    ) -> Dict[str, Any]:
+        relations = det.meta.get("overlap_relations", []) or []
+        risky_indices: List[int] = []
+        risky_ious: List[float] = []
+        best_any_rel: Optional[Dict[str, Any]] = None
+        best_risky_rel: Optional[Dict[str, Any]] = None
+        overlap_has_stable_track = False
 
-            other_track = det_idx_to_track.get(int(other_det_idx))
+        for rel in relations:
+            other_idx = rel.get("det_idx")
+            other_track = det_idx_to_track.get(int(other_idx)) if det_idx_to_track is not None and other_idx is not None else None
+            other_stable = self._track_stable(other_track)
+            overlap_has_stable_track = overlap_has_stable_track or other_stable
+            cdn = float(rel.get("center_dist_norm", det.meta.get("min_center_dist_norm", float("inf"))))
+            threshold, zone, reason = self._pair_overlap_threshold(trk, other_track, cdn)
+            iou = float(rel.get("iou", 0.0))
+            risky = bool(iou > float(threshold))
 
-            if other_track is None:
-                continue
+            rel["adaptive_overlap_threshold"] = float(threshold)
+            rel["adaptive_overlap_zone"] = zone
+            rel["adaptive_overlap_reason"] = reason
+            rel["adaptive_overlap_risk"] = risky
+            rel["other_track_stable"] = bool(other_stable)
 
-            if bool(other_track.sub_confirmed or other_track.confirmed):
-                return True
+            if best_any_rel is None or iou > float(best_any_rel.get("iou", 0.0)):
+                best_any_rel = rel
+            if risky:
+                if best_risky_rel is None or iou > float(best_risky_rel.get("iou", 0.0)):
+                    best_risky_rel = rel
+                if other_idx is not None:
+                    risky_indices.append(int(other_idx))
+                risky_ious.append(iou)
 
-        return False
+        fallback = {
+            "adaptive_overlap_threshold": float(self.cfg.adaptive_overlap_iou_default),
+            "adaptive_overlap_zone": "default",
+            "adaptive_overlap_reason": "no_overlap_relations_default_only",
+        }
+        active = best_risky_rel or best_any_rel or fallback
+        return {
+            "has_overlap": bool(risky_ious),
+            "current_track_stable": self._track_stable(trk),
+            "overlap_has_stable_track": bool(overlap_has_stable_track),
+            "active_overlap_threshold": float(active.get("adaptive_overlap_threshold", self.cfg.adaptive_overlap_iou_default)),
+            "adaptive_overlap_zone": active.get("adaptive_overlap_zone", "default"),
+            "adaptive_overlap_reason": active.get("adaptive_overlap_reason", "no_overlap_relations_default_only"),
+            "adaptive_overlap_enabled": str(active.get("adaptive_overlap_reason", "")).startswith("stable_pair"),
+            "risky_overlap_count": len(risky_indices),
+            "risky_overlap_det_indices": risky_indices,
+            "max_risky_overlap_iou": max(risky_ious) if risky_ious else 0.0,
+        }
 
     def _new_track(self, det: Detection) -> Track:
         kf = KalmanTracker(
@@ -427,13 +483,13 @@ class MultiObjectTracker:
 
         # New tracks do not have current-frame match context here.
         # Therefore adaptive overlap normally falls back to default.
-        active_overlap_threshold = self._prepare_overlap_update_meta(trk, det)
+        has_overlap = self._prepare_overlap_update_meta(trk, det)
 
         trk.update(
             det,
             ema_alpha=self.cfg.match.emb_ema_alpha,
             update_app=bool(ignore_overlap_on_birth) or self._has_base_keypoints(det),
-            active_overlap_threshold=active_overlap_threshold,
+            has_overlap=has_overlap,
             ignore_overlap=ignore_overlap_on_birth,
         )
 
@@ -444,80 +500,31 @@ class MultiObjectTracker:
         trk: Track,
         det: Detection,
         det_idx_to_track: Optional[Dict[int, Track]] = None,
-    ) -> float:
-        """
-        Decide which overlap threshold should be used for Track.update().
-
-        This function does not recompute IoU.
-        It only reads overlap metadata already attached to det.meta.
-
-        Rule:
-            adaptive_overlap_enabled = True only if:
-                current track is stable
-                AND
-                this detection overlaps with at least one detection
-                assigned to a stable track.
-
-        Stable track:
-            sub_confirmed or confirmed
-
-        If the condition is not satisfied:
-            use adaptive_overlap_iou_default.
-        """
-        max_overlap_iou = float(det.meta.get("max_overlap_iou", 0.0))
-        center_dist_norm = float(det.meta.get("min_center_dist_norm", float("inf")))
-
-        current_track_stable = bool(trk.sub_confirmed or trk.confirmed)
-
-        overlap_has_stable_track = self._has_stable_overlap_counterpart(
-            det=det,
-            det_idx_to_track=det_idx_to_track,
-        )
-
-        adaptive_overlap_enabled = bool(
-            current_track_stable and overlap_has_stable_track
-        )
-
-        if not current_track_stable:
-            adaptive_overlap_reason = "current_track_pending_default_only"
-        elif not overlap_has_stable_track:
-            adaptive_overlap_reason = "no_stable_overlap_counterpart_default_only"
-        elif trk.confirmed:
-            adaptive_overlap_reason = "confirmed_with_stable_overlap_adaptive"
-        else:
-            adaptive_overlap_reason = "sub_confirmed_with_stable_overlap_adaptive"
-
-        if adaptive_overlap_enabled and center_dist_norm <= self.cfg.adaptive_overlap_center_near:
-            active_overlap_threshold = self.cfg.adaptive_overlap_iou_near
-            adaptive_overlap_zone = "near"
-        elif adaptive_overlap_enabled and center_dist_norm <= self.cfg.adaptive_overlap_center_mid:
-            active_overlap_threshold = self.cfg.adaptive_overlap_iou_mid
-            adaptive_overlap_zone = "mid"
-        elif adaptive_overlap_enabled and center_dist_norm <= self.cfg.adaptive_overlap_center_far:
-            active_overlap_threshold = self.cfg.adaptive_overlap_iou_far
-            adaptive_overlap_zone = "far"
-        else:
-            active_overlap_threshold = self.cfg.adaptive_overlap_iou_default
-            adaptive_overlap_zone = "default"
+    ) -> bool:
+        eval_meta = self._evaluate_detection_overlap(trk, det, det_idx_to_track)
+        raw_max_overlap_iou = float(det.meta.get("max_overlap_iou", 0.0))
+        has_overlap = bool(eval_meta["has_overlap"])
 
         det.meta["track_hits_before_update"] = int(trk.hits)
         det.meta["track_sub_confirmed_before_update"] = bool(trk.sub_confirmed)
         det.meta["track_confirmed_before_update"] = bool(trk.confirmed)
-
-        det.meta["adaptive_overlap_enabled"] = bool(adaptive_overlap_enabled)
-        det.meta["adaptive_overlap_reason"] = adaptive_overlap_reason
-        det.meta["current_track_stable_for_overlap"] = bool(current_track_stable)
-        det.meta["overlap_has_stable_track"] = bool(overlap_has_stable_track)
-
-        det.meta["active_overlap_threshold"] = float(active_overlap_threshold)
-        det.meta["adaptive_overlap_zone"] = adaptive_overlap_zone
-
-        det.meta["max_overlap_iou"] = max_overlap_iou
+        det.meta["track_has_risky_overlap"] = has_overlap
+        det.meta["is_overlapping"] = has_overlap
+        det.meta["adaptive_overlap_enabled"] = bool(eval_meta["adaptive_overlap_enabled"])
+        det.meta["adaptive_overlap_reason"] = eval_meta["adaptive_overlap_reason"]
+        det.meta["adaptive_overlap_zone"] = eval_meta["adaptive_overlap_zone"]
+        det.meta["active_overlap_threshold"] = float(eval_meta["active_overlap_threshold"])
+        det.meta["risky_overlap_count"] = int(eval_meta["risky_overlap_count"])
+        det.meta["risky_overlap_det_indices"] = list(eval_meta["risky_overlap_det_indices"])
+        det.meta["max_risky_overlap_iou"] = float(eval_meta["max_risky_overlap_iou"])
+        det.meta["raw_max_overlap_iou"] = raw_max_overlap_iou
+        det.meta["max_overlap_iou"] = raw_max_overlap_iou
         det.meta["max_overlap_det_idx"] = det.meta.get("max_overlap_det_idx")
-        det.meta["min_center_dist_norm"] = center_dist_norm
+        det.meta["min_center_dist_norm"] = float(det.meta.get("min_center_dist_norm", float("inf")))
         det.meta["center_dist_norm_det_idx"] = det.meta.get("center_dist_norm_det_idx")
-
-        return float(active_overlap_threshold)
+        det.meta["current_track_stable_for_overlap"] = bool(eval_meta["current_track_stable"])
+        det.meta["overlap_has_stable_track"] = bool(eval_meta["overlap_has_stable_track"])
+        return has_overlap
 
     def _used_config_debug(self) -> Dict[str, Any]:
         cfg = self.cfg
@@ -893,9 +900,7 @@ class MultiObjectTracker:
             )
             det.meta["track_update_disabled_reasons"] = disabled_reasons
 
-            # Adaptive overlap now requires:
-            # current track stable AND at least one stable overlapping counterpart.
-            active_overlap_threshold = self._prepare_overlap_update_meta(
+            has_overlap = self._prepare_overlap_update_meta(
                 trk=trk,
                 det=det,
                 det_idx_to_track=det_idx_to_track,
@@ -907,7 +912,7 @@ class MultiObjectTracker:
                 update_motion=update_motion,
                 update_pose=update_pose,
                 update_app=update_app,
-                active_overlap_threshold=active_overlap_threshold,
+                has_overlap=has_overlap,
             )
 
             rec = {
@@ -950,6 +955,11 @@ class MultiObjectTracker:
                 "adaptive_overlap_reason": det.meta.get("adaptive_overlap_reason"),
                 "current_track_stable_for_overlap": det.meta.get("current_track_stable_for_overlap"),
                 "overlap_has_stable_track": det.meta.get("overlap_has_stable_track"),
+                "track_has_risky_overlap": det.meta.get("track_has_risky_overlap"),
+                "risky_overlap_count": det.meta.get("risky_overlap_count"),
+                "risky_overlap_det_indices": det.meta.get("risky_overlap_det_indices"),
+                "max_risky_overlap_iou": det.meta.get("max_risky_overlap_iou"),
+                "raw_max_overlap_iou": det.meta.get("raw_max_overlap_iou"),
             }
 
             track_update_debug.append(rec)
