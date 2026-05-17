@@ -135,7 +135,7 @@ def bbox_iou(box_a: BBox, box_b: BBox, eps: float = 1e-9) -> float:
 
 def get_detection_bbox(det: Detection) -> Optional[BBox]:
     """
-    Extract bbox used for IoU / overlap logic.
+    Extract bbox used for bbox debug and overlap scale logic.
 
     Priority:
         1. det.meta["raw"]["bbox_for_intersection"]
@@ -152,16 +152,340 @@ def get_detection_bbox(det: Detection) -> Optional[BBox]:
         return None
 
     bbox = raw.get("bbox_for_intersection", raw.get("bbox", None))
+    return _sanitize_bbox(bbox)
 
-    if bbox is None or len(bbox) != 4:
+
+# BODY_25 skeleton edges used for capsule-mask overlap.
+# These names are intentionally local to overlap logic so the legacy debug/log
+# field names can remain unchanged while their internal meaning changes.
+R_ANKLE = 11
+L_ANKLE = 14
+R_EYE = 15
+L_EYE = 16
+R_EAR = 17
+L_EAR = 18
+L_BIG_TOE = 19
+L_SMALL_TOE = 20
+L_HEEL = 21
+R_BIG_TOE = 22
+R_SMALL_TOE = 23
+R_HEEL = 24
+
+FULL_SKELETON_EDGES: Tuple[Tuple[int, int], ...] = (
+    (NOSE, NECK),
+    (NOSE, R_EYE),
+    (NOSE, L_EYE),
+    (R_EYE, R_EAR),
+    (L_EYE, L_EAR),
+    (NECK, R_SH),
+    (R_SH, R_ELBOW),
+    (R_ELBOW, R_WRIST),
+    (NECK, L_SH),
+    (L_SH, L_ELBOW),
+    (L_ELBOW, L_WRIST),
+    (NECK, MID_HIP),
+    (MID_HIP, R_HIP),
+    (R_HIP, R_KNEE),
+    (R_KNEE, R_ANKLE),
+    (MID_HIP, L_HIP),
+    (L_HIP, L_KNEE),
+    (L_KNEE, L_ANKLE),
+    (L_ANKLE, L_BIG_TOE),
+    (L_ANKLE, L_SMALL_TOE),
+    (L_ANKLE, L_HEEL),
+    (R_ANKLE, R_BIG_TOE),
+    (R_ANKLE, R_SMALL_TOE),
+    (R_ANKLE, R_HEEL),
+)
+
+CORE_SKELETON_EDGES: Tuple[Tuple[int, int], ...] = (
+    (NECK, R_SH),
+    (NECK, L_SH),
+    (R_SH, L_SH),
+    (NECK, MID_HIP),
+    (MID_HIP, R_HIP),
+    (MID_HIP, L_HIP),
+    (R_HIP, L_HIP),
+    (R_SH, R_HIP),
+    (L_SH, L_HIP),
+)
+
+
+def _coerce_keypoints_and_conf(kps, kp_conf=None) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Return BODY_25-ish xy/conf arrays without raising on malformed input."""
+    if kps is None:
+        return None, None
+
+    try:
+        arr = np.asarray(kps, dtype=np.float32)
+    except (TypeError, ValueError):
+        return None, None
+
+    if arr.ndim != 2 or arr.shape[1] < 2 or arr.shape[0] == 0:
+        return None, None
+
+    xy = arr[:, :2]
+
+    if kp_conf is not None:
+        try:
+            conf = np.asarray(kp_conf, dtype=np.float32).reshape(-1)
+        except (TypeError, ValueError):
+            conf = np.ones((xy.shape[0],), dtype=np.float32)
+    elif arr.shape[1] >= 3:
+        conf = arr[:, 2].astype(np.float32, copy=False).reshape(-1)
+    else:
+        conf = np.ones((xy.shape[0],), dtype=np.float32)
+
+    if conf.shape[0] < xy.shape[0]:
+        padded = np.zeros((xy.shape[0],), dtype=np.float32)
+        padded[: conf.shape[0]] = conf
+        conf = padded
+    elif conf.shape[0] > xy.shape[0]:
+        conf = conf[: xy.shape[0]]
+
+    return xy, conf
+
+
+def _bbox_from_keypoints(kps, kp_conf=None, conf_threshold: float = 0.05) -> Optional[BBox]:
+    xy, conf = _coerce_keypoints_and_conf(kps, kp_conf)
+    if xy is None or conf is None:
         return None
 
-    x1, y1, x2, y2 = map(float, bbox)
+    valid = np.isfinite(xy).all(axis=1) & np.isfinite(conf) & (conf >= float(conf_threshold))
+    if not bool(valid.any()):
+        return None
 
-    if x2 <= x1 or y2 <= y1:
+    pts = xy[valid]
+    x1 = float(np.min(pts[:, 0]))
+    y1 = float(np.min(pts[:, 1]))
+    x2 = float(np.max(pts[:, 0]))
+    y2 = float(np.max(pts[:, 1]))
+
+    if not np.isfinite([x1, y1, x2, y2]).all() or x2 <= x1 or y2 <= y1:
         return None
 
     return x1, y1, x2, y2
+
+
+def _sanitize_bbox(bbox) -> Optional[BBox]:
+    if bbox is None:
+        return None
+    try:
+        if len(bbox) != 4:
+            return None
+        x1, y1, x2, y2 = map(float, bbox)
+    except (TypeError, ValueError):
+        return None
+
+    if not np.isfinite([x1, y1, x2, y2]).all() or x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def make_skeleton_mask(
+    kps,
+    kp_conf=None,
+    *,
+    bbox=None,
+    mask_shape: Optional[Tuple[int, int]] = None,
+    offset: Tuple[float, float] = (0.0, 0.0),
+    core_only: bool = False,
+    conf_threshold: float = 0.05,
+    thickness: int = 7,
+) -> np.ndarray:
+    """
+    Build a binary capsule skeleton mask from BODY_25 keypoints.
+
+    The helper is deliberately defensive: malformed/missing keypoints,
+    confidence, or bbox data returns an empty mask instead of raising.
+    """
+    xy, conf = _coerce_keypoints_and_conf(kps, kp_conf)
+    line_thickness = int(max(1, thickness))
+
+    if mask_shape is None:
+        safe_box = _sanitize_bbox(bbox) or _bbox_from_keypoints(kps, kp_conf, conf_threshold)
+        if safe_box is None:
+            return np.zeros((1, 1), dtype=np.uint8)
+        x1, y1, x2, y2 = safe_box
+        pad = max(1, line_thickness * 3)
+        width = max(1, int(np.ceil(x2 - x1 + 2 * pad)))
+        height = max(1, int(np.ceil(y2 - y1 + 2 * pad)))
+        mask_shape = (height, width)
+        offset = (x1 - pad, y1 - pad)
+
+    try:
+        height, width = int(mask_shape[0]), int(mask_shape[1])
+    except (TypeError, ValueError, IndexError):
+        return np.zeros((1, 1), dtype=np.uint8)
+
+    if height <= 0 or width <= 0:
+        return np.zeros((1, 1), dtype=np.uint8)
+
+    mask = np.zeros((height, width), dtype=np.uint8)
+    if xy is None or conf is None:
+        return mask
+
+    valid = np.isfinite(xy).all(axis=1) & np.isfinite(conf) & (conf >= float(conf_threshold))
+    edges = CORE_SKELETON_EDGES if core_only else FULL_SKELETON_EDGES
+    ox, oy = map(float, offset)
+
+    for a, b in edges:
+        if a >= xy.shape[0] or b >= xy.shape[0] or not (valid[a] and valid[b]):
+            continue
+
+        p1 = (int(round(float(xy[a, 0]) - ox)), int(round(float(xy[a, 1]) - oy)))
+        p2 = (int(round(float(xy[b, 0]) - ox)), int(round(float(xy[b, 1]) - oy)))
+        cv2.line(mask, p1, p2, color=1, thickness=line_thickness, lineType=cv2.LINE_AA)
+
+    return (mask > 0).astype(np.uint8)
+
+
+def mask_iou(mask_a, mask_b, eps: float = 1e-9) -> float:
+    """Compute binary mask IoU safely for missing/malformed masks."""
+    if mask_a is None or mask_b is None:
+        return 0.0
+
+    try:
+        a = np.asarray(mask_a).astype(bool, copy=False)
+        b = np.asarray(mask_b).astype(bool, copy=False)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if a.shape != b.shape or a.size == 0:
+        return 0.0
+
+    inter = float(np.logical_and(a, b).sum())
+    union = float(np.logical_or(a, b).sum())
+    if union <= float(eps):
+        return 0.0
+    return float(inter / union)
+
+
+def _pair_mask_geometry(
+    kps_a,
+    kp_conf_a,
+    bbox_a,
+    kps_b,
+    kp_conf_b,
+    bbox_b,
+    conf_threshold: float,
+    thickness: int,
+) -> Tuple[Optional[Tuple[int, int]], Tuple[float, float]]:
+    boxes = [
+        _sanitize_bbox(bbox_a) or _bbox_from_keypoints(kps_a, kp_conf_a, conf_threshold),
+        _sanitize_bbox(bbox_b) or _bbox_from_keypoints(kps_b, kp_conf_b, conf_threshold),
+    ]
+    boxes = [box for box in boxes if box is not None]
+    if not boxes:
+        return None, (0.0, 0.0)
+
+    x1 = min(box[0] for box in boxes)
+    y1 = min(box[1] for box in boxes)
+    x2 = max(box[2] for box in boxes)
+    y2 = max(box[3] for box in boxes)
+    if not np.isfinite([x1, y1, x2, y2]).all() or x2 <= x1 or y2 <= y1:
+        return None, (0.0, 0.0)
+
+    line_thickness = int(max(1, thickness))
+    pad = max(1, line_thickness * 3)
+    width = max(1, int(np.ceil(x2 - x1 + 2 * pad)))
+    height = max(1, int(np.ceil(y2 - y1 + 2 * pad)))
+    return (height, width), (x1 - pad, y1 - pad)
+
+
+def _empty_skeleton_overlap() -> Dict[str, float]:
+    return {
+        "overlap_score": 0.0,
+        "skeleton_iou": 0.0,
+        "core_skeleton_iou": 0.0,
+    }
+
+
+def skeleton_overlap_score(
+    det_a: Detection,
+    det_b: Detection,
+    *,
+    bbox_a=None,
+    bbox_b=None,
+    full_weight: float = 0.35,
+    core_weight: float = 0.65,
+    conf_threshold: float = 0.05,
+    thickness: int = 7,
+) -> Dict[str, float]:
+    """Compute weighted BODY_25 capsule overlap for two detections."""
+    try:
+        box_a = _sanitize_bbox(bbox_a) or get_detection_bbox(det_a)
+        box_b = _sanitize_bbox(bbox_b) or get_detection_bbox(det_b)
+        shape, offset = _pair_mask_geometry(
+            det_a.keypoints,
+            det_a.kp_conf,
+            box_a,
+            det_b.keypoints,
+            det_b.kp_conf,
+            box_b,
+            conf_threshold,
+            thickness,
+        )
+        if shape is None:
+            return _empty_skeleton_overlap()
+
+        full_a = make_skeleton_mask(
+            det_a.keypoints,
+            det_a.kp_conf,
+            bbox=box_a,
+            mask_shape=shape,
+            offset=offset,
+            core_only=False,
+            conf_threshold=conf_threshold,
+            thickness=thickness,
+        )
+        full_b = make_skeleton_mask(
+            det_b.keypoints,
+            det_b.kp_conf,
+            bbox=box_b,
+            mask_shape=shape,
+            offset=offset,
+            core_only=False,
+            conf_threshold=conf_threshold,
+            thickness=thickness,
+        )
+        core_a = make_skeleton_mask(
+            det_a.keypoints,
+            det_a.kp_conf,
+            bbox=box_a,
+            mask_shape=shape,
+            offset=offset,
+            core_only=True,
+            conf_threshold=conf_threshold,
+            thickness=thickness,
+        )
+        core_b = make_skeleton_mask(
+            det_b.keypoints,
+            det_b.kp_conf,
+            bbox=box_b,
+            mask_shape=shape,
+            offset=offset,
+            core_only=True,
+            conf_threshold=conf_threshold,
+            thickness=thickness,
+        )
+
+        skeleton_iou = mask_iou(full_a, full_b)
+        core_skeleton_iou = mask_iou(core_a, core_b)
+        overlap_score = (
+            float(full_weight) * skeleton_iou
+            + float(core_weight) * core_skeleton_iou
+        )
+        if not np.isfinite(overlap_score):
+            return _empty_skeleton_overlap()
+
+        return {
+            "overlap_score": float(overlap_score),
+            "skeleton_iou": float(skeleton_iou),
+            "core_skeleton_iou": float(core_skeleton_iou),
+        }
+    except (AttributeError, TypeError, ValueError, IndexError):
+        return _empty_skeleton_overlap()
 
 
 def _bbox_pair_scale(box_a: BBox, box_b: BBox, eps: float = 1e-6) -> float:
@@ -177,20 +501,53 @@ def _center_dist_norm(det_a: Detection, det_b: Detection, box_a: BBox, box_b: BB
     return float(dist / _bbox_pair_scale(box_a, box_b))
 
 
+def _normalize_overlap_mechanism(overlap_mechanism: str) -> str:
+    if str(overlap_mechanism) == "bbox_iou":
+        return "bbox_iou"
+    return "skeleton_capsule"
+
+
 def compute_detection_iou_relations(
     detections: List[Detection],
     overlap_threshold: float = 0.15,
+    *,
+    overlap_mechanism: str = "skeleton_capsule",
+    skeleton_overlap_threshold: float = 0.08,
+    skeleton_overlap_full_weight: float = 0.35,
+    skeleton_overlap_core_weight: float = 0.65,
+    skeleton_overlap_conf_threshold: float = 0.05,
+    skeleton_overlap_thickness: int = 7,
+    skeleton_overlap_relation_debug_mode: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Compute broad pairwise geometry relations between detections.
 
-    overlap_threshold is kept only for legacy is_overlapping/debug fields.
+    The output keys are kept for legacy logs/debug UI. When overlap_mechanism
+    is "skeleton_capsule", legacy IoU field names carry skeleton/capsule
+    overlap scores instead of bbox IoU values.
     """
-    bboxes = [get_detection_bbox(det) for det in detections]
+    mechanism = _normalize_overlap_mechanism(overlap_mechanism)
+    active_overlap_threshold = (
+        float(skeleton_overlap_threshold)
+        if mechanism == "skeleton_capsule"
+        else float(overlap_threshold)
+    )
+    if mechanism == "bbox_iou":
+        bboxes = [get_detection_bbox(det) for det in detections]
+    else:
+        bboxes = [
+            get_detection_bbox(det) or _bbox_from_keypoints(
+                det.keypoints,
+                det.kp_conf,
+                skeleton_overlap_conf_threshold,
+            )
+            for det in detections
+        ]
     results: List[Dict[str, Any]] = []
 
     for i, box_i in enumerate(bboxes):
         max_iou = 0.0
+        raw_bbox_max_iou = 0.0
         max_iou_det_idx: Optional[int] = None
         min_center_dist_norm = float("inf")
         center_dist_norm_det_idx: Optional[int] = None
@@ -201,22 +558,47 @@ def compute_detection_iou_relations(
                 if i == j or box_j is None:
                     continue
 
-                iou = bbox_iou(box_i, box_j)
+                bbox_iou_value = bbox_iou(box_i, box_j)
+                skel = skeleton_overlap_score(
+                    detections[i],
+                    detections[j],
+                    bbox_a=box_i,
+                    bbox_b=box_j,
+                    full_weight=skeleton_overlap_full_weight,
+                    core_weight=skeleton_overlap_core_weight,
+                    conf_threshold=skeleton_overlap_conf_threshold,
+                    thickness=skeleton_overlap_thickness,
+                )
+                final_overlap_value = (
+                    float(skel["overlap_score"])
+                    if mechanism == "skeleton_capsule"
+                    else float(bbox_iou_value)
+                )
                 cdn = _center_dist_norm(detections[i], detections[j], box_i, box_j)
 
-                if iou > max_iou:
-                    max_iou = iou
+                if final_overlap_value > max_iou:
+                    max_iou = final_overlap_value
                     max_iou_det_idx = j
+
+                if bbox_iou_value > raw_bbox_max_iou:
+                    raw_bbox_max_iou = bbox_iou_value
 
                 if cdn < min_center_dist_norm:
                     min_center_dist_norm = cdn
                     center_dist_norm_det_idx = j
 
-                if iou > 0.0:
+                keep_relation = final_overlap_value > 0.0
+                if mechanism == "skeleton_capsule" and bool(skeleton_overlap_relation_debug_mode):
+                    keep_relation = keep_relation or bbox_iou_value > 0.0
+
+                if keep_relation:
                     overlaps.append(
                         {
                             "det_idx": int(j),
-                            "iou": float(iou),
+                            "iou": float(final_overlap_value),
+                            "bbox_iou": float(bbox_iou_value),
+                            "skeleton_iou": float(skel["skeleton_iou"]),
+                            "core_skeleton_iou": float(skel["core_skeleton_iou"]),
                             "center_dist_norm": float(cdn),
                         }
                     )
@@ -226,11 +608,12 @@ def compute_detection_iou_relations(
                 "det_idx": int(i),
                 "bbox": box_i,
                 "max_iou": float(max_iou),
+                "raw_bbox_max_iou": float(raw_bbox_max_iou),
                 "max_iou_det_idx": max_iou_det_idx,
                 "min_center_dist_norm": float(min_center_dist_norm),
                 "center_dist_norm_det_idx": center_dist_norm_det_idx,
                 "overlaps": overlaps,
-                "is_overlapping": bool(max_iou >= overlap_threshold),
+                "is_overlapping": bool(max_iou >= active_overlap_threshold),
             }
         )
 
@@ -240,21 +623,31 @@ def compute_detection_iou_relations(
 def attach_overlap_info_to_detections(
     detections: List[Detection],
     overlap_threshold: float = 0.15,
+    *,
+    overlap_mechanism: str = "skeleton_capsule",
+    skeleton_overlap_threshold: float = 0.08,
+    skeleton_overlap_full_weight: float = 0.35,
+    skeleton_overlap_core_weight: float = 0.65,
+    skeleton_overlap_conf_threshold: float = 0.05,
+    skeleton_overlap_thickness: int = 7,
+    skeleton_overlap_relation_debug_mode: bool = True,
 ) -> None:
     """
-    Compute IoU relations and attach overlap info to det.meta.
+    Compute overlap relations and attach info to det.meta.
 
-    This mutates detections in-place.
-
-    Added fields:
-        det.meta["max_overlap_iou"]
-        det.meta["max_overlap_det_idx"]
-        det.meta["overlap_relations"]
-        det.meta["is_overlapping"]
+    This mutates detections in-place while preserving legacy field names.
     """
+    mechanism = _normalize_overlap_mechanism(overlap_mechanism)
     relations = compute_detection_iou_relations(
         detections=detections,
         overlap_threshold=overlap_threshold,
+        overlap_mechanism=mechanism,
+        skeleton_overlap_threshold=skeleton_overlap_threshold,
+        skeleton_overlap_full_weight=skeleton_overlap_full_weight,
+        skeleton_overlap_core_weight=skeleton_overlap_core_weight,
+        skeleton_overlap_conf_threshold=skeleton_overlap_conf_threshold,
+        skeleton_overlap_thickness=skeleton_overlap_thickness,
+        skeleton_overlap_relation_debug_mode=skeleton_overlap_relation_debug_mode,
     )
 
     for det, info in zip(detections, relations):
@@ -264,6 +657,8 @@ def attach_overlap_info_to_detections(
         det.meta["is_overlapping"] = info["is_overlapping"]
         det.meta["min_center_dist_norm"] = info["min_center_dist_norm"]
         det.meta["center_dist_norm_det_idx"] = info["center_dist_norm_det_idx"]
+        det.meta["raw_bbox_max_overlap_iou"] = info.get("raw_bbox_max_iou", 0.0)
+        det.meta["overlap_mechanism"] = mechanism
 
 
 def is_valid_keypoint(kps, keypoint_idx: int, conf_threshold: float) -> bool:

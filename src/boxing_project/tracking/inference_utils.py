@@ -639,6 +639,13 @@ def process_frame(
     attach_overlap_info_to_detections(
         detections=detections,
         overlap_threshold=tracker.cfg.overlap_log_threshold,
+        overlap_mechanism=tracker.cfg.overlap_mechanism,
+        skeleton_overlap_threshold=tracker.cfg.skeleton_overlap_threshold,
+        skeleton_overlap_full_weight=tracker.cfg.skeleton_overlap_full_weight,
+        skeleton_overlap_core_weight=tracker.cfg.skeleton_overlap_core_weight,
+        skeleton_overlap_conf_threshold=tracker.cfg.skeleton_overlap_conf_threshold,
+        skeleton_overlap_thickness=tracker.cfg.skeleton_overlap_thickness,
+        skeleton_overlap_relation_debug_mode=tracker.cfg.skeleton_overlap_relation_debug_mode,
     )
 
     # Enrich overlap metadata with normalized center-distance adaptive risk.

@@ -4,14 +4,14 @@ tracking:
   fps: 30                     # Video FPS
   overlap_log_threshold: 0.001   # IoU threshold used only for debug/logging overlap state
     # If detection IoU with another detection >= this value,
-    # it is marked as overlapping in logs/meta
-
-  adaptive_overlap_center_near: 0.8
-    # Very close detection centers relative to bbox pair scale.
-  adaptive_overlap_center_mid: 1.3
-    # Medium-close detection centers relative to bbox pair scale.
-  adaptive_overlap_center_far: 1.8
-    # Far-but-still-relevant detection centers relative to bbox pair scale.
+    # it is marked as overlapping in logs/meta when overlap_mechanism is bbox_iou.
+  overlap_mechanism: skeleton_capsule
+  skeleton_overlap_threshold: 0.08
+  skeleton_overlap_full_weight: 0.35
+  skeleton_overlap_core_weight: 0.65
+  skeleton_overlap_conf_threshold: 0.05
+  skeleton_overlap_thickness: 7
+  skeleton_overlap_relation_debug_mode: true
 
   adaptive_overlap_iou_near: 0.0000
     # IoU threshold when centers are very close.
