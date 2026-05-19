@@ -165,6 +165,7 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
     min_hits_sub = int(_get(cfg, "tracking.tracker.min_hits_sub", max(1, min_hits - 1)))
     min_kp_conf = float(_get(cfg, "tracking.tracker.min_kp_conf", 0.05))
     reset_g_threshold = float(_get(cfg, "tracking.tracker.reset_g_threshold", 0.7))
+    max_unconfirmed_tracks = int(_get(cfg, "tracking.tracker.max_unconfirmed_tracks", 6))
 
     return TrackerConfig(
         dt=dt,
@@ -180,6 +181,7 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
         reset_g_threshold=reset_g_threshold,
         debug=debug,
         save_log=save_log,
+        max_unconfirmed_tracks=max_unconfirmed_tracks,
         overlap_log_threshold=overlap_log_threshold,
         overlap_mechanism=overlap_mechanism,
         skeleton_overlap_threshold=skeleton_overlap_threshold,

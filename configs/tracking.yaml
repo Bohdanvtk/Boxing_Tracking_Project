@@ -121,6 +121,7 @@ tracking:
     min_hits_sub: 4          # Matches needed for sub-confirmed adaptive overlap
     min_kp_conf: 0.009         # Minimum keypoint confidence for track update
     reset_g_threshold: 0.32   # If g < threshold -> activate reset mode
+    max_unconfirmed_tracks: 3  # Max number of active unconfirmed tracks (confirmed tracks are never pruned)
     w_body: 1.0               # Weight of body appearance features in fused e_app
     w_left_glove: 0.25         # Weight of left glove features in fused e_app
     w_right_glove: 0.25        # Weight of right glove features in fused e_app
