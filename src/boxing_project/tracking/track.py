@@ -152,6 +152,17 @@ class Track:
 
     app_emb_ema: Optional[np.ndarray] = None
     app_emb_history: list[np.ndarray] = field(default_factory=list)
+    # Appearance EMA recovery buffer state.
+    # app_stale_frames counts frames since the main appearance EMA was last
+    # updated, not frames since the track was last matched.
+    # app_update_buffer stores normalized recovery embeddings that passed
+    # tracker-level safety gates.
+    # app_buffer_meta stores lightweight debug metadata for buffered embeddings.
+    # last_app_update_mode is used only for debugging/logging.
+    app_stale_frames: int = 0
+    app_update_buffer: list[np.ndarray] = field(default_factory=list)
+    app_buffer_meta: list[dict] = field(default_factory=list)
+    last_app_update_mode: str = "none"
 
     left_glove_features_history: list[np.ndarray] = field(default_factory=list)
     right_glove_features_history: list[np.ndarray] = field(default_factory=list)
@@ -415,3 +426,51 @@ class Track:
 
     def return_available_kps(self, keypoints):
         pass
+
+    def clear_app_buffer(self, reason: str):
+        """
+        Clear pending recovery embeddings without touching the main appearance EMA.
+
+        Parameters:
+            reason: debug reason that is reflected via last_app_update_mode.
+        """
+        self.app_update_buffer.clear()
+        self.app_buffer_meta.clear()
+        self.last_app_update_mode = f"buffer_cleared:{reason}"
+
+    def add_app_buffer_embedding(self, e_app: np.ndarray, meta: Optional[Dict[str, Any]] = None):
+        """
+        Normalize and append one candidate embedding into the recovery buffer.
+
+        This method stores optional lightweight metadata, but does not update
+        the main appearance EMA by itself.
+        """
+        emb = np.asarray(e_app, dtype=np.float32)
+        norm = float(np.linalg.norm(emb))
+        if norm > 1e-8:
+            emb = emb / norm
+        self.app_update_buffer.append(emb)
+        self.app_buffer_meta.append(dict(meta or {}))
+
+    def get_app_buffer_size(self) -> int:
+        """Return the number of currently buffered recovery embeddings."""
+        return len(self.app_update_buffer)
+
+    def apply_recovery_batch_update(self, batch_emb: np.ndarray, recovery_alpha: float) -> bool:
+        """
+        Apply weak EMA recovery update from an averaged buffer embedding.
+
+        - Returns False and does nothing if app_emb_ema is not initialized.
+        - Normalizes both incoming batch_emb and resulting app_emb_ema.
+        - Appends normalized batch_emb to app_emb_history for downstream analysis.
+        - Returns True only when the recovery update was actually applied.
+        """
+        if self.app_emb_ema is None:
+            return False
+        batch = np.asarray(batch_emb, dtype=np.float32)
+        batch = batch / max(np.linalg.norm(batch), 1e-8)
+        self.app_emb_ema = recovery_alpha * self.app_emb_ema + (1.0 - recovery_alpha) * batch
+        self.app_emb_ema = self.app_emb_ema / max(np.linalg.norm(self.app_emb_ema), 1e-8)
+        self.app_emb_history.append(batch.copy())
+        self.last_app_update_mode = "recovery_batch_update"
+        return True

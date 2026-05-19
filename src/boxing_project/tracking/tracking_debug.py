@@ -441,6 +441,16 @@ def format_track_update_debug_lines(records: List[Dict[str, Any]]) -> List[str]:
         lines.append(f"  skip_reason={rec.get('track_update_skip_reason')}")
         lines.append(f"  app_allowed={str(bool(rec.get('track_app_update_allowed', False))).lower()}")
         lines.append(f"  app_block_reason={rec.get('track_app_update_block_reason')}")
+        # Appearance EMA recovery buffer summary.
+        lines.append(
+            f"  app_mode={rec.get('app_update_mode')}, "
+            f"buffer={rec.get('app_buffer_size_before')}->{rec.get('app_buffer_size_after')}, "
+            f"upper_eff={rec.get('app_buffer_upper_eff')}, "
+            f"stale={rec.get('app_stale_frames_before')}->{rec.get('app_stale_frames_after')}, "
+            f"clear_reason={rec.get('app_buffer_clear_reason')}, "
+            f"reject_reason={rec.get('app_buffer_reject_reason')}, "
+            f"recovery_applied={rec.get('app_recovery_batch_update_applied')}"
+        )
     return lines
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional, Union
 
 import numpy as np
+import math
 
 from boxing_project.kalman_filter.kalman import KalmanTracker
 from .track import Track, Detection
@@ -569,6 +570,158 @@ class MultiObjectTracker:
 
         return used
 
+    # ------------------------------------------------------------------
+    # Appearance EMA recovery buffer logic
+    # ------------------------------------------------------------------
+    def _decide_app_buffer_update(
+        self,
+        trk: Track,
+        det: Detection,
+        d_motion: float,
+        d_pose: float,
+        d_app: float,
+        max_update_app: float,
+        max_update_motion: float,
+        max_update_pose: float,
+        has_overlap: bool,
+        freeze_active: bool,
+        det_idx: int,
+    ) -> Dict[str, Any]:
+        """
+        Decide only appearance-memory update behavior for an already matched pair.
+
+        This method does NOT decide matching. Track<->detection matching has already
+        been resolved by the matcher. Here we only decide how (or whether) the
+        matched detection is allowed to affect track appearance memory.
+
+        Modes:
+          - "strict":
+              direct EMA update path via Track.update(update_app=True).
+          - "buffer_candidate":
+              detection embedding is buffered for recovery, but main EMA is not
+              updated yet on this frame.
+          - "recovery_batch_update":
+              recovery buffer reached min size and averaged embedding was applied
+              through weak EMA update.
+          - "reject":
+              detection is not allowed to update appearance memory or buffer.
+
+        Strict update requires:
+          d_app <= max_update_app, no overlap, no freeze, and e_app exists.
+
+        Recovery candidate requires:
+          d_app above strict threshold but below adaptive buffer upper threshold,
+          plus safe motion/pose/coverage/overlap/freeze gates.
+
+        Adaptive relaxation:
+          buffer_upper_eff grows from app_buffer_upper toward app_buffer_hard_upper
+          as app_stale_frames increases.
+
+        Reject path:
+          unsafe detections do not update EMA; strong reject reasons can clear
+          recovery buffer according to config clear-policy flags.
+
+        Returned payload is later copied into det.meta and track_update_debug.
+        """
+        # Read appearance input and current buffer state.
+        e_app = det.meta.get("e_app", None)
+        app_coverage = float(det.meta.get("match_app_coverage", det.meta.get("e_app_coverage", 1.0)))
+        strict_app_update = d_app <= max_update_app and (not has_overlap) and (not freeze_active) and (e_app is not None)
+        stale_before = int(trk.app_stale_frames)
+        buffer_size_before = int(trk.get_app_buffer_size())
+        clear_reason = None
+        reject_reason = None
+        recovery_batch_applied = False
+
+        # Compute adaptive buffer upper threshold.
+        app_buffer_upper = float(getattr(self.cfg.match, "app_buffer_upper", 0.12))
+        app_buffer_hard_upper = float(getattr(self.cfg.match, "app_buffer_hard_upper", 0.18))
+        app_buffer_relax_tau = max(float(getattr(self.cfg.match, "app_buffer_relax_tau", 8.0)), 1e-6)
+        relax = 1.0 - math.exp(-float(stale_before) / app_buffer_relax_tau)
+        buffer_upper_eff = min(app_buffer_upper + (app_buffer_hard_upper - app_buffer_upper) * relax, app_buffer_hard_upper)
+
+        # Safety gates for recovery buffer entry.
+        motion_ok = d_motion <= float(getattr(self.cfg.match, "app_buffer_max_motion", max_update_motion))
+        pose_ok = d_pose <= float(getattr(self.cfg.match, "app_buffer_max_pose", max_update_pose))
+        coverage_ok = app_coverage >= float(getattr(self.cfg.match, "app_buffer_min_coverage", 0.70))
+        overlap_ok = not has_overlap
+        freeze_ok = not freeze_active
+
+        recovery_candidate = (
+            (not strict_app_update) and (e_app is not None) and (d_app > max_update_app)
+            and (d_app <= buffer_upper_eff) and (d_app <= app_buffer_hard_upper)
+            and motion_ok and pose_ok and coverage_ok and overlap_ok and freeze_ok
+        )
+
+        mode = "reject"
+        update_app = False
+        # Mode 1: strict direct EMA update.
+        if strict_app_update:
+            mode = "strict"
+            update_app = True
+        # Mode 2: recovery buffer candidate.
+        elif recovery_candidate:
+            mode = "buffer_candidate"
+            trk.add_app_buffer_embedding(e_app=e_app, meta={"frame_idx": self._frame_idx, "det_idx": int(det_idx)})
+            if trk.get_app_buffer_size() >= max(1, int(getattr(self.cfg.match, "app_buffer_min_size", 3))):
+                batch_emb = np.mean(np.stack(trk.app_update_buffer, axis=0), axis=0)
+                if trk.apply_recovery_batch_update(batch_emb, float(getattr(self.cfg.match, "app_buffer_recovery_ema_alpha", 0.97))):
+                    mode = "recovery_batch_update"
+                    recovery_batch_applied = True
+                    trk.app_stale_frames = 0
+                    trk.clear_app_buffer("recovery_batch_update")
+                    clear_reason = "recovery_batch_update"
+        # Mode 3: reject and optional buffer clear.
+        else:
+            hard_reject = d_app > app_buffer_hard_upper
+            safety_fail = not (motion_ok and pose_ok and coverage_ok)
+            if has_overlap:
+                reject_reason = "overlap"
+            elif freeze_active:
+                reject_reason = "freeze"
+            elif e_app is None:
+                reject_reason = "missing_e_app"
+            elif hard_reject:
+                reject_reason = "hard_reject"
+            elif safety_fail:
+                reject_reason = "safety_fail"
+            else:
+                reject_reason = "above_buffer_upper"
+            if has_overlap and bool(getattr(self.cfg.match, "app_buffer_clear_on_overlap", True)):
+                trk.clear_app_buffer("overlap")
+                clear_reason = "overlap"
+            elif freeze_active and bool(getattr(self.cfg.match, "app_buffer_clear_on_freeze", True)):
+                trk.clear_app_buffer("freeze")
+                clear_reason = "freeze"
+            elif hard_reject and bool(getattr(self.cfg.match, "app_buffer_clear_on_hard_reject", True)):
+                trk.clear_app_buffer("hard_reject")
+                clear_reason = "hard_reject"
+            elif safety_fail and bool(getattr(self.cfg.match, "app_buffer_clear_on_safety_fail", True)):
+                trk.clear_app_buffer("safety_fail")
+                clear_reason = "safety_fail"
+
+        # Return decision/debug payload.
+        return {
+            "update_app": bool(update_app),
+            "mode": mode,
+            "strict": bool(strict_app_update),
+            "recovery_candidate": bool(recovery_candidate),
+            "recovery_batch_applied": bool(recovery_batch_applied),
+            "coverage": float(app_coverage),
+            "buffer_upper_eff": float(buffer_upper_eff),
+            "buffer_base_upper": float(app_buffer_upper),
+            "buffer_hard_upper": float(app_buffer_hard_upper),
+            "stale_before": int(stale_before),
+            "buffer_size_before": int(buffer_size_before),
+            "clear_reason": clear_reason,
+            "reject_reason": reject_reason,
+            "motion_ok": bool(motion_ok),
+            "pose_ok": bool(pose_ok),
+            "coverage_ok": bool(coverage_ok),
+            "overlap_ok": bool(overlap_ok),
+            "freeze_ok": bool(freeze_ok),
+        }
+
     def _remove_dead(self):
         self.tracks = [
             t for t in self.tracks
@@ -897,7 +1050,29 @@ class MultiObjectTracker:
 
             update_motion = d_motion <= max_update_motion
             update_pose = d_pose <= max_update_pose
-            update_app = d_app <= max_update_app
+            has_overlap = self._prepare_overlap_update_meta(
+                trk=trk,
+                det=det,
+                det_idx_to_track=det_idx_to_track,
+            )
+            freeze_active = trk.is_frozen()
+            app_decision = self._decide_app_buffer_update(
+                trk=trk,
+                det=det,
+                d_motion=d_motion,
+                d_pose=d_pose,
+                d_app=d_app,
+                max_update_app=max_update_app,
+                max_update_motion=max_update_motion,
+                max_update_pose=max_update_pose,
+                has_overlap=has_overlap,
+                freeze_active=freeze_active,
+                det_idx=j_det,
+            )
+            # Decide appearance-memory update mode separately from matching.
+            # Matching already happened; this only protects app_emb_ema.
+            update_app_mode = str(app_decision["mode"])
+            update_app = bool(app_decision["update_app"])
 
             disabled_reasons = []
 
@@ -915,12 +1090,6 @@ class MultiObjectTracker:
             )
             det.meta["track_update_disabled_reasons"] = disabled_reasons
 
-            has_overlap = self._prepare_overlap_update_meta(
-                trk=trk,
-                det=det,
-                det_idx_to_track=det_idx_to_track,
-            )
-
             trk.update(
                 det,
                 ema_alpha=self.cfg.match.emb_ema_alpha,
@@ -929,6 +1098,31 @@ class MultiObjectTracker:
                 update_app=update_app,
                 has_overlap=has_overlap,
             )
+            # Finalize appearance stale counter after Track.update().
+            # Strict updates are confirmed through det.meta["track_app_update_allowed"].
+            if update_app_mode == "strict" and bool(det.meta.get("track_app_update_allowed", False)):
+                if bool(getattr(self.cfg.match, "app_buffer_clear_on_strict_update", True)):
+                    trk.clear_app_buffer("strict_update")
+                    app_decision["clear_reason"] = "strict_update"
+                trk.app_stale_frames = 0
+            elif not bool(app_decision["recovery_batch_applied"]):
+                trk.app_stale_frames += 1
+            trk.last_app_update_mode = update_app_mode
+            app_decision["stale_after"] = int(trk.app_stale_frames)
+            app_decision["buffer_size_after"] = int(trk.get_app_buffer_size())
+            det.meta.update({
+                "app_update_mode": update_app_mode,
+                "app_strict_update": app_decision["strict"], "app_recovery_candidate": app_decision["recovery_candidate"],
+                "app_buffer_upper_eff": app_decision["buffer_upper_eff"], "app_buffer_base_upper": app_decision["buffer_base_upper"],
+                "app_buffer_hard_upper": app_decision["buffer_hard_upper"], "app_stale_frames_before": app_decision["stale_before"],
+                "app_stale_frames_after": app_decision["stale_after"], "app_buffer_size_before": app_decision["buffer_size_before"],
+                "app_buffer_size_after": app_decision["buffer_size_after"], "app_buffer_min_size": int(getattr(self.cfg.match, "app_buffer_min_size", 3)),
+                "app_buffer_clear_reason": app_decision["clear_reason"],
+                "app_buffer_reject_reason": app_decision["reject_reason"], "app_coverage": app_decision["coverage"],
+                "app_buffer_motion_ok": app_decision["motion_ok"], "app_buffer_pose_ok": app_decision["pose_ok"], "app_buffer_coverage_ok": app_decision["coverage_ok"],
+                "app_buffer_overlap_ok": app_decision["overlap_ok"], "app_buffer_freeze_ok": app_decision["freeze_ok"],
+                "app_recovery_batch_update_applied": app_decision["recovery_batch_applied"],
+            })
 
             rec = {
                 "track_idx": i,
@@ -960,6 +1154,15 @@ class MultiObjectTracker:
                 "track_update_skip_reason": det.meta.get("track_update_skip_reason"),
                 "track_app_update_allowed": bool(det.meta.get("track_app_update_allowed", False)),
                 "track_app_update_block_reason": det.meta.get("track_app_update_block_reason"),
+                "app_update_mode": det.meta.get("app_update_mode"),
+                "app_buffer_upper_eff": det.meta.get("app_buffer_upper_eff"),
+                "app_stale_frames_before": det.meta.get("app_stale_frames_before"),
+                "app_stale_frames_after": det.meta.get("app_stale_frames_after"),
+                "app_buffer_size_before": det.meta.get("app_buffer_size_before"),
+                "app_buffer_size_after": det.meta.get("app_buffer_size_after"),
+                "app_buffer_clear_reason": det.meta.get("app_buffer_clear_reason"),
+                "app_buffer_reject_reason": det.meta.get("app_buffer_reject_reason"),
+                "app_recovery_batch_update_applied": det.meta.get("app_recovery_batch_update_applied"),
                 "max_overlap_iou": det.meta.get("max_overlap_iou"),
                 "max_overlap_det_idx": det.meta.get("max_overlap_det_idx"),
                 "min_center_dist_norm": det.meta.get("min_center_dist_norm"),

@@ -43,8 +43,24 @@ tracking:
     greedy_threshold: 4.1     # Max final cost accepted by greedy matcher
     max_update_cost: 1.2      # Max absolute raw weighted cost allowed for Track update
     max_update_motion: 0.08  # If d_motion is above this, skip Kalman/motion update
-    max_update_pose: 0.30    # If d_pose is above this, skip pose memory update
-    max_update_app: 0.06     # If d_app is above this, skip appearance EMA update
+    max_update_pose: 0.25    # If d_pose is above this, skip pose memory update
+    max_update_app: 0.06     # Strict direct EMA update threshold for current detection.
+    # ----------------------------------------------------------------------
+    # Appearance EMA recovery buffer
+    # ----------------------------------------------------------------------
+    app_buffer_upper: 0.12   # Base upper d_app limit for putting embeddings into recovery buffer.
+    app_buffer_hard_upper: 0.18  # Maximum relaxed d_app limit; above this embeddings are never buffered.
+    app_buffer_relax_tau: 8  # How fast app_buffer_upper relaxes toward hard_upper as app_stale_frames grows.
+    app_buffer_min_size: 3   # Accepted recovery embeddings needed before batch EMA recovery update.
+    app_buffer_max_motion: 0.08  # Required motion quality gate for recovery buffer entry.
+    app_buffer_max_pose: 0.25    # Required pose quality gate for recovery buffer entry.
+    app_buffer_min_coverage: 0.70  # Minimum appearance crop coverage required for buffer entry.
+    app_buffer_recovery_ema_alpha: 0.97  # Old-EMA weight for recovery batch update; high value keeps it cautious.
+    app_buffer_clear_on_overlap: true       # Clear recovery buffer when overlap-based reject occurs.
+    app_buffer_clear_on_freeze: true        # Clear recovery buffer when freeze-based reject occurs.
+    app_buffer_clear_on_hard_reject: true   # Clear recovery buffer when d_app exceeds hard upper threshold.
+    app_buffer_clear_on_strict_update: true # Clear recovery buffer after successful strict appearance update.
+    app_buffer_clear_on_safety_fail: true   # Clear recovery buffer when motion/pose/coverage safety gates fail.
     missing_app_penalty: 0.08 # Small cost penalty for missing/unknown appearance parts
 
     motion_threshold: 0.09    # Max allowed normalized motion distance
@@ -54,8 +70,9 @@ tracking:
     appearance_threshold: 0.12 # Max allowed appearance distance
                               # Above this -> reject pair
 
-    emb_ema_alpha: 0.1       # EMA update factor for appearance embedding
-                              # Higher -> faster update to new appearance
+    emb_ema_alpha: 0.90      # Weight of OLD appearance EMA.
+                              # Higher -> slower update, more stable memory.
+                              # Lower -> faster update, more aggressive replacement.
     bad_kp_patience: 50       # Frames to wait before updating from bad keypoints
     large_cost: 880.0         # Sentinel cost for invalid / gated pairs
     min_kp_conf: 0.05         # Minimum keypoint confidence

@@ -58,8 +58,25 @@ class MatchConfig:
     max_update_cost: float = 1.2
     max_update_motion: float = 0.08
     max_update_pose: float = 0.30
-    max_update_app: float = 0.12
+    max_update_app: float = 0.12  # Strict threshold for direct Track.update() appearance EMA updates.
     missing_app_penalty: float = 0.08
+    # Appearance EMA recovery buffer configuration.
+    # These parameters do not affect matching directly.
+    # They are used later by MultiObjectTracker to decide whether a matched
+    # detection is allowed to update appearance memory.
+    app_buffer_upper: float = 0.12  # Base recovery-buffer d_app upper bound before stale-based relaxation.
+    app_buffer_hard_upper: float = 0.18  # Absolute cap for recovery-buffer d_app (never buffer above this).
+    app_buffer_relax_tau: float = 8.0  # Relaxation speed from base upper toward hard upper as stale grows.
+    app_buffer_min_size: int = 3  # Required buffered samples before averaged recovery EMA update.
+    app_buffer_max_motion: float = 0.08  # Motion safety gate for entering recovery buffer.
+    app_buffer_max_pose: float = 0.30  # Pose safety gate for entering recovery buffer.
+    app_buffer_min_coverage: float = 0.70  # Minimum crop coverage safety gate for recovery buffering.
+    app_buffer_recovery_ema_alpha: float = 0.97  # Weak recovery EMA: high old-EMA weight for cautious update.
+    app_buffer_clear_on_overlap: bool = True  # Clear buffer on overlap-based reject.
+    app_buffer_clear_on_freeze: bool = True  # Clear buffer on freeze-based reject.
+    app_buffer_clear_on_hard_reject: bool = True  # Clear buffer when d_app > app_buffer_hard_upper.
+    app_buffer_clear_on_strict_update: bool = True  # Clear buffer after successful strict update.
+    app_buffer_clear_on_safety_fail: bool = True  # Clear buffer when motion/pose/coverage gates fail.
 
 
 @dataclass

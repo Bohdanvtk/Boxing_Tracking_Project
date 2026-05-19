@@ -36,6 +36,21 @@ def make_match_config(cfg: dict) -> MatchConfig:
     max_update_motion = float(_get(cfg, "tracking.matching.max_update_motion", 0.08))
     max_update_pose = float(_get(cfg, "tracking.matching.max_update_pose", 0.30))
     max_update_app = float(_get(cfg, "tracking.matching.max_update_app", 0.12))
+    # Appearance EMA recovery buffer parameters.
+    # Parsed into MatchConfig but used by MultiObjectTracker, not by matcher.
+    app_buffer_upper = float(_get(cfg, "tracking.matching.app_buffer_upper", 0.12))
+    app_buffer_hard_upper = float(_get(cfg, "tracking.matching.app_buffer_hard_upper", 0.18))
+    app_buffer_relax_tau = float(_get(cfg, "tracking.matching.app_buffer_relax_tau", 8))
+    app_buffer_min_size = int(_get(cfg, "tracking.matching.app_buffer_min_size", 3))
+    app_buffer_max_motion = float(_get(cfg, "tracking.matching.app_buffer_max_motion", 0.08))
+    app_buffer_max_pose = float(_get(cfg, "tracking.matching.app_buffer_max_pose", 0.30))
+    app_buffer_min_coverage = float(_get(cfg, "tracking.matching.app_buffer_min_coverage", 0.70))
+    app_buffer_recovery_ema_alpha = float(_get(cfg, "tracking.matching.app_buffer_recovery_ema_alpha", 0.97))
+    app_buffer_clear_on_overlap = bool(_get(cfg, "tracking.matching.app_buffer_clear_on_overlap", True))
+    app_buffer_clear_on_freeze = bool(_get(cfg, "tracking.matching.app_buffer_clear_on_freeze", True))
+    app_buffer_clear_on_hard_reject = bool(_get(cfg, "tracking.matching.app_buffer_clear_on_hard_reject", True))
+    app_buffer_clear_on_strict_update = bool(_get(cfg, "tracking.matching.app_buffer_clear_on_strict_update", True))
+    app_buffer_clear_on_safety_fail = bool(_get(cfg, "tracking.matching.app_buffer_clear_on_safety_fail", True))
     missing_app_penalty = float(_get(cfg, "tracking.matching.missing_app_penalty", 0.08))
     motion_threshold = float(_get(cfg, "tracking.matching.motion_threshold", 1.0))
     pose_threshold = float(_get(cfg, "tracking.matching.pose_threshold", 1.0))
@@ -75,6 +90,19 @@ def make_match_config(cfg: dict) -> MatchConfig:
         max_update_motion=max_update_motion,
         max_update_pose=max_update_pose,
         max_update_app=max_update_app,
+        app_buffer_upper=app_buffer_upper,
+        app_buffer_hard_upper=app_buffer_hard_upper,
+        app_buffer_relax_tau=app_buffer_relax_tau,
+        app_buffer_min_size=app_buffer_min_size,
+        app_buffer_max_motion=app_buffer_max_motion,
+        app_buffer_max_pose=app_buffer_max_pose,
+        app_buffer_min_coverage=app_buffer_min_coverage,
+        app_buffer_recovery_ema_alpha=app_buffer_recovery_ema_alpha,
+        app_buffer_clear_on_overlap=app_buffer_clear_on_overlap,
+        app_buffer_clear_on_freeze=app_buffer_clear_on_freeze,
+        app_buffer_clear_on_hard_reject=app_buffer_clear_on_hard_reject,
+        app_buffer_clear_on_strict_update=app_buffer_clear_on_strict_update,
+        app_buffer_clear_on_safety_fail=app_buffer_clear_on_safety_fail,
         missing_app_penalty=missing_app_penalty,
         motion_threshold=motion_threshold,
         pose_threshold=pose_threshold,
