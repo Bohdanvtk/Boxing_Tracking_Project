@@ -37,6 +37,7 @@ class TrackerConfig:
     reset_g_threshold: float
     debug: bool
     save_log: bool
+    max_unconfirmed_tracks: int = 6
 
     overlap_log_threshold: float = 0.10
     overlap_mechanism: str = "skeleton_capsule"
@@ -541,6 +542,7 @@ class MultiObjectTracker:
             "tracking.min_hits_sub": int(cfg.min_hits_sub),
             "tracking.max_age": int(cfg.max_age),
             "tracking.max_confirmed_age": int(cfg.max_confirmed_age),
+            "tracking.tracker.max_unconfirmed_tracks": int(cfg.max_unconfirmed_tracks),
             "tracking.overlap_mechanism": str(cfg.overlap_mechanism),
             "tracking.overlap_log_threshold": float(cfg.overlap_log_threshold),
             "tracking.skeleton_overlap_threshold": float(cfg.skeleton_overlap_threshold),
@@ -721,6 +723,63 @@ class MultiObjectTracker:
             "overlap_ok": bool(overlap_ok),
             "freeze_ok": bool(freeze_ok),
         }
+
+    def _prune_unconfirmed_tracks(self) -> List[Dict[str, Any]]:
+        """Prune only unconfirmed tracks to keep their count within configured limit."""
+        # Always keep the limit non-negative and fallback-safe.
+        max_unconfirmed = max(0, int(getattr(self.cfg, "max_unconfirmed_tracks", 6)))
+
+        # Unconfirmed means confirmed == False (sub_confirmed tracks are still prunable).
+        unconfirmed = [
+            t for t in self.tracks
+            if not bool(getattr(t, "confirmed", False))
+        ]
+
+        if len(unconfirmed) <= max_unconfirmed:
+            return []
+
+        # Keep best unconfirmed tracks by: hits, sub_confirmed, recency, then younger age.
+        keep = sorted(
+            unconfirmed,
+            key=lambda t: (
+                int(getattr(t, "hits", 0)),
+                int(bool(getattr(t, "sub_confirmed", False))),
+                -int(getattr(t, "time_since_update", 0)),
+                -int(getattr(t, "age", 0)),
+            ),
+            reverse=True,
+        )[:max_unconfirmed]
+
+        keep_ids = {int(t.track_id) for t in keep}
+
+        # Build debug payload for tracks that will be removed.
+        removed = [
+            {
+                "track_id": int(t.track_id),
+                "hits": int(getattr(t, "hits", 0)),
+                "age": int(getattr(t, "age", 0)),
+                "time_since_update": int(getattr(t, "time_since_update", 0)),
+                "sub_confirmed": bool(getattr(t, "sub_confirmed", False)),
+                "confirmed": bool(getattr(t, "confirmed", False)),
+                "reason": "max_unconfirmed_tracks",
+            }
+            for t in self.tracks
+            if not bool(getattr(t, "confirmed", False))
+            and int(t.track_id) not in keep_ids
+        ]
+
+        # Rebuild active set: all confirmed tracks + selected unconfirmed tracks.
+        self.tracks = [
+            t for t in self.tracks
+            if bool(getattr(t, "confirmed", False))
+            or int(t.track_id) in keep_ids
+        ]
+
+        # Drop stale previous-frame matches for pruned track IDs.
+        for item in removed:
+            self.prev_matches.pop(int(item["track_id"]), None)
+
+        return removed
 
     def _remove_dead(self):
         self.tracks = [
@@ -1215,6 +1274,17 @@ class MultiObjectTracker:
             trk = self._new_track(detections[j])
             self.tracks.append(trk)
             new_matches[int(trk.track_id)] = int(j)
+
+        # Prune excess unconfirmed tracks right after confirmed births are spawned.
+        pruned_unconfirmed_tracks = self._prune_unconfirmed_tracks()
+        pruned_ids = {int(x["track_id"]) for x in pruned_unconfirmed_tracks}
+        # Remove just-pruned track IDs from new matches to avoid stale links.
+        new_matches = {
+            int(track_id): int(det_idx)
+            for track_id, det_idx in new_matches.items()
+            if int(track_id) not in pruned_ids
+        }
+        log.meta["pruned_unconfirmed_tracks"] = pruned_unconfirmed_tracks
 
         # 9. Build all current matches, including newly spawned tracks.
         all_current_matches: Dict[int, int] = {
