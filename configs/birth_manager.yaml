@@ -22,7 +22,7 @@ birth_manager:
 
   # Motion gate for matching current unmatched detections to existing pending candidates.
   # Pairs above this normalized distance are invalid.
-  pending_motion_threshold: 0.20
+  pending_motion_threshold: 0.60
 
   # Required matched hits for a normal/far pending candidate to confirm birth.
   normal_confirm_hits: 2
@@ -70,3 +70,8 @@ birth_manager:
 
   # Extra penalty for near-existing candidates to reduce accidental duplicate births.
   near_existing_penalty: 0.03
+
+  # Hard gate on combined pending birth score after motion and pose/app penalties.
+  # If <= 0, this gate is disabled.
+  # Prevents weak pending continuations when motion passes but pose/app is unreliable.
+  max_birth_score: 0.45

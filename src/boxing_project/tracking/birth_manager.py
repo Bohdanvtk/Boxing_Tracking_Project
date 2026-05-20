@@ -32,6 +32,7 @@ class BirthConfig:
     app_bad_penalty: float = 0.12
     app_bad_threshold: float = 0.35
     near_existing_penalty: float = 0.03
+    max_birth_score: float = 0.0
 
 
 @dataclass
@@ -64,7 +65,15 @@ class BirthResult:
 
 
 class BirthManager:
-    def __init__(self, cfg: BirthConfig, dt: float, process_var: float, measure_var: float, p0: float, pose_core: Sequence[int]):
+    def __init__(
+        self,
+        cfg: BirthConfig,
+        dt: float,
+        process_var: float,
+        measure_var: float,
+        p0: float,
+        pose_core: Sequence[int],
+    ):
         self.cfg = cfg
         self.dt = float(dt)
         self.process_var = float(process_var)
@@ -82,10 +91,13 @@ class BirthManager:
     def _mark_confirmed_birth(self, cand: PendingCandidate) -> Tuple[str, bool]:
         birth_mode = "easy_start" if cand.birth_mode == "easy_start" else "normal"
         ignore_overlap = birth_mode == "easy_start"
+
         if not isinstance(cand.last_detection.meta, dict):
             cand.last_detection.meta = {}
+
         cand.last_detection.meta["birth_mode"] = birth_mode
         cand.last_detection.meta["ignore_overlap_on_birth"] = bool(ignore_overlap)
+
         return birth_mode, ignore_overlap
 
     def _new_pending_id(self) -> str:
@@ -93,22 +105,32 @@ class BirthManager:
         self._next_pending_id += 1
         return pid
 
-    def _motion_detail(self, kf: KalmanTracker, center: Tuple[float, float]) -> Tuple[float, float]:
+    def _motion_detail(
+        self,
+        kf: KalmanTracker,
+        center: Tuple[float, float],
+    ) -> Tuple[float, float]:
         d2 = float(kf.gating_distance(np.asarray(center, dtype=float)))
         return d2, d2 / float(max(self.cfg.chi2_gating, 1e-6))
 
     def _motion_dist(self, kf: KalmanTracker, center: Tuple[float, float]) -> float:
         return self._motion_detail(kf, center)[1]
 
-    def _nearest_existing(self, det: Detection, tracks: Sequence[Track]) -> Dict[str, Any]:
+    def _nearest_existing(
+        self,
+        det: Detection,
+        tracks: Sequence[Track],
+    ) -> Dict[str, Any]:
         best = {
             "nearest_existing_track_idx": None,
             "nearest_existing_track_id": None,
             "nearest_existing_d2": None,
             "nearest_existing_d_motion": float("inf"),
         }
+
         for idx, t in enumerate(tracks):
             d2, d_motion = self._motion_detail(t.kf, det.center)
+
             if d_motion < float(best["nearest_existing_d_motion"]):
                 best = {
                     "nearest_existing_track_idx": int(idx),
@@ -116,6 +138,7 @@ class BirthManager:
                     "nearest_existing_d2": d2,
                     "nearest_existing_d_motion": d_motion,
                 }
+
         return best
 
     @staticmethod
@@ -131,13 +154,66 @@ class BirthManager:
             "misses": int(cand.misses),
             "age": int(cand.age),
             "max_pending_age": int(self.cfg.max_pending_age),
+            "max_pending_misses": int(self.cfg.max_pending_misses),
             "age_left": max(0, int(self.cfg.max_pending_age) - int(cand.age)),
             "required_confirm_hits": int(cand.required_confirm_hits),
-            "hits_left_to_track": max(0, int(cand.required_confirm_hits) - int(cand.hits)),
+            "hits_left_to_track": max(
+                0,
+                int(cand.required_confirm_hits) - int(cand.hits),
+            ),
             "ready_for_track": bool(
                 int(cand.hits) >= int(cand.required_confirm_hits)
                 and int(cand.age) <= int(self.cfg.max_pending_age)
             ),
+        }
+
+    def _pending_identity_debug(self, cand: PendingCandidate) -> Dict[str, Any]:
+        return {
+            "pending_id": cand.pending_id,
+            "status": cand.status,
+            "birth_mode": cand.birth_mode,
+            "very_close_bypass": bool(cand.very_close_bypass),
+            "first_seen_frame": int(cand.first_seen_frame),
+            "last_seen_frame": int(cand.last_seen_frame),
+            "last_det_idx": int(cand.last_det_idx),
+            "last_center": tuple(map(float, cand.last_center)),
+            "nearest_existing_track_id": cand.nearest_existing_track_id,
+            "nearest_existing_d_motion": cand.nearest_existing_d_motion,
+        }
+
+    def _pending_frame_attempt_debug(
+        self,
+        pending_id: str,
+        comparisons: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        rows = [
+            c for c in comparisons
+            if c.get("pending_id") == pending_id
+        ]
+
+        scored_rows = [
+            c for c in rows
+            if c.get("birth_score") is not None
+        ]
+
+        best = None
+        if scored_rows:
+            best = min(scored_rows, key=lambda x: float(x.get("birth_score", float("inf"))))
+
+        return {
+            "compared_detection_count": int(len(rows)),
+            "motion_passed_count": int(sum(bool(c.get("motion_passed", False)) for c in rows)),
+            "score_passed_count": int(
+                sum(
+                    bool(c.get("score_passed", c.get("motion_passed", False)))
+                    for c in rows
+                )
+            ),
+            "best_det_idx": None if best is None else best.get("det_idx"),
+            "best_birth_score": None if best is None else best.get("birth_score"),
+            "best_reject_reason": None if best is None else best.get("reject_reason"),
+            "best_motion_passed": None if best is None else best.get("motion_passed"),
+            "best_score_passed": None if best is None else best.get("score_passed"),
         }
 
     def _closeness_status(self, d_motion: float) -> str:
@@ -156,21 +232,25 @@ class BirthManager:
             self.pose_core,
             self.cfg.min_kp_conf,
         )
+
         if common is None or int(common.size) < int(self.cfg.min_core_kps):
             return "missing", float(self.cfg.pose_missing_penalty)
 
         v1 = np.asarray(cand.last_keypoints, dtype=float)[common, :2]
         v2 = np.asarray(det.keypoints, dtype=float)[common, :2]
+
         d = float(np.nanmean(np.linalg.norm(v1 - v2, axis=1)))
         scale = float(np.nanstd(v1) + np.nanstd(v2) + 1e-6)
         score = d / scale
 
         if score <= 0.8:
             return "ok", 0.0
+
         return "bad", float(self.cfg.pose_bad_penalty)
 
     def _app_penalty(self, cand: PendingCandidate, det: Detection) -> Tuple[str, float]:
         emb = det.meta.get("e_app") if isinstance(det.meta, dict) else None
+
         if cand.app_emb_ema is None or emb is None:
             return "missing", float(self.cfg.app_missing_penalty)
 
@@ -179,6 +259,7 @@ class BirthManager:
 
         if d_app <= self.cfg.app_bad_threshold:
             return "ok", 0.0
+
         return "bad", float(self.cfg.app_bad_penalty)
 
     def update(
@@ -212,6 +293,7 @@ class BirthManager:
             c.kf.predict()
 
         pair_rows = []
+
         for pid, c in self.pending.items():
             for j in unmatched_det_indices:
                 det = detections[int(j)]
@@ -219,40 +301,89 @@ class BirthManager:
                 motion_passed = d_motion <= self.cfg.pending_motion_threshold
 
                 comp = {
-                    "pending_id": pid,
+                    **self._pending_identity_debug(c),
+                    **self._pending_progress_debug(c),
                     "det_idx": int(j),
+                    "det_center": tuple(map(float, det.center)),
                     "d2": d2,
                     "d_motion": d_motion,
                     "motion_threshold": float(self.cfg.pending_motion_threshold),
                     "motion_passed": bool(motion_passed),
                     "matched_to_pending": False,
                     "pose_status": "not_checked",
+                    "pose_penalty": None,
                     "app_status": "not_checked",
-                    **self._pending_progress_debug(c),
+                    "app_penalty": None,
+                    "near_existing_penalty": None,
+                    "birth_score": None,
+                    "score_formula": None,
+                    "max_birth_score": float(self.cfg.max_birth_score),
+                    "score_passed": False,
+                    "reject_reason": None,
                 }
 
                 if not motion_passed:
+                    comp["reject_reason"] = "motion_threshold"
                     debug["pending_comparisons"].append(comp)
                     continue
 
                 pose_status, pose_penalty = self._pose_penalty(c, det)
                 app_status, app_penalty = self._app_penalty(c, det)
-                near_pen = self.cfg.near_existing_penalty if c.status == "near_existing" else 0.0
+                near_pen = (
+                    float(self.cfg.near_existing_penalty)
+                    if c.status == "near_existing"
+                    else 0.0
+                )
+
                 score = float(d_motion + pose_penalty + app_penalty + near_pen)
+
+                # Optional hard gate after soft pose/app penalties.
+                # Motion decides whether the pair can be considered at all;
+                # max_birth_score decides whether the combined evidence is still reliable.
+                score_threshold = float(self.cfg.max_birth_score)
+                score_gate_enabled = score_threshold > 0.0
+                score_passed = (not score_gate_enabled) or score <= score_threshold
 
                 comp.update({
                     "pose_status": pose_status,
+                    "pose_penalty": pose_penalty,
                     "app_status": app_status,
+                    "app_penalty": app_penalty,
+                    "near_existing_penalty": near_pen,
                     "birth_score": score,
+                    "score_formula": "d_motion + pose_penalty + app_penalty + near_existing_penalty",
+                    "max_birth_score": score_threshold,
+                    "score_passed": bool(score_passed),
+                    "reject_reason": None if score_passed else "birth_score_threshold",
                 })
+
                 debug["pending_comparisons"].append(comp)
-                pair_rows.append((score, pid, int(j), d2, d_motion, pose_status, pose_penalty, app_status, app_penalty))
+
+                if not score_passed:
+                    continue
+
+                pair_rows.append(
+                    (
+                        score,
+                        pid,
+                        int(j),
+                        d2,
+                        d_motion,
+                        pose_status,
+                        pose_penalty,
+                        app_status,
+                        app_penalty,
+                        near_pen,
+                    )
+                )
 
         pair_rows.sort(key=lambda x: x[0])
+
         taken_p, taken_d, matched = set(), set(), {}
 
         for row in pair_rows:
             _, pid, j, *_ = row
+
             if pid in taken_p or j in taken_d:
                 continue
 
@@ -266,21 +397,44 @@ class BirthManager:
 
         for pid, c in list(self.pending.items()):
             if pid in matched:
-                _, _, j, d2, d_motion, pose_status, pose_penalty, app_status, app_penalty = matched[pid]
+                (
+                    score,
+                    _,
+                    j,
+                    d2,
+                    d_motion,
+                    pose_status,
+                    pose_penalty,
+                    app_status,
+                    app_penalty,
+                    near_pen,
+                ) = matched[pid]
+
                 det = detections[j]
 
                 c.kf.update(np.asarray(det.center, dtype=float))
                 c.last_detection = det
                 c.last_det_idx = int(j)
                 c.last_center = det.center
-                c.last_keypoints = None if det.keypoints is None else np.asarray(det.keypoints, dtype=float)
-                c.last_kp_conf = None if det.kp_conf is None else np.asarray(det.kp_conf, dtype=float)
+                c.last_keypoints = (
+                    None
+                    if det.keypoints is None
+                    else np.asarray(det.keypoints, dtype=float)
+                )
+                c.last_kp_conf = (
+                    None
+                    if det.kp_conf is None
+                    else np.asarray(det.kp_conf, dtype=float)
+                )
 
                 emb = det.meta.get("e_app") if isinstance(det.meta, dict) else None
+
                 if emb is not None:
                     e = np.asarray(emb, dtype=np.float32)
-                    c.app_emb_ema = e if c.app_emb_ema is None else (
-                        self.cfg.emb_ema_alpha * c.app_emb_ema
+                    c.app_emb_ema = (
+                        e
+                        if c.app_emb_ema is None
+                        else self.cfg.emb_ema_alpha * c.app_emb_ema
                         + (1.0 - self.cfg.emb_ema_alpha) * e
                     )
 
@@ -292,26 +446,37 @@ class BirthManager:
                 progress = self._pending_progress_debug(c)
 
                 debug["candidate_events"].append({
-                    "pending_id": pid,
+                    **self._pending_identity_debug(c),
                     "event": "matched_detection",
                     "det_idx": int(j),
+                    "matched_det_idx": int(j),
                     "status": c.status,
                     **progress,
-                    "birth_mode": c.birth_mode,
                     "ignore_overlap_on_birth": c.birth_mode == "easy_start",
-                    "very_close_bypass": bool(c.very_close_bypass),
                     "easy_birth_created_count": int(self.easy_birth_created_count),
                     "easy_birth_track_limit": int(self.cfg.easy_birth_track_limit),
+                    "matched_birth_score": score,
+                    "matched_d_motion": d_motion,
+                    "matched_pose_status": pose_status,
+                    "matched_pose_penalty": pose_penalty,
+                    "matched_app_status": app_status,
+                    "matched_app_penalty": app_penalty,
+                    "matched_near_existing_penalty": near_pen,
+                    "matched_score_passed": True,
+                    "matched_reject_reason": None,
                 })
 
                 nearest = self._nearest_existing(det, stable_tracks)
+
                 debug["detections"].append({
                     "det_idx": int(j),
                     "det_center": tuple(map(float, det.center)),
                     "action": "pending_matched",
                     "reason": "matched_existing_pending_candidate",
                     **nearest,
-                    "closeness_status": self._closeness_status(float(nearest["nearest_existing_d_motion"])),
+                    "closeness_status": self._closeness_status(
+                        float(nearest["nearest_existing_d_motion"])
+                    ),
                     "very_close_threshold": float(self.cfg.very_close_threshold),
                     "near_threshold": float(self.cfg.near_threshold),
                     "pending_id": pid,
@@ -328,8 +493,15 @@ class BirthManager:
                         "motion_threshold": float(self.cfg.pending_motion_threshold),
                         "motion_passed": True,
                         "pose_status": pose_status,
+                        "pose_penalty": pose_penalty,
                         "app_status": app_status,
-                        "birth_score": matched[pid][0],
+                        "app_penalty": app_penalty,
+                        "near_existing_penalty": near_pen,
+                        "birth_score": score,
+                        "score_formula": "d_motion + pose_penalty + app_penalty + near_existing_penalty",
+                        "max_birth_score": float(self.cfg.max_birth_score),
+                        "score_passed": True,
+                        "reject_reason": None,
                         "matched_to_pending": True,
                     },
                     "d_motion": d_motion,
@@ -337,22 +509,26 @@ class BirthManager:
                     "pose_penalty": pose_penalty,
                     "app_status": app_status,
                     "app_penalty": app_penalty,
-                    "birth_score": matched[pid][0],
+                    "near_existing_penalty": near_pen,
+                    "birth_score": score,
                 })
+
             else:
                 c.misses += 1
                 c.age += 1
 
                 debug["candidate_events"].append({
-                    "pending_id": pid,
+                    **self._pending_identity_debug(c),
                     "event": "missed_this_frame",
                     "status": c.status,
                     **self._pending_progress_debug(c),
-                    "birth_mode": c.birth_mode,
                     "ignore_overlap_on_birth": c.birth_mode == "easy_start",
-                    "very_close_bypass": bool(c.very_close_bypass),
                     "easy_birth_created_count": int(self.easy_birth_created_count),
                     "easy_birth_track_limit": int(self.cfg.easy_birth_track_limit),
+                    **self._pending_frame_attempt_debug(
+                        pending_id=pid,
+                        comparisons=debug["pending_comparisons"],
+                    ),
                 })
 
             if c.status == "blocked":
@@ -365,11 +541,15 @@ class BirthManager:
 
                 if nearest_d > self.cfg.very_close_threshold:
                     old_status = c.status
-                    c.status = "near_existing" if nearest_d <= self.cfg.near_threshold else "normal"
+                    c.status = (
+                        "near_existing"
+                        if nearest_d <= self.cfg.near_threshold
+                        else "normal"
+                    )
 
                     if c.status != old_status:
                         debug["candidate_events"].append({
-                            "pending_id": pid,
+                            **self._pending_identity_debug(c),
                             "event": "status_changed",
                             "from_status": old_status,
                             "to_status": c.status,
@@ -382,16 +562,14 @@ class BirthManager:
                 progress = self._pending_progress_debug(c)
 
                 debug["confirmed"].append({
-                    "pending_id": pid,
+                    **self._pending_identity_debug(c),
                     "source_det_idx": int(c.last_det_idx),
                     "reason": "stable_pending_candidate",
                     "status": c.status,
                     **progress,
                     "hits_left_to_track": 0,
                     "ready_for_track": True,
-                    "birth_mode": c.birth_mode,
                     "ignore_overlap_on_birth": c.birth_mode == "easy_start",
-                    "very_close_bypass": bool(c.very_close_bypass),
                     "easy_birth_created_count": int(self.easy_birth_created_count),
                     "easy_birth_track_limit": int(self.cfg.easy_birth_track_limit),
                     "will_create_new_track": True,
@@ -399,7 +577,7 @@ class BirthManager:
 
             if c.age > self.cfg.max_pending_age or c.misses > self.cfg.max_pending_misses:
                 debug["candidate_events"].append({
-                    "pending_id": pid,
+                    **self._pending_identity_debug(c),
                     "event": "removed",
                     "reason": "expired_pending_candidate",
                     **self._pending_progress_debug(c),
@@ -411,18 +589,23 @@ class BirthManager:
 
         for pid in confirmed_ids:
             c = self.pending.pop(pid, None)
+
             if c is not None:
                 birth_mode, ignore_overlap_on_birth = self._mark_confirmed_birth(c)
+
                 if birth_mode == "easy_start":
                     self.easy_birth_created_count += 1
+
                 for item in debug["confirmed"]:
                     if item.get("pending_id") == pid:
                         item["birth_mode"] = birth_mode
                         item["ignore_overlap_on_birth"] = bool(ignore_overlap_on_birth)
+
                 confirmed.append(int(c.last_det_idx))
 
         easy_birth_reserved_count = sum(
-            1 for c in self.pending.values() if c.birth_mode == "easy_start"
+            1 for c in self.pending.values()
+            if c.birth_mode == "easy_start"
         )
 
         for j in unmatched_det_indices:
@@ -436,7 +619,8 @@ class BirthManager:
 
             easy_birth_available = (
                 self.cfg.easy_birth_track_limit > 0
-                and self.easy_birth_created_count + easy_birth_reserved_count < self.cfg.easy_birth_track_limit
+                and self.easy_birth_created_count + easy_birth_reserved_count
+                < self.cfg.easy_birth_track_limit
             )
 
             if easy_birth_available:
@@ -447,6 +631,7 @@ class BirthManager:
                 birth_mode = "easy_start"
                 very_close_bypass = nearest_d <= self.cfg.very_close_threshold
                 easy_birth_reserved_count += 1
+
             elif nearest_d <= self.cfg.very_close_threshold:
                 status = "blocked"
                 action = "blocked_pending"
@@ -454,6 +639,7 @@ class BirthManager:
                 req = self.cfg.very_close_confirm_hits
                 birth_mode = "normal"
                 very_close_bypass = False
+
             elif nearest_d <= self.cfg.near_threshold:
                 status = "near_existing"
                 action = "pending_created"
@@ -461,6 +647,7 @@ class BirthManager:
                 req = self.cfg.near_confirm_hits
                 birth_mode = "normal"
                 very_close_bypass = False
+
             else:
                 status = "normal"
                 action = "pending_created"
@@ -470,6 +657,7 @@ class BirthManager:
                 very_close_bypass = False
 
             pid = self._new_pending_id()
+
             kf = KalmanTracker(
                 x0=[det.center[0], det.center[1], 0.0, 0.0],
                 dt=self.dt,
@@ -501,17 +689,17 @@ class BirthManager:
                 birth_mode=birth_mode,
                 very_close_bypass=very_close_bypass,
             )
+
             self.pending[pid] = cand
             progress = self._pending_progress_debug(cand)
 
             debug["candidate_events"].append({
-                "pending_id": pid,
+                **self._pending_identity_debug(cand),
                 "event": "created",
                 "det_idx": int(j),
                 "status": status,
                 **progress,
-                "birth_mode": birth_mode,
-                "very_close_bypass": bool(very_close_bypass),
+                "ignore_overlap_on_birth": birth_mode == "easy_start",
                 "easy_birth_created_count": int(self.easy_birth_created_count),
                 "easy_birth_track_limit": int(self.cfg.easy_birth_track_limit),
                 "nearest_existing_track_id": nearest_id,
@@ -541,13 +729,17 @@ class BirthManager:
 
             if birth_mode == "easy_start" and cand.hits >= cand.required_confirm_hits:
                 self.pending.pop(pid, None)
+
                 birth_mode, ignore_overlap_on_birth = self._mark_confirmed_birth(cand)
+
                 self.easy_birth_created_count += 1
                 easy_birth_reserved_count -= 1
+
                 confirmed.append(int(cand.last_det_idx))
                 progress = self._pending_progress_debug(cand)
+
                 debug["confirmed"].append({
-                    "pending_id": pid,
+                    **self._pending_identity_debug(cand),
                     "source_det_idx": int(cand.last_det_idx),
                     "reason": "stable_pending_candidate",
                     "status": cand.status,
@@ -562,17 +754,19 @@ class BirthManager:
                     "will_create_new_track": True,
                 })
 
-        debug["candidates"] = [{
-            "pending_id": c.pending_id,
-            "status": c.status,
-            **self._pending_progress_debug(c),
-            "birth_mode": c.birth_mode,
-            "very_close_bypass": bool(c.very_close_bypass),
-            "last_det_idx": int(c.last_det_idx),
-            "last_center": tuple(map(float, c.last_center)),
-            "nearest_existing_track_id": c.nearest_existing_track_id,
-            "nearest_existing_d_motion": c.nearest_existing_d_motion,
-        } for c in self.pending.values()]
+        debug["candidates"] = [
+            {
+                **self._pending_identity_debug(c),
+                **self._pending_progress_debug(c),
+                "birth_mode": c.birth_mode,
+                "very_close_bypass": bool(c.very_close_bypass),
+                "last_det_idx": int(c.last_det_idx),
+                "last_center": tuple(map(float, c.last_center)),
+                "nearest_existing_track_id": c.nearest_existing_track_id,
+                "nearest_existing_d_motion": c.nearest_existing_d_motion,
+            }
+            for c in self.pending.values()
+        ]
 
         debug["summary"]["confirmed_count"] = int(len(confirmed))
         debug["summary"]["pending_count_after"] = int(len(self.pending))

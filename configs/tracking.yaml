@@ -115,9 +115,9 @@ tracking:
       - 5   # Left Shoulder
 
   tracker:
-    max_age: 20                # Max missed frames for unconfirmed track
-    max_confirmed_age: 75     # Max missed frames for confirmed track
-    min_hits: 20              # Matches needed to confirm a track
+    max_age: 10                # Max missed frames for unconfirmed track
+    max_confirmed_age: 30     # Max missed frames for confirmed track
+    min_hits: 15              # Matches needed to confirm a track
     min_hits_sub: 4          # Matches needed for sub-confirmed adaptive overlap
     min_kp_conf: 0.009         # Minimum keypoint confidence for track update
     reset_g_threshold: 0.32   # If g < threshold -> activate reset mode

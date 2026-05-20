@@ -481,6 +481,39 @@ def append_birth_debug(birth_debug: Dict[str, Any]) -> None:
         return
     GENERAL_LOG.extend(format_birth_debug_lines(birth_debug))
 
+def format_removed_tracks_lines(
+    pruned: List[Dict[str, Any]],
+    dead: List[Dict[str, Any]],
+) -> List[str]:
+    records = []
+
+    for rec in pruned or []:
+        item = dict(rec)
+        item["remove_type"] = "pruned"
+        records.append(item)
+
+    for rec in dead or []:
+        item = dict(rec)
+        item["remove_type"] = "dead"
+        records.append(item)
+
+    if not records:
+        return []
+
+    lines = ["=" * 80, "REMOVED TRACKS", "=" * 80]
+
+    for r in records:
+        lines.append(
+            f"{r.get('remove_type')} track_id={r.get('track_id')}: "
+            f"h={r.get('hits')}, "
+            f"a={r.get('age')}, "
+            f"tsu={r.get('time_since_update')}, "
+            f"sub={str(bool(r.get('sub_confirmed', False))).lower()}, "
+            f"conf={str(bool(r.get('confirmed', False))).lower()}, "
+            f"reason={r.get('reason')}"
+        )
+
+    return lines
 
 def format_birth_debug_lines(birth_debug: Dict[str, Any]) -> List[str]:
     lines: List[str] = []
@@ -488,23 +521,36 @@ def format_birth_debug_lines(birth_debug: Dict[str, Any]) -> List[str]:
         return lines
 
     def _f(value: Any) -> str:
-        return "None" if value is None else f"{float(value):.6f}"
+        if value is None:
+            return "None"
+        try:
+            return f"{float(value):.6f}"
+        except (TypeError, ValueError):
+            return str(value)
+
+    def _b(value: Any) -> str:
+        return str(bool(value)).lower()
 
     lines.extend(["=" * 80, "BIRTH DEBUG", "=" * 80])
+
     summary = birth_debug.get("summary", {})
     if isinstance(summary, dict) and summary:
         lines.append(
             "summary: "
             f"incoming_unmatched={summary.get('incoming_unmatched_count', 0)}, "
             f"existing_tracks={summary.get('existing_tracks_count', 0)}, "
+            f"stable_existing_tracks={summary.get('stable_existing_tracks_count', 0)}, "
             f"pending_before={summary.get('pending_count_before', 0)}, "
             f"confirmed={summary.get('confirmed_count', 0)}, "
-            f"pending_after={summary.get('pending_count_after', 0)}"
+            f"pending_after={summary.get('pending_count_after', 0)}, "
+            f"easy_birth={summary.get('easy_birth_created_count', 0)}/"
+            f"{summary.get('easy_birth_track_limit', 0)}"
         )
 
     for item in birth_debug.get("detections", []):
         det_idx = item.get("det_idx", "N/A")
         center = item.get("det_center")
+
         lines.append(f"Unmatched Det#{det_idx} center={center}:")
         lines.append(f"  action={item.get('action')}")
         lines.append(f"  reason={item.get('reason')}")
@@ -520,6 +566,7 @@ def format_birth_debug_lines(birth_debug: Dict[str, Any]) -> List[str]:
             f"    thresholds: very_close={_f(item.get('very_close_threshold'))}, "
             f"near={_f(item.get('near_threshold'))}"
         )
+
         comp = item.get("pending_comparison")
         if isinstance(comp, dict):
             lines.append("  pending comparison:")
@@ -527,45 +574,184 @@ def format_birth_debug_lines(birth_debug: Dict[str, Any]) -> List[str]:
             lines.append(f"    d2={_f(comp.get('d2'))}")
             lines.append(f"    d_motion={_f(comp.get('d_motion'))}")
             lines.append(f"    motion_threshold={_f(comp.get('motion_threshold'))}")
-            lines.append(f"    motion_passed={str(bool(comp.get('motion_passed', False))).lower()}")
+            lines.append(f"    motion_passed={_b(comp.get('motion_passed', False))}")
+            lines.append(
+                f"    score = d_motion({_f(comp.get('d_motion'))}) "
+                f"+ pose_penalty({_f(comp.get('pose_penalty'))}) "
+                f"+ app_penalty({_f(comp.get('app_penalty'))}) "
+                f"+ near_existing_penalty({_f(comp.get('near_existing_penalty'))})"
+            )
             lines.append(f"    pose_status={comp.get('pose_status')}")
+            lines.append(f"    pose_penalty={_f(comp.get('pose_penalty'))}")
             lines.append(f"    app_status={comp.get('app_status')}")
-            if "birth_score" in comp:
-                lines.append(f"    birth_score={_f(comp.get('birth_score'))}")
-            lines.append(f"    matched_to_pending={str(bool(comp.get('matched_to_pending', False))).lower()}")
+            lines.append(f"    app_penalty={_f(comp.get('app_penalty'))}")
+            lines.append(f"    near_existing_penalty={_f(comp.get('near_existing_penalty'))}")
+            lines.append(f"    birth_score={_f(comp.get('birth_score'))}")
+            lines.append(f"    max_birth_score={_f(comp.get('max_birth_score'))}")
+            lines.append(f"    score_passed={_b(comp.get('score_passed', False))}")
+            lines.append(f"    reject_reason={comp.get('reject_reason')}")
+            lines.append(f"    matched_to_pending={_b(comp.get('matched_to_pending', False))}")
 
     comps = birth_debug.get("pending_comparisons", [])
     if isinstance(comps, list) and comps:
         lines.append("Pending comparisons:")
+
         for comp in comps:
-            lines.append(
-                f"  {comp.get('pending_id')} vs Det#{comp.get('det_idx')}: "
-                f"d2={_f(comp.get('d2'))}, d_motion={_f(comp.get('d_motion'))}, "
-                f"thr={_f(comp.get('motion_threshold'))}, motion_passed={str(bool(comp.get('motion_passed', False))).lower()}, "
-                f"pose={comp.get('pose_status')}, app={comp.get('app_status')}, "
-                f"score={_f(comp.get('birth_score'))}, matched={str(bool(comp.get('matched_to_pending', False))).lower()}"
+            hits = comp.get("hits")
+            required = comp.get("required_confirm_hits")
+            age = comp.get("age")
+            max_age = comp.get("max_pending_age")
+            misses = comp.get("misses")
+            max_misses = comp.get("max_pending_misses")
+
+            motion_cmp = "<=" if bool(comp.get("motion_passed", False)) else ">"
+            score = comp.get("birth_score")
+            max_score = comp.get("max_birth_score")
+            score_gate_enabled = max_score is not None and float(max_score) > 0.0
+            score_cmp = "<=" if bool(comp.get("score_passed", False)) else ">"
+            score_part = (
+                f"score={_f(score)}{score_cmp}{_f(max_score)}"
+                if score_gate_enabled
+                else f"score={_f(score)}"
             )
+
+            lines.append(
+                f"  {comp.get('pending_id')}"
+                f"(status={comp.get('status')}, mode={comp.get('birth_mode')}, "
+                f"hits={hits}/{required}, misses={misses}/{max_misses}, "
+                f"age={age}/{max_age}, last_det={comp.get('last_det_idx')}, "
+                f"near_track={comp.get('nearest_existing_track_id')}) "
+                f"vs Det#{comp.get('det_idx')}: "
+                f"d_motion={_f(comp.get('d_motion'))}{motion_cmp}{_f(comp.get('motion_threshold'))} "
+                f"motion={_b(comp.get('motion_passed', False))}, "
+                f"pose={comp.get('pose_status')}(+{_f(comp.get('pose_penalty'))}), "
+                f"app={comp.get('app_status')}(+{_f(comp.get('app_penalty'))}), "
+                f"near_pen={_f(comp.get('near_existing_penalty'))}, "
+                f"{score_part}, "
+                f"score_passed={_b(comp.get('score_passed', False))}, "
+                f"matched={_b(comp.get('matched_to_pending', False))}, "
+                f"reject={comp.get('reject_reason')}"
+            )
+
+    events = birth_debug.get("candidate_events", [])
+    if isinstance(events, list) and events:
+        lines.append("Pending events:")
+
+        for event in events:
+            ev = event.get("event")
+            pid = event.get("pending_id")
+            status = event.get("status")
+            hits = event.get("hits")
+            required = event.get("required_confirm_hits")
+            misses = event.get("misses")
+            max_misses = event.get("max_pending_misses")
+            age = event.get("age")
+            max_age = event.get("max_pending_age")
+
+            if ev == "matched_detection":
+                lines.append(
+                    f"  {pid} event=matched_detection Det#{event.get('matched_det_idx')} "
+                    f"status={status} hits={hits}/{required} age={age}/{max_age} "
+                    f"score={_f(event.get('matched_birth_score'))} "
+                    f"d_motion={_f(event.get('matched_d_motion'))} "
+                    f"pose={event.get('matched_pose_status')}(+{_f(event.get('matched_pose_penalty'))}) "
+                    f"app={event.get('matched_app_status')}(+{_f(event.get('matched_app_penalty'))}) "
+                    f"near_pen={_f(event.get('matched_near_existing_penalty'))} "
+                    f"ready={_b(event.get('ready_for_track', False))}"
+                )
+
+            elif ev == "missed_this_frame":
+                lines.append(
+                    f"  {pid} event=missed_this_frame "
+                    f"status={status} hits={hits}/{required} "
+                    f"misses={misses}/{max_misses} age={age}/{max_age} "
+                    f"compared={event.get('compared_detection_count')} "
+                    f"motion_passed={event.get('motion_passed_count')} "
+                    f"score_passed={event.get('score_passed_count')} "
+                    f"best_det=Det#{event.get('best_det_idx')} "
+                    f"best_score={_f(event.get('best_birth_score'))} "
+                    f"best_reject={event.get('best_reject_reason')}"
+                )
+
+            elif ev == "created":
+                lines.append(
+                    f"  {pid} event=created Det#{event.get('det_idx')} "
+                    f"status={status} mode={event.get('birth_mode')} "
+                    f"hits={hits}/{required} age={age}/{max_age} "
+                    f"near_track={event.get('nearest_existing_track_id')} "
+                    f"near_d_motion={_f(event.get('nearest_existing_d_motion'))} "
+                    f"very_close_bypass={_b(event.get('very_close_bypass', False))}"
+                )
+
+            elif ev == "removed":
+                lines.append(
+                    f"  {pid} event=removed reason={event.get('reason')} "
+                    f"status={status} hits={hits}/{required} "
+                    f"misses={misses}/{max_misses} age={age}/{max_age}"
+                )
+
+            elif ev == "status_changed":
+                lines.append(
+                    f"  {pid} event=status_changed "
+                    f"{event.get('from_status')} -> {event.get('to_status')} "
+                    f"near_track={event.get('nearest_existing_track_id')} "
+                    f"near_d_motion={_f(event.get('nearest_existing_d_motion'))}"
+                )
+
+            else:
+                lines.append(
+                    f"  {pid} event={ev} status={status} "
+                    f"hits={hits}/{required} misses={misses}/{max_misses} age={age}/{max_age}"
+                )
 
     candidates = birth_debug.get("candidates", [])
     if isinstance(candidates, list) and candidates:
         lines.append("Pending candidates:")
+
         for cand in candidates:
             lines.append(f"  {cand.get('pending_id')}:")
-            lines.append(f"    status={cand.get('status')}")
             lines.append(
-                f"    hits={cand.get('hits')} misses={cand.get('misses')} age={cand.get('age')} "
-                f"required_confirm_hits={cand.get('required_confirm_hits')}"
+                f"    status={cand.get('status')}, "
+                f"birth_mode={cand.get('birth_mode')}, "
+                f"very_close_bypass={_b(cand.get('very_close_bypass', False))}, "
+                f"ready={_b(cand.get('ready_for_track', False))}"
             )
-            lines.append(f"    last_det_idx={cand.get('last_det_idx')}")
+            lines.append(
+                f"    hits={cand.get('hits')}/{cand.get('required_confirm_hits')} "
+                f"hits_left={cand.get('hits_left_to_track')}, "
+                f"misses={cand.get('misses')}/{cand.get('max_pending_misses')}, "
+                f"age={cand.get('age')}/{cand.get('max_pending_age')} "
+                f"age_left={cand.get('age_left')}"
+            )
+            lines.append(
+                f"    first_seen={cand.get('first_seen_frame')}, "
+                f"last_seen={cand.get('last_seen_frame')}, "
+                f"last_det_idx={cand.get('last_det_idx')}"
+            )
             lines.append(f"    last_center={cand.get('last_center')}")
+            lines.append(
+                f"    nearest_existing_track_id={cand.get('nearest_existing_track_id')}, "
+                f"nearest_existing_d_motion={_f(cand.get('nearest_existing_d_motion'))}"
+            )
 
     for conf in birth_debug.get("confirmed", []):
         lines.append("")
         lines.append("CONFIRMED BIRTH:")
+
         for key in (
-            "pending_id", "source_det_idx", "reason", "hits", "age",
-            "required_confirm_hits", "will_create_new_track",
+            "pending_id",
+            "source_det_idx",
+            "reason",
+            "status",
+            "birth_mode",
+            "hits",
+            "age",
+            "required_confirm_hits",
+            "hits_left_to_track",
+            "ready_for_track",
+            "will_create_new_track",
         ):
             if key in conf:
                 lines.append(f"  {key} = {conf.get(key)}")
+
     return lines

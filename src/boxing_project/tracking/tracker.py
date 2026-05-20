@@ -18,6 +18,7 @@ from .tracking_debug import (
     format_birth_debug_lines,
     format_freeze_debug_lines,
     format_track_update_debug_lines,
+    format_removed_tracks_lines,
 )
 from . import DEFAULT_TRACKING_CONFIG_PATH, DEFAULT_BIRTH_CONFIG_PATH
 
@@ -726,18 +727,28 @@ class MultiObjectTracker:
 
     def _prune_unconfirmed_tracks(self) -> List[Dict[str, Any]]:
         """
-        Keep all confirmed tracks and limit only unconfirmed tracks.
+        Keep all confirmed tracks and limit only older unconfirmed tracks.
 
         Important:
           - confirmed tracks are never pruned,
-          - sub_confirmed tracks are still prunable until confirmed == True,
-          - pruning is always active and controlled only by max_unconfirmed_tracks.
+          - newly born tracks with age <= 1 are protected for one frame,
+          - pruning is controlled by max_unconfirmed_tracks.
         """
+
         max_unconfirmed = max(0, int(getattr(self.cfg, "max_unconfirmed_tracks", 6)))
+
+        protected_ids = {
+            int(t.track_id)
+            for t in self.tracks
+            if not bool(getattr(t, "confirmed", False))
+               and int(getattr(t, "age", 0)) <= 1
+        }
 
         unconfirmed = [
             t for t in self.tracks
             if not bool(getattr(t, "confirmed", False))
+               and not bool(getattr(t, "sub_confirmed", False))
+               and int(t.track_id) not in protected_ids
         ]
 
         if len(unconfirmed) <= max_unconfirmed:
@@ -747,14 +758,13 @@ class MultiObjectTracker:
             unconfirmed,
             key=lambda t: (
                 int(getattr(t, "hits", 0)),
-                int(bool(getattr(t, "sub_confirmed", False))),
                 -int(getattr(t, "time_since_update", 0)),
                 -int(getattr(t, "age", 0)),
             ),
             reverse=True,
         )[:max_unconfirmed]
 
-        keep_ids = {int(t.track_id) for t in keep}
+        keep_ids = {int(t.track_id) for t in keep} | protected_ids
 
         removed = [
             {
@@ -768,13 +778,15 @@ class MultiObjectTracker:
             }
             for t in self.tracks
             if not bool(getattr(t, "confirmed", False))
-            and int(t.track_id) not in keep_ids
+               and not bool(getattr(t, "sub_confirmed", False))
+               and int(t.track_id) not in keep_ids
         ]
 
         self.tracks = [
             t for t in self.tracks
             if bool(getattr(t, "confirmed", False))
-            or int(t.track_id) in keep_ids
+               or bool(getattr(t, "sub_confirmed", False))
+               or int(t.track_id) in keep_ids
         ]
 
         for item in removed:
@@ -782,12 +794,34 @@ class MultiObjectTracker:
 
         return removed
 
-    def _remove_dead(self):
+    def _remove_dead(self) -> List[Dict[str, Any]]:
+        removed = [
+            {
+                "track_id": int(t.track_id),
+                "hits": int(getattr(t, "hits", 0)),
+                "age": int(getattr(t, "age", 0)),
+                "time_since_update": int(getattr(t, "time_since_update", 0)),
+                "sub_confirmed": bool(getattr(t, "sub_confirmed", False)),
+                "confirmed": bool(getattr(t, "confirmed", False)),
+                "reason": (
+                    "max_confirmed_age"
+                    if bool(getattr(t, "confirmed", False))
+                    else "max_age"
+                ),
+            }
+            for t in self.tracks
+            if t.is_dead(self.cfg.max_age, self.cfg.max_confirmed_age)
+        ]
+
         self.tracks = [
             t for t in self.tracks
             if not t.is_dead(self.cfg.max_age, self.cfg.max_confirmed_age)
         ]
 
+        for item in removed:
+            self.prev_matches.pop(int(item["track_id"]), None)
+
+        return removed
     def _has_base_keypoints(
         self,
         det: Detection,
@@ -1356,7 +1390,16 @@ class MultiObjectTracker:
         self.prev_matches = all_current_matches
 
         # 14. Remove dead tracks.
-        self._remove_dead()
+        dead_tracks = self._remove_dead()
+        log.meta["removed_dead_tracks"] = dead_tracks
+
+        removed_lines = format_removed_tracks_lines(
+            pruned=pruned_unconfirmed_tracks,
+            dead=dead_tracks,
+        )
+
+        if removed_lines and hasattr(log, "buffer") and isinstance(log.buffer, list):
+            log.buffer.extend(["", *removed_lines])
 
         unmatched_track_ids = sorted(int(x) for x in absent_ids)
 
