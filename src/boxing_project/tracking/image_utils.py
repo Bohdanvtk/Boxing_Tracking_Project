@@ -501,48 +501,45 @@ def _center_dist_norm(det_a: Detection, det_b: Detection, box_a: BBox, box_b: BB
     return float(dist / _bbox_pair_scale(box_a, box_b))
 
 
-def _normalize_overlap_mechanism(overlap_mechanism: str) -> str:
-    if str(overlap_mechanism) == "bbox_iou":
-        return "bbox_iou"
-    return "skeleton_capsule"
 
 
 def compute_detection_iou_relations(
     detections: List[Detection],
     overlap_threshold: float = 0.15,
     *,
-    overlap_mechanism: str = "skeleton_capsule",
     skeleton_overlap_threshold: float = 0.08,
     skeleton_overlap_full_weight: float = 0.35,
     skeleton_overlap_core_weight: float = 0.65,
     skeleton_overlap_conf_threshold: float = 0.05,
     skeleton_overlap_thickness: int = 7,
-    skeleton_overlap_relation_debug_mode: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Compute broad pairwise geometry relations between detections.
 
-    The output keys are kept for legacy logs/debug UI. When overlap_mechanism
-    is "skeleton_capsule", legacy IoU field names carry skeleton/capsule
-    overlap scores instead of bbox IoU values.
+    Only skeleton-capsule overlap is used as the main overlap mechanism.
+
+    Legacy field names are preserved:
+    - "iou" / "max_iou" contain the skeleton-capsule overlap score.
+    - "bbox_iou" / "raw_bbox_max_iou" are kept only for debug/diagnostics.
+    - relation debug behavior is always enabled: a relation is stored when
+      skeleton overlap > 0 OR bbox IoU > 0.
     """
-    mechanism = _normalize_overlap_mechanism(overlap_mechanism)
-    active_overlap_threshold = (
-        float(skeleton_overlap_threshold)
-        if mechanism == "skeleton_capsule"
-        else float(overlap_threshold)
-    )
-    if mechanism == "bbox_iou":
-        bboxes = [get_detection_bbox(det) for det in detections]
-    else:
-        bboxes = [
-            get_detection_bbox(det) or _bbox_from_keypoints(
-                det.keypoints,
-                det.kp_conf,
-                skeleton_overlap_conf_threshold,
-            )
-            for det in detections
-        ]
+    # overlap_threshold is kept for backward-compatible function calls.
+    # It is intentionally unused because bbox_iou is no longer a selectable
+    # overlap mechanism.
+    _ = overlap_threshold
+
+    active_overlap_threshold = float(skeleton_overlap_threshold)
+
+    bboxes = [
+        get_detection_bbox(det) or _bbox_from_keypoints(
+            det.keypoints,
+            det.kp_conf,
+            skeleton_overlap_conf_threshold,
+        )
+        for det in detections
+    ]
+
     results: List[Dict[str, Any]] = []
 
     for i, box_i in enumerate(bboxes):
@@ -569,11 +566,9 @@ def compute_detection_iou_relations(
                     conf_threshold=skeleton_overlap_conf_threshold,
                     thickness=skeleton_overlap_thickness,
                 )
-                final_overlap_value = (
-                    float(skel["overlap_score"])
-                    if mechanism == "skeleton_capsule"
-                    else float(bbox_iou_value)
-                )
+
+                # Main overlap value is always skeleton-capsule overlap.
+                final_overlap_value = float(skel["overlap_score"])
                 cdn = _center_dist_norm(detections[i], detections[j], box_i, box_j)
 
                 if final_overlap_value > max_iou:
@@ -587,9 +582,9 @@ def compute_detection_iou_relations(
                     min_center_dist_norm = cdn
                     center_dist_norm_det_idx = j
 
-                keep_relation = final_overlap_value > 0.0
-                if mechanism == "skeleton_capsule" and bool(skeleton_overlap_relation_debug_mode):
-                    keep_relation = keep_relation or bbox_iou_value > 0.0
+                # Debug relation mode is always enabled:
+                # keep relations when either skeleton overlap or bbox overlap exists.
+                keep_relation = final_overlap_value > 0.0 or bbox_iou_value > 0.0
 
                 if keep_relation:
                     overlaps.append(
@@ -624,30 +619,25 @@ def attach_overlap_info_to_detections(
     detections: List[Detection],
     overlap_threshold: float = 0.15,
     *,
-    overlap_mechanism: str = "skeleton_capsule",
     skeleton_overlap_threshold: float = 0.08,
     skeleton_overlap_full_weight: float = 0.35,
     skeleton_overlap_core_weight: float = 0.65,
     skeleton_overlap_conf_threshold: float = 0.05,
     skeleton_overlap_thickness: int = 7,
-    skeleton_overlap_relation_debug_mode: bool = True,
 ) -> None:
     """
-    Compute overlap relations and attach info to det.meta.
+    Compute skeleton-capsule overlap relations and attach info to det.meta.
 
     This mutates detections in-place while preserving legacy field names.
     """
-    mechanism = _normalize_overlap_mechanism(overlap_mechanism)
     relations = compute_detection_iou_relations(
         detections=detections,
         overlap_threshold=overlap_threshold,
-        overlap_mechanism=mechanism,
         skeleton_overlap_threshold=skeleton_overlap_threshold,
         skeleton_overlap_full_weight=skeleton_overlap_full_weight,
         skeleton_overlap_core_weight=skeleton_overlap_core_weight,
         skeleton_overlap_conf_threshold=skeleton_overlap_conf_threshold,
         skeleton_overlap_thickness=skeleton_overlap_thickness,
-        skeleton_overlap_relation_debug_mode=skeleton_overlap_relation_debug_mode,
     )
 
     for det, info in zip(detections, relations):
@@ -658,8 +648,7 @@ def attach_overlap_info_to_detections(
         det.meta["min_center_dist_norm"] = info["min_center_dist_norm"]
         det.meta["center_dist_norm_det_idx"] = info["center_dist_norm_det_idx"]
         det.meta["raw_bbox_max_overlap_iou"] = info.get("raw_bbox_max_iou", 0.0)
-        det.meta["overlap_mechanism"] = mechanism
-
+        det.meta["overlap_mechanism"] = "skeleton_capsule"
 
 def is_valid_keypoint(kps, keypoint_idx: int, conf_threshold: float) -> bool:
     """

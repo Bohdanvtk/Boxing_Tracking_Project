@@ -755,3 +755,139 @@ def format_birth_debug_lines(birth_debug: Dict[str, Any]) -> List[str]:
                 lines.append(f"  {key} = {conf.get(key)}")
 
     return lines
+
+# =========================
+# Global tracking debug
+# =========================
+
+def _global_node_str(node) -> str:
+    """Compact node name for global tracking logs: epoch/local track."""
+    return f"e{int(node[0])}:t{int(node[1])}"
+
+
+def _round4(x: float) -> float:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return 0.0
+    if not np.isfinite(v):
+        return 0.0
+    return round(v, 4)
+
+
+def build_global_tracking_debug(
+    *,
+    nodes,
+    sim,
+    adj,
+    labels,
+    initial_gids,
+    final_mapping,
+) -> Dict[str, Any]:
+    """
+    Build compact global-tracking debug data.
+
+    Intentionally logs only the important global ID decisions:
+    - tracks used as graph nodes
+    - accepted mutual-kNN edges with cosine similarity
+    - final local track -> global id assignment
+    """
+    nodes = list(nodes or [])
+    sim = np.asarray(sim, dtype=np.float32)
+    adj = list(adj or [])
+
+    edges: List[Dict[str, Any]] = []
+    for i, neigh in enumerate(adj):
+        for j, value in neigh.items():
+            j = int(j)
+            if i >= j:
+                continue
+
+            edges.append(
+                {
+                    "a": _global_node_str(nodes[i]),
+                    "b": _global_node_str(nodes[j]),
+                    "cosine_sim": _round4(value),
+                }
+            )
+
+    edges.sort(key=lambda row: float(row.get("cosine_sim", 0.0)), reverse=True)
+
+    assignments: List[Dict[str, Any]] = []
+    for i, node in enumerate(nodes):
+        node_key = (int(node[0]), int(node[1]))
+
+        spectral_label = None
+        if labels is not None and i < len(labels):
+            spectral_label = int(labels[i])
+
+        initial_gid = None
+        if initial_gids is not None and i < len(initial_gids):
+            initial_gid = int(initial_gids[i])
+
+        assignments.append(
+            {
+                "node": _global_node_str(node_key),
+                "epoch_id": int(node_key[0]),
+                "local_track_id": int(node_key[1]),
+                "spectral_label": spectral_label,
+                "initial_global_id": initial_gid,
+                "final_global_id": int(final_mapping.get(node_key, -1)),
+                "edge_degree": int(len(adj[i])) if i < len(adj) else 0,
+            }
+        )
+
+    debug: Dict[str, Any] = {
+        "summary": {
+            "nodes": int(len(nodes)),
+            "edges": int(len(edges)),
+        },
+        "edges": edges,
+        "assignments": assignments,
+    }
+
+    debug["log_lines"] = format_global_tracking_debug_lines(debug)
+    return debug
+
+
+def format_global_tracking_debug_lines(debug: Dict[str, Any]) -> List[str]:
+    """Compact human-readable global tracking log."""
+    if not isinstance(debug, dict):
+        return []
+
+    summary = debug.get("summary", {})
+    lines: List[str] = [
+        "=" * 80,
+        "GLOBAL TRACKING DEBUG",
+        "=" * 80,
+        f"[GLOBAL] nodes={summary.get('nodes', 0)} edges={summary.get('edges', 0)}",
+    ]
+
+    edges = debug.get("edges", []) or []
+    lines.append("")
+    if edges:
+        lines.append("[EDGES] accepted mutual-kNN edges:")
+        for edge in edges:
+            lines.append(
+                f"- {edge.get('a')} <-> {edge.get('b')} "
+                f"cos={float(edge.get('cosine_sim', 0.0)):.4f}"
+            )
+    else:
+        lines.append("[EDGES] no accepted mutual-kNN edges")
+
+    assignments = debug.get("assignments", []) or []
+    lines.append("")
+    if assignments:
+        lines.append("[ASSIGNMENTS] local track -> global id:")
+        for row in assignments:
+            lines.append(
+                f"- {row.get('node')} "
+                f"label={row.get('spectral_label')} "
+                f"init_gid={row.get('initial_global_id')} "
+                f"final_gid={row.get('final_global_id')} "
+                f"degree={row.get('edge_degree')}"
+            )
+    else:
+        lines.append("[ASSIGNMENTS] no global assignments")
+
+    return lines

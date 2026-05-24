@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from .matcher import cosine_similarity
+from boxing_project.tracking.tracking_debug import build_global_tracking_debug
 import numpy as np
 from sklearn.cluster import SpectralClustering
 
@@ -76,7 +77,7 @@ def build_mutual_knn_graph(
     embs: np.ndarray,
     k: int,
     sim_threshold: float,
-) -> list[dict[int, float]]:
+) -> tuple[list[dict[int, float]], np.ndarray]:
     """
     Build a weighted mutual-kNN graph using cosine similarity.
 
@@ -94,15 +95,15 @@ def build_mutual_knn_graph(
     if len(nodes) != n_nodes:
         raise ValueError("nodes length must match embs.shape[0]")
     if n_nodes == 0:
-        return []
+        return [], np.zeros((0, 0), dtype=np.float32)
+
+    sim = embs @ embs.T
+    np.fill_diagonal(sim, -np.inf)
 
     k_eff = max(0, min(int(k), n_nodes - 1))
     adj: list[dict[int, float]] = [dict() for _ in range(n_nodes)]
     if k_eff == 0:
-        return adj
-
-    sim = embs @ embs.T
-    np.fill_diagonal(sim, -np.inf)
+        return adj, sim
 
     topk_sets: list[set[int]] = []
     for i in range(n_nodes):
@@ -261,7 +262,7 @@ class GlobalTrackClusterer:
             return_similarity: bool = False,
     ) -> dict[NodeKey, int] | tuple[
         dict[NodeKey, int],
-        dict[str, list[NodeKey] | np.ndarray],
+        dict[str, list[NodeKey] | np.ndarray | dict],
     ]:
         """Build ``(epoch_id, local_track_id) -> global_track_id`` mapping."""
         nodes, embs = build_mean_embeddings(epoch_tracks)
@@ -270,11 +271,20 @@ class GlobalTrackClusterer:
         if n_nodes == 0:
             mapping: dict[NodeKey, int] = {}
             sim = np.zeros((0, 0), dtype=np.float32)
+            global_debug = build_global_tracking_debug(
+                nodes=nodes,
+                sim=sim,
+                adj=[],
+                labels=None,
+                initial_gids=None,
+                final_mapping=mapping,
+            )
 
             if return_similarity:
                 return mapping, {
                     "nodes": nodes,
                     "sim": sim,
+                    "global_debug": global_debug,
                 }
 
             return mapping
@@ -282,11 +292,20 @@ class GlobalTrackClusterer:
         if n_nodes == 1:
             mapping = {nodes[0]: 1}
             sim = np.ones((1, 1), dtype=np.float32)
+            global_debug = build_global_tracking_debug(
+                nodes=nodes,
+                sim=sim,
+                adj=[{}],
+                labels=None,
+                initial_gids=np.asarray([1], dtype=np.int32),
+                final_mapping=mapping,
+            )
 
             if return_similarity:
                 return mapping, {
                     "nodes": nodes,
                     "sim": sim,
+                    "global_debug": global_debug,
                 }
 
             return mapping
@@ -330,10 +349,20 @@ class GlobalTrackClusterer:
             initial_gids=gids,
         )
 
+        global_debug = build_global_tracking_debug(
+            nodes=nodes,
+            sim=sim,
+            adj=adj,
+            labels=labels,
+            initial_gids=gids,
+            final_mapping=mapping,
+        )
+
         if return_similarity:
             return mapping, {
                 "nodes": nodes,
                 "sim": sim,
+                "global_debug": global_debug,
             }
 
         return mapping

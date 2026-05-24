@@ -8,7 +8,12 @@ from typing import Optional
 from boxing_project.tracking.tracker import openpose_people_to_detections
 from boxing_project.shot_boundary.inference import ShotBoundaryInferencer, ShotBoundaryInferConfig
 from boxing_project.tracking.image_utils import render_tracking_overlays, extract_boxing_crops, attach_overlap_info_to_detections, keypoints_to_intersection_bbox
-from boxing_project.tracking.saving_utils import FragmentExporter, save_tracking_outputs, save_tracks_similarity
+from boxing_project.tracking.saving_utils import (
+    FragmentExporter,
+    save_tracking_outputs,
+    save_tracks_similarity,
+    save_global_tracking_debug,
+)
 from boxing_project.tracking.global_clustering import GlobalTrackClusterer
 import matplotlib.pyplot as plt
 
@@ -639,13 +644,11 @@ def process_frame(
     attach_overlap_info_to_detections(
         detections=detections,
         overlap_threshold=tracker.cfg.overlap_log_threshold,
-        overlap_mechanism=tracker.cfg.overlap_mechanism,
         skeleton_overlap_threshold=tracker.cfg.skeleton_overlap_threshold,
         skeleton_overlap_full_weight=tracker.cfg.skeleton_overlap_full_weight,
         skeleton_overlap_core_weight=tracker.cfg.skeleton_overlap_core_weight,
         skeleton_overlap_conf_threshold=tracker.cfg.skeleton_overlap_conf_threshold,
         skeleton_overlap_thickness=tracker.cfg.skeleton_overlap_thickness,
-        skeleton_overlap_relation_debug_mode=tracker.cfg.skeleton_overlap_relation_debug_mode,
     )
 
     # Enrich overlap metadata with normalized center-distance adaptive risk.
@@ -870,6 +873,11 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
             output_path=save_dir / "tracks_similarity.npz",
         )
 
+        save_global_tracking_debug(
+            save_dir=save_dir,
+            global_debug=sim_data.get("global_debug", {}),
+        )
+
         summary = []
         for epoch_id, tracks_by_id in sorted(epoch_tracks.items()):
             for local_id, trk in sorted(tracks_by_id.items()):
@@ -953,4 +961,3 @@ def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, s
 
 
     print(f"[INFO] {len(frame_results)} frames were processed")
-

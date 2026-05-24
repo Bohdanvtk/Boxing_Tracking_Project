@@ -138,13 +138,11 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
     save_log = bool(_get(cfg, "tracking.save_log", True))
 
     overlap_log_threshold = float(_get(cfg, "tracking.overlap_log_threshold", 0.10))
-    overlap_mechanism = str(_get(cfg, "tracking.overlap_mechanism", "skeleton_capsule"))
     skeleton_overlap_threshold = float(_get(cfg, "tracking.skeleton_overlap_threshold", 0.08))
     skeleton_overlap_full_weight = float(_get(cfg, "tracking.skeleton_overlap_full_weight", 0.35))
     skeleton_overlap_core_weight = float(_get(cfg, "tracking.skeleton_overlap_core_weight", 0.65))
     skeleton_overlap_conf_threshold = float(_get(cfg, "tracking.skeleton_overlap_conf_threshold", 0.05))
     skeleton_overlap_thickness = int(_get(cfg, "tracking.skeleton_overlap_thickness", 7))
-    skeleton_overlap_relation_debug_mode = bool(_get(cfg, "tracking.skeleton_overlap_relation_debug_mode", True))
     # Keep defaults here so older YAMLs still load.
     adaptive_overlap_center_near = float(_get(cfg, "tracking.adaptive_overlap_center_near", 0.55))
     adaptive_overlap_center_mid = float(_get(cfg, "tracking.adaptive_overlap_center_mid", 0.85))
@@ -183,13 +181,11 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
         save_log=save_log,
         max_unconfirmed_tracks=max_unconfirmed_tracks,
         overlap_log_threshold=overlap_log_threshold,
-        overlap_mechanism=overlap_mechanism,
         skeleton_overlap_threshold=skeleton_overlap_threshold,
         skeleton_overlap_full_weight=skeleton_overlap_full_weight,
         skeleton_overlap_core_weight=skeleton_overlap_core_weight,
         skeleton_overlap_conf_threshold=skeleton_overlap_conf_threshold,
         skeleton_overlap_thickness=skeleton_overlap_thickness,
-        skeleton_overlap_relation_debug_mode=skeleton_overlap_relation_debug_mode,
         adaptive_overlap_center_near=adaptive_overlap_center_near,
         adaptive_overlap_center_mid=adaptive_overlap_center_mid,
         adaptive_overlap_center_far=adaptive_overlap_center_far,

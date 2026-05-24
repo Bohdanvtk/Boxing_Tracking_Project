@@ -257,6 +257,33 @@ def save_tracking_outputs(
         )
 
 
+def save_global_tracking_debug(
+    *,
+    save_dir: Path,
+    global_debug: dict,
+) -> None:
+    """
+    Save compact global tracking debug files:
+    - global_tracking_debug.json: structured data
+    - global_tracking_log.txt: short readable log
+    """
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    global_debug = _json_safe(global_debug or {})
+    log_lines = global_debug.get("log_lines", []) or []
+
+    (save_dir / "global_tracking_debug.json").write_text(
+        json.dumps(global_debug, ensure_ascii=False, indent=2, allow_nan=False),
+        encoding="utf-8",
+    )
+
+    (save_dir / "global_tracking_log.txt").write_text(
+        "\n".join(str(line) for line in log_lines) + "\n",
+        encoding="utf-8",
+    )
+
+
 class FragmentExporter:
     def __init__(self, base_dir: Path, min_hits: int):
         self.base_dir = Path(base_dir)

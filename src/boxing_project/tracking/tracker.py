@@ -41,13 +41,11 @@ class TrackerConfig:
     max_unconfirmed_tracks: int = 6
 
     overlap_log_threshold: float = 0.10
-    overlap_mechanism: str = "skeleton_capsule"
     skeleton_overlap_threshold: float = 0.08
     skeleton_overlap_full_weight: float = 0.35
     skeleton_overlap_core_weight: float = 0.65
     skeleton_overlap_conf_threshold: float = 0.05
     skeleton_overlap_thickness: int = 7
-    skeleton_overlap_relation_debug_mode: bool = True
     # Center-distance adaptive overlap gating.
     adaptive_overlap_center_near: float = 0.55
     adaptive_overlap_center_mid: float = 0.85
@@ -498,7 +496,7 @@ class MultiObjectTracker:
         trk.update(
             det,
             ema_alpha=self.cfg.match.emb_ema_alpha,
-            update_app=bool(ignore_overlap_on_birth) or self._has_base_keypoints(det),
+            update_app=bool(ignore_overlap_on_birth) or self._has_base_keypoints(det, 9),
             has_overlap=has_overlap,
             ignore_overlap=ignore_overlap_on_birth,
         )
@@ -544,14 +542,12 @@ class MultiObjectTracker:
             "tracking.max_age": int(cfg.max_age),
             "tracking.max_confirmed_age": int(cfg.max_confirmed_age),
             "tracking.tracker.max_unconfirmed_tracks": int(cfg.max_unconfirmed_tracks),
-            "tracking.overlap_mechanism": str(cfg.overlap_mechanism),
             "tracking.overlap_log_threshold": float(cfg.overlap_log_threshold),
             "tracking.skeleton_overlap_threshold": float(cfg.skeleton_overlap_threshold),
             "tracking.skeleton_overlap_full_weight": float(cfg.skeleton_overlap_full_weight),
             "tracking.skeleton_overlap_core_weight": float(cfg.skeleton_overlap_core_weight),
             "tracking.skeleton_overlap_conf_threshold": float(cfg.skeleton_overlap_conf_threshold),
             "tracking.skeleton_overlap_thickness": int(cfg.skeleton_overlap_thickness),
-            "tracking.skeleton_overlap_relation_debug_mode": bool(cfg.skeleton_overlap_relation_debug_mode),
             "tracking.adaptive_overlap_center_near": float(cfg.adaptive_overlap_center_near),
             "tracking.adaptive_overlap_center_mid": float(cfg.adaptive_overlap_center_mid),
             "tracking.adaptive_overlap_center_far": float(cfg.adaptive_overlap_center_far),

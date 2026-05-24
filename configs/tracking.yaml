@@ -5,30 +5,48 @@ tracking:
   overlap_log_threshold: 0.001   # IoU threshold used only for debug/logging overlap state
     # If detection IoU with another detection >= this value,
     # it is marked as overlapping in logs/meta when overlap_mechanism is bbox_iou.
-  overlap_mechanism: skeleton_capsule
   skeleton_overlap_threshold: 0.08
   skeleton_overlap_full_weight: 0.35
   skeleton_overlap_core_weight: 0.65
-  skeleton_overlap_conf_threshold: 0.05
+  skeleton_overlap_conf_threshold: 0.009
   skeleton_overlap_thickness: 7
-  skeleton_overlap_relation_debug_mode: true
 
-  adaptive_overlap_iou_near: 0.0000
-    # IoU threshold when centers are very close.
-  adaptive_overlap_iou_mid: 0.0001
-    # IoU threshold when centers are medium-close.
-  adaptive_overlap_iou_far: 0.08
-    # IoU threshold when centers are far-but-still-relevant.
-  adaptive_overlap_iou_default: 0.2
-    # IoU threshold when centers are farther than adaptive_overlap_center_far.
 
-  overlap_app_freeze_after: 5
+  adaptive_overlap_iou_near: 0.003
+  # Overlap threshold when two stable tracks are very close by center distance.
+  # Very strict: any skeleton overlap is treated as risky.
+
+  adaptive_overlap_iou_mid: 0.005
+  # Overlap threshold when two stable tracks are medium-close.
+  # Still almost any skeleton overlap is risky.
+
+  adaptive_overlap_iou_far: 0.007
+  # Overlap threshold when two stable tracks are far-but-still-relevant.
+  # Requires stronger skeleton overlap to be treated as risky.
+
+  adaptive_overlap_iou_default: 0.008
+  # Fallback threshold.
+  # Used when tracks are not stable yet, or when center distance is farther than adaptive_overlap_center_far.
+
+  adaptive_overlap_center_near: 0.55
+  # If normalized center distance cdn <= 0.55,
+  # use adaptive_overlap_iou_near.
+
+  adaptive_overlap_center_mid: 0.85
+  # If 0.55 < cdn <= 0.85,
+  # use adaptive_overlap_iou_mid.
+
+  adaptive_overlap_center_far: 1.20
+    # If 0.85 < cdn <= 1.20,
+  # use adaptive_overlap_iou_far.
+  # If cdn > 1.20, use adaptive_overlap_iou_default.
+  overlap_app_freeze_after: 13
     # Source-based cooldown length.
     # If Track M disappears immediately after overlap with Track N,
     # Track N freezes appearance until Track M matches again or this counter reaches 0.
 
   kalman:
-    process_var: 1e6          # Process noise variance
+    process_var: 1e7          # Process noise variance
                               # Higher -> less trust in prediction, faster adaptation
     measure_var: 5000         # Measurement noise variance
                               # Higher -> less trust in detections
@@ -70,7 +88,7 @@ tracking:
     appearance_threshold: 0.12 # Max allowed appearance distance
                               # Above this -> reject pair
 
-    emb_ema_alpha: 0.90      # Weight of OLD appearance EMA.
+    emb_ema_alpha: 0.9      # Weight of OLD appearance EMA.
                               # Higher -> slower update, more stable memory.
                               # Lower -> faster update, more aggressive replacement.
     bad_kp_patience: 50       # Frames to wait before updating from bad keypoints
@@ -117,7 +135,7 @@ tracking:
   tracker:
     max_age: 10                # Max missed frames for unconfirmed track
     max_confirmed_age: 30     # Max missed frames for confirmed track
-    min_hits: 15              # Matches needed to confirm a track
+    min_hits: 30              # Matches needed to confirm a track
     min_hits_sub: 4          # Matches needed for sub-confirmed adaptive overlap
     min_kp_conf: 0.009         # Minimum keypoint confidence for track update
     reset_g_threshold: 0.32   # If g < threshold -> activate reset mode
