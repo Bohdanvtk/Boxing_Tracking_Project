@@ -126,4 +126,5 @@ class InferRunner:
             merge_n=merge_n,
             save_dir=save_dir,
             graph_clustering_params=graph_clustering_params,
+            pipeline_cfg=cfg,
         )

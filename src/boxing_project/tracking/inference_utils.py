@@ -8,14 +8,12 @@ from typing import Optional
 from boxing_project.tracking.tracker import openpose_people_to_detections
 from boxing_project.shot_boundary.inference import ShotBoundaryInferencer, ShotBoundaryInferConfig
 from boxing_project.tracking.image_utils import render_tracking_overlays, extract_boxing_crops, attach_overlap_info_to_detections, keypoints_to_intersection_bbox
-from boxing_project.tracking.saving_utils import (
-    FragmentExporter,
-    save_tracking_outputs,
-    save_tracks_similarity,
-    save_global_tracking_debug,
-)
-from boxing_project.tracking.global_clustering import GlobalTrackClusterer
 import matplotlib.pyplot as plt
+from boxing_project.tracking.openpose_processing import preprocess_image, set_openpose_module
+from boxing_project.tracking.frame_processing import (
+    prepare_frame_detections_from_keypoints,
+    update_tracker_from_detections,
+)
 
 
 
@@ -52,6 +50,7 @@ def init_openpose_from_config(openpose_cfg: dict):
         ) from e
 
     op = op_module
+    set_openpose_module(op_module)
 
     params = dict()
     params["model_folder"] = os.path.join(root, "models")
@@ -70,33 +69,6 @@ def init_openpose_from_config(openpose_cfg: dict):
     opWrapper.start()
 
     return op_module, opWrapper
-
-
-def preprocess_image(opWrapper, img_path: Path, save_width: int, return_img=False):
-    """
-    Read and resize an image, run OpenPose forward pass.
-    Returns Datum (and optionally the resized image).
-    """
-    img = cv2.imread(str(img_path))
-    if img is None:
-        raise RuntimeError(f"Failed to load image: {img_path}")
-
-    h, w = img.shape[:2]
-    if w > save_width:
-        scale = save_width / w
-        img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-
-    datum = op.Datum()
-    datum.cvInputData = img
-
-    datums = op.VectorDatum()
-    datums.append(datum)
-
-    opWrapper.emplaceAndPop(datums)
-
-    if return_img:
-        return datums[0], img
-    return datums[0]
 
 
 def _clip_bbox_xyxy(bbox, img_w: int, img_h: int):
@@ -566,398 +538,62 @@ def _top_track_ids_by_hits(tracker, k: int = 4) -> set[int]:
     return {int(t.track_id) for t in tracks[:k]}
 
 
-def process_frame(
-    result,
-    tracker,
-    original_img,
-    conf_th,
-    app_embedder,
-    g: int,
-    reset_mode: bool,
-    frame_dir: Optional[Path] = None,
-):
+def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, reset_mode: bool, frame_dir: Optional[Path] = None):
+    """Backward-compatible single-frame wrapper used by legacy call sites."""
     if result.poseKeypoints is None:
-        return [], {
-            "matches": [],
-            "cost_matrix": np.zeros((0, 0)),
-            "active_tracks": [],
-            "epoch_id": int(getattr(tracker, "_epoch_id", 1)),
-        }
+        return [], {"matches": [], "cost_matrix": np.zeros((0, 0)), "active_tracks": [], "epoch_id": int(getattr(tracker, "_epoch_id", 1))}
 
-    kps = result.poseKeypoints
-
-    top_track_ids_before = _top_track_ids_by_hits(tracker, k=4)
-    extra_n = int(getattr(tracker, "_adaptive_extra_n", 9))
-
-    kps = select_top_with_nearest(
-        kps,
+    detections = prepare_frame_detections_from_keypoints(
+        kps=result.poseKeypoints,
+        original_img=original_img,
         conf_th=conf_th,
-        top_count=3,
-        n=extra_n,
-        intersect=2,
+        tracker=tracker,
+        app_embedder=app_embedder,
+        select_top_with_nearest=select_top_with_nearest,
+        extract_features_with_hsv=extract_features_with_hsv,
+        build_fused_appearance_embedding_with_mask=build_fused_appearance_embedding_with_mask,
     )
-
-    n_people = len(kps)
-    h, w = original_img.shape[:2]
-
-    people = [{"keypoints": kps[i]} for i in range(n_people)]
-
-    parts_crops = []
-    bboxes = []
-    intersection_bboxes = []
-    bboxes_quality = []
-
-    for i in range(n_people):
-
-        # Simple full-keypoint bbox only for IoU / overlap logic.
-        intersection_bb = keypoints_to_intersection_bbox(
-            kps[i],
-            conf_th=conf_th,
-            img_w=w,
-            img_h=h,
-        )
-
-        parts = extract_boxing_crops(
-            frame_bgr=original_img,
-            kps=kps[i],
-            conf_threshold=conf_th,
-        )
-
-
-        intersection_bboxes.append(intersection_bb)
-        parts_crops.append(parts)
-
-
-    for i in range(n_people):
-        people[i]["bbox"] = intersection_bboxes[i]
-        people[i]["bbox_for_intersection"] = intersection_bboxes[i]
-        people[i]["left_glove_crop"] = parts_crops[i]["left_glove"]
-        people[i]["right_glove_crop"] = parts_crops[i]["right_glove"]
-        people[i]["shorts_crop"] = parts_crops[i]["shorts"]
-
-
-    detections = openpose_people_to_detections(
-        people,
-        min_kp_conf=tracker.cfg.min_kp_conf,
-    )
-
-    attach_overlap_info_to_detections(
-        detections=detections,
-        overlap_threshold=tracker.cfg.overlap_log_threshold,
-        skeleton_overlap_threshold=tracker.cfg.skeleton_overlap_threshold,
-        skeleton_overlap_full_weight=tracker.cfg.skeleton_overlap_full_weight,
-        skeleton_overlap_core_weight=tracker.cfg.skeleton_overlap_core_weight,
-        skeleton_overlap_conf_threshold=tracker.cfg.skeleton_overlap_conf_threshold,
-        skeleton_overlap_thickness=tracker.cfg.skeleton_overlap_thickness,
-    )
-
-    # Enrich overlap metadata with normalized center-distance adaptive risk.
-    _attach_center_distance_overlap_metadata(detections, tracker.cfg)
-
-    for det in detections:
-        raw = det.meta.get("raw", {})
-        bbox = raw.get("bbox", None)
-
-
-        left_glove_crop = raw.get("left_glove_crop")
-        right_glove_crop = raw.get("right_glove_crop")
-        shorts_crop = raw.get("shorts_crop")
-
-
-
-        body_feat = None
-        left_glove_features = None
-        right_glove_features = None
-        shorts_features = None
-
-        try:
-            if app_embedder is not None and bbox is not None:
-                body_feat = app_embedder.embed(original_img, bbox)
-
-            left_glove_features = extract_features_with_hsv(left_glove_crop)
-            right_glove_features = extract_features_with_hsv(right_glove_crop)
-            shorts_features = extract_features_with_hsv(shorts_crop)
-
-            det.meta["body_features"] = body_feat
-            det.meta["left_glove_features"] = left_glove_features
-            det.meta["right_glove_features"] = right_glove_features
-            det.meta["shorts_features"] = shorts_features
-            # e_app is the final fused appearance descriptor used by local matching and global clustering.
-            e_app, e_app_valid_mask, e_app_coverage = build_fused_appearance_embedding_with_mask(
-                body_feat,
-                left_glove_features,
-                right_glove_features,
-                shorts_features,
-                w_body=getattr(tracker.cfg, "w_body", 1.0),
-                w_left_glove=getattr(tracker.cfg, "w_left_glove", 0.5),
-                w_right_glove=getattr(tracker.cfg, "w_right_glove", 0.5),
-                w_shorts=getattr(tracker.cfg, "w_shorts", 0.75),
-            )
-            det.meta["e_app"] = e_app
-            det.meta["e_app_valid_mask"] = e_app_valid_mask
-            det.meta["e_app_coverage"] = e_app_coverage
-        except Exception as e:
-            det.meta["body_features"] = body_feat
-            det.meta["left_glove_features"] = left_glove_features
-            det.meta["right_glove_features"] = right_glove_features
-            det.meta["shorts_features"] = shorts_features
-            det.meta["e_app"] = None
-            det.meta["e_app_valid_mask"] = None
-            det.meta["e_app_coverage"] = 0.0
-            det.meta["e_app_error"] = str(e)
-
-    log = tracker.update(detections, g=g, reset_mode=reset_mode)
-
-    matched_track_ids = {
-        int(track_id)
-        for track_id, det_idx in log.get("matches", [])
-    }
-
-    missed_top_track_ids = top_track_ids_before - matched_track_ids
-
-    if missed_top_track_ids:
-        tracker._adaptive_extra_n = extra_n + 9
-    else:
-        tracker._adaptive_extra_n = 7
-
-    log["adaptive_extra_n_used"] = int(extra_n)
-    log["adaptive_extra_n_next"] = int(tracker._adaptive_extra_n)
-    log["missed_top_track_ids"] = sorted(missed_top_track_ids)
-
-    _store_matched_crops(
-        original_img,
-        detections,
-        log.get("matches", []),
-        frame_dir=frame_dir,
-    )
-
+    detections, log = update_tracker_from_detections(detections=detections, tracker=tracker, g=g, reset_mode=reset_mode)
+    if frame_dir is not None:
+        _store_matched_crops(original_img, detections, log.get("matches", []), frame_dir=frame_dir)
     return detections, log
-
 
 def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, save_width, merge_n,
                     save_dir: Path | None,
-                    graph_clustering_params: dict | None = None):
-
-
-    debug = tracker.cfg.debug
-    save_log = tracker.cfg.save_log
-
-    frame_results: list[FrameTrackingResult] = []
-
-    if debug or save_log:
-        from boxing_project.tracking.tracking_debug import (
-            print_pre_tracking_results,
-            print_tracking_results,
-        )
-
+                    graph_clustering_params: dict | None = None,
+                    pipeline_cfg: dict | None = None):
     from boxing_project.apperance_embedding.inference import AppearanceEmbedder, AppearanceEmbedConfig
-
+    from boxing_project.tracking.tracking_stages import (
+        PipelineContext, RichStageProgress, PreprocessingStage, LocalTrackingStage,
+        LocalDetSavingStage, GlobalClusteringStage, GlobalSavingStage,
+    )
     app_embedder = AppearanceEmbedder(AppearanceEmbedConfig(model_path=app_emb_path))
+    save_dir = Path(save_dir) if save_dir is not None else Path('output')
+    runtime_cfg = pipeline_cfg or {}
+    cfg = {
+        'stages': runtime_cfg.get('stages', {'preprocessing': True, 'local_tracking': True, 'local_det_saving': False, 'global_clustering': True, 'global_saving': True}),
+        'restore_mode': bool(runtime_cfg.get('restore_mode', False)),
+        'save_log': bool(runtime_cfg.get('save_log', False)),
+        'preprocessing': runtime_cfg.get('preprocessing', {}),
+        'local_tracking': runtime_cfg.get('local_tracking', {}),
+        'local_det_saving': runtime_cfg.get('local_det_saving', {}),
+        'global_clustering': runtime_cfg.get('global_clustering', {}),
+        'global_saving': runtime_cfg.get('global_saving', {}),
+        'progress': runtime_cfg.get('progress', {'enabled': True, 'library': 'rich'}),
+    }
+    ctx = PipelineContext(opWrapper=opWrapper, tracker=tracker, app_embedder=app_embedder, sb_cfg=sb_cfg, images=list(images), save_width=save_width, save_dir=save_dir, save_log=cfg['save_log'], restore_mode=cfg['restore_mode'], cfg=cfg, graph_clustering_params=graph_clustering_params or {}, select_top_with_nearest=select_top_with_nearest, extract_features_with_hsv=extract_features_with_hsv, build_fused_appearance_embedding_with_mask=build_fused_appearance_embedding_with_mask)
+    progress = RichStageProgress(enabled=bool(cfg.get("progress", {}).get("enabled", True)))
+    run_local_det_saving = bool(cfg['stages'].get('local_det_saving', False)) and bool(cfg.get('local_det_saving', {}).get('enabled', True))
+    run_global_clustering = bool(cfg['stages'].get('global_clustering', True)) and bool(cfg.get('global_clustering', {}).get('enabled', True))
+    run_global_saving = run_global_clustering and bool(cfg['stages'].get('global_saving', True)) and bool(cfg.get('global_saving', {}).get('enabled', True))
 
-    fragment_exporter = None
-    if save_dir is not None:
-        fragment_exporter = FragmentExporter(save_dir / "fragments", min_hits=tracker.cfg.min_hits)
+    PreprocessingStage(ctx, progress).run()
+    LocalTrackingStage(ctx, progress).run()
+    if run_local_det_saving:
+        LocalDetSavingStage(ctx, progress).run()
+    if run_global_clustering:
+        GlobalClusteringStage(ctx, progress).run()
+        if run_global_saving:
+            GlobalSavingStage(ctx, progress).run()
+    progress.finish()
 
-    sb_cfg = sb_cfg.get("shot_boundary", sb_cfg)
-
-    prev_reset_mode = False
-
-    sb = ShotBoundaryInferencer(
-        ShotBoundaryInferConfig(
-            resize_w=sb_cfg["resize"][0],
-            resize_h=sb_cfg["resize"][1],
-            grid_x=sb_cfg["grid"][0],
-            grid_y=sb_cfg["grid"][1],
-            ema_alpha=sb_cfg.get("ema_alpha", 0.9),
-        )
-    )
-
-
-    for idx, path in enumerate(images):
-        frame_idx = idx + 1
-
-        if debug:
-            print_pre_tracking_results(frame_idx)
-
-        result, img = preprocess_image(opWrapper, path, save_width, return_img=True)
-        g = float(sb.update(img))
-
-        reset_mode = (g < float(tracker.cfg.reset_g_threshold))
-
-        if reset_mode and not prev_reset_mode and fragment_exporter is not None:
-            fragment_exporter.save_tracks(tracker.get_segment_tracks(), frame_idx=frame_idx)
-
-        detections, log = process_frame(
-            result, tracker, img,
-            tracker.cfg.min_kp_conf,
-            app_embedder,
-            g=g,
-            reset_mode=reset_mode,
-            frame_dir=(Path(save_dir) / f"frame_{frame_idx:06d}") if save_dir is not None else None,
-        )
-
-        local_matches = [
-            (int(local_track_id), int(det_idx))
-            for local_track_id, det_idx in log.get("matches", [])
-        ]
-        local_frame = img.copy()
-        render_tracking_overlays(
-            frame=local_frame,
-            detections=detections,
-            matches=local_matches,
-            frame_idx=frame_idx,
-            use_global_ids=False,
-        )
-
-        if save_dir is not None:
-            save_tracking_outputs(
-                save_dir=save_dir,
-                frame_idx=frame_idx,
-                original_frame=img,
-                processed_frame=None,
-                local_processed_frame=local_frame,
-                detections=detections,
-                log=log,
-                conf_th=tracker.cfg.min_kp_conf,
-                tracker=tracker,
-            )
-
-        frame_dir = Path(save_dir) / f"frame_{frame_idx:06d}"
-        frame_path = frame_dir / "extra" / "unprocessed_image.jpg"
-
-        frame_results.append(
-            FrameTrackingResult(
-                frame_idx=frame_idx,
-                detections=detections,
-                log=log,
-                frame_path=frame_path,
-            )
-        )
-
-
-        if debug:
-            print_tracking_results(log, frame_idx)
-
-
-        prev_reset_mode = reset_mode
-
-    epoch_tracks = tracker.get_epoch_tracks()
-
-    #saving the last fragment(because there is probably no reset_mode in the end)
-
-    if fragment_exporter is not None:
-        fragment_exporter.save_tracks(
-            tracker.get_segment_tracks(),
-            frame_idx=len(images),
-        )
-    params = graph_clustering_params or {}
-    clusterer = GlobalTrackClusterer(
-        k=int(params.get("k", 5)),
-        sim_threshold=float(params.get("sim_threshold", 0.5)),
-        n_clusters=int(params.get("n_clusters", 2)),
-        random_state=int(params.get("random_state", 42)),
-        assign_labels=str(params.get("assign_labels", "kmeans")),
-    )
-    local_to_global, sim_data = clusterer.build_mapping(
-        epoch_tracks=epoch_tracks,
-        return_similarity=True,
-    )
-
-
-    if save_dir is not None:
-        import json
-
-        save_tracks_similarity(
-            nodes=sim_data["nodes"],
-            sim=sim_data["sim"],
-            output_path=save_dir / "tracks_similarity.npz",
-        )
-
-        save_global_tracking_debug(
-            save_dir=save_dir,
-            global_debug=sim_data.get("global_debug", {}),
-        )
-
-        summary = []
-        for epoch_id, tracks_by_id in sorted(epoch_tracks.items()):
-            for local_id, trk in sorted(tracks_by_id.items()):
-                key = (int(epoch_id), int(local_id))
-                gid = local_to_global.get(key)
-                summary.append(
-                    {
-                        "epoch_id": int(epoch_id),
-                        "local_track_id": int(local_id),
-                        "global_track_id": int(gid) if gid is not None else None,
-                        "matched_to_global": bool(gid is not None),
-                        "hits": int(getattr(trk, "hits", 0)),
-                        "embeddings": int(len(getattr(trk, "app_emb_history", []) or [])),
-                    }
-                )
-
-        (Path(save_dir) / "global_track_mapping.json").write_text(
-            json.dumps({"tracks": summary}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
-    for result in frame_results:
-        local_matches = [
-            (int(local_track_id), int(det_idx))
-            for local_track_id, det_idx in result.log.get("matches", [])
-        ]
-
-        original_frame = cv2.imread(str(result.frame_path))
-        if original_frame is None:
-            continue
-
-
-        local_frame = original_frame.copy()
-        render_tracking_overlays(
-            frame=local_frame,
-            detections=result.detections,
-            matches=local_matches,
-            frame_idx=result.frame_idx,
-            use_global_ids=False,
-        )
-
-        global_frame = original_frame.copy()
-        global_matches = []
-        for local_track_id, det_idx in result.log.get("matches", []):
-            gid = local_to_global.get((int(result.log.get("epoch_id", 1)), int(local_track_id)), int(local_track_id))
-            global_matches.append((int(gid), int(det_idx)))
-
-        render_tracking_overlays(
-            frame=global_frame,
-            detections=result.detections,
-            matches=global_matches,
-            frame_idx=result.frame_idx,
-            use_global_ids=True,
-        )
-
-        if save_dir is not None:
-            frame_dir = Path(save_dir) / f"frame_{result.frame_idx:06d}"
-            out_log = dict(result.log)
-            out_log["global_matches"] = global_matches
-            save_tracking_outputs(
-                save_dir=save_dir,
-                frame_idx=result.frame_idx,
-                original_frame=original_frame,
-                processed_frame=global_frame,
-                local_processed_frame=local_frame,
-                detections=result.detections,
-                log=out_log,
-                conf_th=tracker.cfg.min_kp_conf,
-                tracker=tracker,
-            )
-            _save_global_matched_crops(
-                frame=original_frame,
-                detections=result.detections,
-                global_matches=global_matches,
-                frame_dir=frame_dir,
-            )
-            cv2.imwrite(str(frame_dir / "extra" / "frame_global_vis.jpg"), global_frame)
-
-
-
-
-
-    print(f"[INFO] {len(frame_results)} frames were processed")

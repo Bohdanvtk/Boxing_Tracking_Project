@@ -1,7 +1,5 @@
-#configs/infer_tracks.yaml
-
 openpose:
-  root: "/home/bohdan/openpose"   # path to openpose root
+  root: "/home/bohdan/openpose"
   hand: false
   face: false
   net_resolution: "-1x256"
@@ -17,10 +15,47 @@ data:
   save_width: 800
   save_dir: "/home/bohdan/Документи/Samples/Images/boxing_tracker/test"
 
+restore_mode: false
+save_log: false
+
+stages:
+  preprocessing: true
+  local_tracking: true
+  local_det_saving: false
+  global_clustering: true
+  global_saving: true
+
+preprocessing:
+  batch_size: 32
+  checkpoint_every_frames: 100
+  save_crops: auto
+
+local_tracking:
+  batch_size: 128
+  checkpoint_every_frames: 500
+
+local_det_saving:
+  enabled: false
+  batch_size: 128
+  matched_dir: matched_dets
+  unmatched_dir: unmatched_dets
+
+global_clustering:
+  enabled: true
+  checkpoint_every_tracks: 100
+
+global_saving:
+  enabled: true
+  batch_size: 128
+  checkpoint_every_frames: 500
+
+progress:
+  enabled: true
+  library: rich
 
 tracking:
   config_path: "configs/tracking.yaml"
-  num_frames_merge: 0      # how many pictures at one time will appear if it's 0, NO pictures will appear
+  num_frames_merge: 0
   apperance_embedding_model_path: "/home/bohdan/Документи/Samples/Images/boxing_tracker/osnet_1_x_ain(26_03)_new_stage_2.onnx"
 
 shot_boundary:
