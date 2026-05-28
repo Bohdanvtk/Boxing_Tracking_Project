@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -46,21 +46,15 @@ class MatrixCell:
     pose_ok: bool = True
     app_ok: bool = True
 
-
 @dataclass
 class DebugLog:
     """
-    Matrix debugger that can print to console AND/OR collect a log for saving.
+    Matrix debugger that ONLY collects debug logs in memory.
 
-    - enabled_print controls ONLY console printing (sink).
-    - The log buffer is ALWAYS collected, and is appended to GENERAL_LOG in show_matrix().
-    - meta can provide IDs:
-        meta["track_ids"] -> list of persistent track_ids aligned with tracks list index i
-        meta["det_ids"]   -> list of detection ids aligned with detections list index j
+    Important:
+    This class must never print to console.
+    Console output is controlled only by pipeline progress UI.
     """
-    enabled_print: bool = True
-    sink: Callable[[str], None] = print
-
     buffer: List[str] = field(default_factory=list)
     meta: Dict[str, Any] = field(default_factory=dict)
 
@@ -69,9 +63,9 @@ class DebugLog:
     matrix: List[List[MatrixCell]] = field(default_factory=list)
 
     def _emit(self, line: str) -> None:
-        self.buffer.append(line)
-        if self.enabled_print:
-            self.sink(line)
+        # Collect only. Never print.
+        self.buffer.append(str(line))
+
 
     def section(self, title: str) -> None:
         self._emit("")
@@ -377,23 +371,6 @@ class DebugLog:
 
         self.reset_matrix()
 
-
-def print_pre_tracking_results(frame_idx: int) -> None:
-    print("\n" + "=" * 80)
-    print(f"PRE TRACKING RESULTS: frame={frame_idx}")
-    print("=" * 80 + "\n")
-
-
-def print_tracking_results(log: dict, iteration: int, show_pose_tables: bool = False) -> None:
-    print("\n" + "=" * 80)
-    print(f"TRACKING RESULTS: frame={iteration}")
-    print("=" * 80)
-    active_tracks = log.get("active_tracks", [])
-    print(f"active_tracks: {len(active_tracks)}")
-    for t in active_tracks:
-        tid = t.get("track_id", "N/A") if isinstance(t, dict) else getattr(t, "track_id", "N/A")
-        pos = t.get("pos", None) if isinstance(t, dict) else getattr(t, "pos", None)
-        print(f"  - Track {tid} pos={pos}")
 
 
 def format_track_update_debug_lines(records: List[Dict[str, Any]]) -> List[str]:

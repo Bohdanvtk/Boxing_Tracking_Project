@@ -11,17 +11,17 @@ openpose:
   disable_multi_thread: true
 
 data:
-  input_dir: "/home/bohdan/check_video_short.mp4"
+  input_dir: "/home/bohdan/check_video_short_mid.mp4"
   save_width: 800
   save_dir: "/home/bohdan/Документи/Samples/Images/boxing_tracker/test"
 
 restore_mode: false
-save_log: false
+save_log: true
 
 stages:
   preprocessing: true
   local_tracking: true
-  local_det_saving: false
+  local_det_saving: true
   global_clustering: true
   global_saving: true
 
@@ -31,8 +31,8 @@ preprocessing:
   save_crops: auto
 
 local_tracking:
-  batch_size: 128
-  checkpoint_every_frames: 500
+  batch_size: 64
+  checkpoint_every_frames: 50
 
 local_det_saving:
   enabled: false
@@ -42,12 +42,12 @@ local_det_saving:
 
 global_clustering:
   enabled: true
-  checkpoint_every_tracks: 100
+  checkpoint_every_tracks: 10
 
 global_saving:
   enabled: true
   batch_size: 128
-  checkpoint_every_frames: 500
+  checkpoint_every_frames: 10
 
 progress:
   enabled: true

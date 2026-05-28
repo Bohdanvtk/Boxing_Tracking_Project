@@ -5,16 +5,12 @@ import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from boxing_project.tracking.tracker import openpose_people_to_detections
-from boxing_project.shot_boundary.inference import ShotBoundaryInferencer, ShotBoundaryInferConfig
-from boxing_project.tracking.image_utils import render_tracking_overlays, extract_boxing_crops, attach_overlap_info_to_detections, keypoints_to_intersection_bbox
 import matplotlib.pyplot as plt
-from boxing_project.tracking.openpose_processing import preprocess_image, set_openpose_module
+from boxing_project.tracking.openpose_processing import set_openpose_module
 from boxing_project.tracking.frame_processing import (
     prepare_frame_detections_from_keypoints,
     update_tracker_from_detections,
 )
-
 
 
 """
@@ -558,42 +554,109 @@ def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, 
         _store_matched_crops(original_img, detections, log.get("matches", []), frame_dir=frame_dir)
     return detections, log
 
-def visualize_sequence(opWrapper, tracker, app_emb_path, sb_cfg: dict, images, save_width, merge_n,
-                    save_dir: Path | None,
-                    graph_clustering_params: dict | None = None,
-                    pipeline_cfg: dict | None = None):
+def visualize_sequence(
+    opWrapper,
+    tracker,
+    app_emb_path,
+    sb_cfg: dict,
+    images,
+    save_width,
+    save_dir: Path | None,
+    graph_clustering_params: dict | None = None,
+    pipeline_cfg: dict | None = None,
+    progress=None,
+):
     from boxing_project.apperance_embedding.inference import AppearanceEmbedder, AppearanceEmbedConfig
+    from boxing_project.tracking.progress_utils import RichStageProgress
     from boxing_project.tracking.tracking_stages import (
-        PipelineContext, RichStageProgress, PreprocessingStage, LocalTrackingStage,
-        LocalDetSavingStage, GlobalClusteringStage, GlobalSavingStage,
+        PipelineContext,
+        PreprocessingStage,
+        LocalTrackingStage,
+        LocalDetSavingStage,
+        GlobalClusteringStage,
+        GlobalSavingStage,
     )
-    app_embedder = AppearanceEmbedder(AppearanceEmbedConfig(model_path=app_emb_path))
-    save_dir = Path(save_dir) if save_dir is not None else Path('output')
+
     runtime_cfg = pipeline_cfg or {}
     cfg = {
-        'stages': runtime_cfg.get('stages', {'preprocessing': True, 'local_tracking': True, 'local_det_saving': False, 'global_clustering': True, 'global_saving': True}),
-        'restore_mode': bool(runtime_cfg.get('restore_mode', False)),
-        'save_log': bool(runtime_cfg.get('save_log', False)),
-        'preprocessing': runtime_cfg.get('preprocessing', {}),
-        'local_tracking': runtime_cfg.get('local_tracking', {}),
-        'local_det_saving': runtime_cfg.get('local_det_saving', {}),
-        'global_clustering': runtime_cfg.get('global_clustering', {}),
-        'global_saving': runtime_cfg.get('global_saving', {}),
-        'progress': runtime_cfg.get('progress', {'enabled': True, 'library': 'rich'}),
+        "stages": runtime_cfg.get(
+            "stages",
+            {
+                "preprocessing": True,
+                "local_tracking": True,
+                "local_det_saving": True,
+                "global_clustering": True,
+                "global_saving": True,
+            },
+        ),
+        "restore_mode": bool(runtime_cfg.get("restore_mode", False)),
+        "save_log": bool(runtime_cfg.get("save_log", False)),
+        "preprocessing": runtime_cfg.get("preprocessing", {}),
+        "local_tracking": runtime_cfg.get("local_tracking", {}),
+        "local_det_saving": runtime_cfg.get("local_det_saving", {}),
+        "global_clustering": runtime_cfg.get("global_clustering", {}),
+        "global_saving": runtime_cfg.get("global_saving", {}),
+        "progress": runtime_cfg.get("progress", {"enabled": True, "library": "rich"}),
     }
-    ctx = PipelineContext(opWrapper=opWrapper, tracker=tracker, app_embedder=app_embedder, sb_cfg=sb_cfg, images=list(images), save_width=save_width, save_dir=save_dir, save_log=cfg['save_log'], restore_mode=cfg['restore_mode'], cfg=cfg, graph_clustering_params=graph_clustering_params or {}, select_top_with_nearest=select_top_with_nearest, extract_features_with_hsv=extract_features_with_hsv, build_fused_appearance_embedding_with_mask=build_fused_appearance_embedding_with_mask)
-    progress = RichStageProgress(enabled=bool(cfg.get("progress", {}).get("enabled", True)))
-    run_local_det_saving = bool(cfg['stages'].get('local_det_saving', False)) and bool(cfg.get('local_det_saving', {}).get('enabled', True))
-    run_global_clustering = bool(cfg['stages'].get('global_clustering', True)) and bool(cfg.get('global_clustering', {}).get('enabled', True))
-    run_global_saving = run_global_clustering and bool(cfg['stages'].get('global_saving', True)) and bool(cfg.get('global_saving', {}).get('enabled', True))
 
-    PreprocessingStage(ctx, progress).run()
-    LocalTrackingStage(ctx, progress).run()
-    if run_local_det_saving:
-        LocalDetSavingStage(ctx, progress).run()
-    if run_global_clustering:
-        GlobalClusteringStage(ctx, progress).run()
-        if run_global_saving:
-            GlobalSavingStage(ctx, progress).run()
-    progress.finish()
+    owns_progress = progress is None
+    if progress is None:
+        progress = RichStageProgress(
+            enabled=bool(cfg.get("progress", {}).get("enabled", True))
+        )
 
+    try:
+        progress.update(
+            "setup",
+            description="[0/5] Initializing appearance embedder",
+        )
+        app_embedder = AppearanceEmbedder(AppearanceEmbedConfig(model_path=app_emb_path))
+
+        save_dir = Path(save_dir) if save_dir is not None else Path("output")
+        ctx = PipelineContext(
+            opWrapper=opWrapper,
+            tracker=tracker,
+            app_embedder=app_embedder,
+            sb_cfg=sb_cfg,
+            images=list(images),
+            save_width=save_width,
+            save_dir=save_dir,
+            save_log=cfg["save_log"],
+            restore_mode=cfg["restore_mode"],
+            cfg=cfg,
+            graph_clustering_params=graph_clustering_params or {},
+            select_top_with_nearest=select_top_with_nearest,
+            extract_features_with_hsv=extract_features_with_hsv,
+            build_fused_appearance_embedding_with_mask=build_fused_appearance_embedding_with_mask,
+        )
+
+        # IMPORTANT:
+        # Local det saving is a real pipeline stage and should not disappear
+        # because of an old/extra local_det_saving.enabled flag.
+        # It is controlled only by stages.local_det_saving.
+        run_local_det_saving = bool(cfg["stages"].get("local_det_saving", True))
+        run_global_clustering = (
+            bool(cfg["stages"].get("global_clustering", True))
+            and bool(cfg.get("global_clustering", {}).get("enabled", True))
+        )
+        run_global_saving = (
+            run_global_clustering
+            and bool(cfg["stages"].get("global_saving", True))
+            and bool(cfg.get("global_saving", {}).get("enabled", True))
+        )
+
+
+        PreprocessingStage(ctx, progress).run()
+        LocalTrackingStage(ctx, progress).run()
+
+        if run_local_det_saving:
+            LocalDetSavingStage(ctx, progress).run()
+
+        if run_global_clustering:
+            GlobalClusteringStage(ctx, progress).run()
+            if run_global_saving:
+                GlobalSavingStage(ctx, progress).run()
+
+    finally:
+        if owns_progress:
+            progress.finish()

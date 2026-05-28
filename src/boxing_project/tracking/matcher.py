@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -532,11 +532,16 @@ def _compute_pairwise_components(
 def _initialize_debug_log(
     tracks: List[Track],
     detections: List[Detection],
-    show: bool,
-    sink: Optional[Callable[[str], None]],
     g: float,
 ) -> DebugLog:
-    log = DebugLog(enabled_print=show, sink=sink or print)
+    """
+    Create a debug log collector for the current frame.
+
+    Important:
+        This function never enables console printing. Debug information is collected
+        only in memory and can later be saved to disk when cfg.save_log=True.
+    """
+    log = DebugLog()
     log.meta = {
         "g": g,
         "tracks": tracks,
@@ -726,8 +731,6 @@ def build_cost_matrix(
     tracks: List[Track],
     detections: List[Detection],
     cfg: MatchConfig,
-    show: bool = True,
-    sink: Optional[Callable[[str], None]] = None,
     g: float = 1.0,
 ) -> Tuple[PairwiseArtifacts, np.ndarray]:
     """
@@ -744,8 +747,6 @@ def build_cost_matrix(
     log = _initialize_debug_log(
         tracks=tracks,
         detections=detections,
-        show=show,
-        sink=sink,
         g=g,
     )
 
@@ -796,7 +797,7 @@ def build_cost_matrix(
         log=log,
     )
 
-    if show or cfg.save_log:
+    if cfg.save_log:
         log.show_matrix()
 
     return artifacts, row_cost
@@ -974,7 +975,7 @@ def match_tracks_and_detections(
     detections,
     reset_mode: bool,
     cfg=None,
-    debug: bool = True,
+    debug: bool = False,
     sink=None,
     config_path=None,
     g: float = 1.0,
@@ -990,12 +991,13 @@ def match_tracks_and_detections(
     if cfg is None:
         cfg = _load_match_config_from_yaml(config_path)
 
+    # debug and sink are kept in the signature for backward compatibility,
+    # but console debug output is intentionally disabled.
+    # Matrix debug is collected only when cfg.save_log=True.
     artifacts, row_cost = build_cost_matrix(
         tracks=tracks,
         detections=detections,
         cfg=cfg,
-        show=debug,
-        sink=sink,
         g=g,
     )
 
