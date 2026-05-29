@@ -1,35 +1,420 @@
+"""Reusable inference helpers for staged tracking.
+
+This module owns non-image pipeline utilities:
+- OpenPose initialization
+- atomic file/parquet writes
+- chunked parquet reads
+- DataFrame indexing helpers
+- keypoint/confidence normalization for parquet data
+- tracker checkpoint/state helpers
+- frame-level detection preparation/update logic
+- stage-based inference entrypoint
+"""
+from __future__ import annotations
+
+import gc
+import json
 import os
+import pickle
+import re
 import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
 import cv2
 import numpy as np
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Optional
-import matplotlib.pyplot as plt
-from boxing_project.tracking.openpose_processing import set_openpose_module
-from boxing_project.tracking.frame_processing import (
-    prepare_frame_detections_from_keypoints,
-    update_tracker_from_detections,
+import pandas as pd
+
+from boxing_project.tracking.image_utils import (
+    attach_overlap_info_to_detections,
+    bbox_from_keypoints_for_image,
+    clip_bbox_to_image,
+    extract_boxing_crops,
+    get_detection_bbox,
+    keypoints_to_intersection_bbox,
 )
+from boxing_project.tracking.openpose_processing import set_openpose_module
+from boxing_project.tracking.tracker import openpose_people_to_detections
 
 
-"""
-This module contains reusable inference components:
-- OpenPose initialization
-- Image preprocessing
-- Keypoint-based bbox extraction
-- Frame processing (OpenPose -> tracker -> drawing)
-- Visualization loop
-"""
+op = None  # set in init_openpose_from_config()
 
-op = None  # will be set in init_openpose_from_config()
+OPENPOSE_RESULTS_COLUMNS = [
+    "frame_idx", "frame_path", "det_id", "keypoints", "kp_conf", "confidence",
+    "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2", "crop_shard_id", "crop_index",
+]
+FRAMES_METADATA_COLUMNS = ["frame_idx", "frame_path", "g", "reset_mode", "has_detections"]
+LOCAL_TRACKS_COLUMNS = ["frame_idx", "epoch_id", "local_track_id", "det_id"]
+TRACK_STATES_COLUMNS = [
+    "frame_idx", "epoch_id", "local_track_id", "det_id", "is_matched", "confirmed",
+    "hits", "age", "time_since_update", "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2",
+    "center_x", "center_y",
+]
+TRACKING_LOGS_COLUMNS = ["frame_idx", "epoch_id", "g", "reset_mode", "log_json"]
+GLOBAL_MAP_COLUMNS = ["epoch_id", "local_track_id", "global_track_id"]
 
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f"{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    atomic_write_bytes(path, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+
+def atomic_write_parquet(path: Path, df: pd.DataFrame) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".parquet", dir=str(path.parent))
+    os.close(fd)
+    tmp_path = Path(tmp)
+    try:
+        df.to_parquet(tmp_path, index=False)
+        os.replace(tmp_path, path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+def load_manifest(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+def iter_batches(items: list[int], batch_size: int):
+    size = max(1, int(batch_size))
+    for i in range(0, len(items), size):
+        yield i // size + 1, items[i:i + size]
+
+def chunk_path(chunks_dir: Path, prefix: str, start_frame: int, end_frame: int) -> Path:
+    return chunks_dir / f"{prefix}_{start_frame:06d}_{end_frame:06d}.parquet"
+
+def parse_chunk_range(path: Path, prefix: str) -> tuple[int, int] | None:
+    m = re.match(rf"^{re.escape(prefix)}_(\d+)_(\d+)\.parquet$", path.name)
+    return None if m is None else (int(m.group(1)), int(m.group(2)))
+
+def iter_chunk_files(chunks_dir: Path, prefix: str):
+    if not chunks_dir.exists():
+        return []
+    files = []
+    for path in chunks_dir.glob(f"{prefix}_*.parquet"):
+        parsed = parse_chunk_range(path, prefix)
+        if parsed:
+            files.append((*parsed, path))
+    return sorted(files, key=lambda x: (x[0], x[1]))
+
+def read_chunked_parquet_for_frames(
+    chunks_dir: Path,
+    prefix: str,
+    frames: list[int],
+    columns: list[str] | None = None,
+    expected_columns: list[str] | None = None,
+) -> pd.DataFrame:
+    if not frames:
+        return pd.DataFrame(columns=expected_columns or columns)
+
+    frame_set = {int(f) for f in frames}
+    min_frame, max_frame = min(frame_set), max(frame_set)
+    dfs = []
+
+    for start, end, path in iter_chunk_files(chunks_dir, prefix):
+        if end < min_frame or start > max_frame:
+            continue
+        try:
+            df = pd.read_parquet(path, columns=columns)
+        except (KeyError, ValueError, TypeError):
+            df = pd.read_parquet(path)
+            if columns is not None:
+                df = df[[c for c in columns if c in df.columns]]
+        if not df.empty and "frame_idx" in df.columns:
+            df = df[df["frame_idx"].isin(frame_set)]
+            if not df.empty:
+                dfs.append(df)
+
+    if not dfs:
+        return pd.DataFrame(columns=expected_columns or columns)
+    out = pd.concat(dfs, ignore_index=True)
+    return out.reindex(columns=expected_columns) if expected_columns else out
+
+def df_by_frame(df: pd.DataFrame) -> dict[int, pd.DataFrame]:
+    if df is None or df.empty or "frame_idx" not in df.columns:
+        return {}
+    return {int(k): v for k, v in df.groupby("frame_idx", sort=False)}
+
+def first_by_frame(df: pd.DataFrame) -> dict[int, Any]:
+    if df is None or df.empty or "frame_idx" not in df.columns:
+        return {}
+    return {int(r.frame_idx): r for r in df.itertuples(index=False)}
+
+def free(*objects) -> None:
+    del objects
+    gc.collect()
+
+def normalize_keypoints_xy(value) -> np.ndarray:
+    if value is None:
+        return np.empty((0, 2), dtype=np.float32)
+    try:
+        arr = np.asarray(value, dtype=np.float32)
+    except (TypeError, ValueError):
+        rows = []
+        for item in np.asarray(value, dtype=object):
+            try:
+                item_arr = np.asarray(item, dtype=np.float32).reshape(-1)
+            except (TypeError, ValueError):
+                continue
+            if item_arr.size >= 2:
+                rows.append(item_arr[:2])
+        arr = np.asarray(rows, dtype=np.float32) if rows else np.empty((0, 2), dtype=np.float32)
+
+    if arr.dtype == object:
+        rows = []
+        for item in arr:
+            try:
+                item_arr = np.asarray(item, dtype=np.float32).reshape(-1)
+            except (TypeError, ValueError):
+                continue
+            if item_arr.size >= 2:
+                rows.append(item_arr[:2])
+        arr = np.asarray(rows, dtype=np.float32) if rows else np.empty((0, 2), dtype=np.float32)
+
+    if arr.ndim == 1:
+        arr = arr[: arr.size - arr.size % 2].reshape(-1, 2)
+    if arr.ndim != 2 or arr.shape[1] < 2:
+        return np.empty((0, 2), dtype=np.float32)
+    return arr[:, :2].astype(np.float32, copy=False)
+
+def normalize_kp_conf(value) -> np.ndarray:
+    if value is None:
+        return np.empty((0,), dtype=np.float32)
+    try:
+        return np.asarray(value, dtype=np.float32).reshape(-1)
+    except (TypeError, ValueError):
+        vals = []
+        for item in np.asarray(value, dtype=object):
+            try:
+                item_arr = np.asarray(item, dtype=np.float32).reshape(-1)
+            except (TypeError, ValueError):
+                continue
+            if item_arr.size:
+                vals.append(float(item_arr[0]))
+        return np.asarray(vals, dtype=np.float32)
+
+def _safe_bool_attr(obj: Any, name: str, default: bool = False) -> bool:
+    value = getattr(obj, name, default)
+    return bool(value() if callable(value) else value)
+
+def _safe_int_attr(obj: Any, name: str, default: int = 0) -> int:
+    value = getattr(obj, name, default)
+    return int(value() if callable(value) else value)
+
+def _track_center(track: Any) -> tuple[float | None, float | None]:
+    for value in (getattr(track, "last_det_center", None), getattr(track, "center", None)):
+        if value is None:
+            continue
+        arr = np.asarray(value, dtype=np.float32).reshape(-1)
+        if arr.size >= 2 and np.isfinite(arr[:2]).all():
+            return float(arr[0]), float(arr[1])
+    for name in ("pos", "state"):
+        value = getattr(track, name, None)
+        if callable(value):
+            value = value()
+        if value is None:
+            continue
+        arr = np.asarray(value, dtype=np.float32).reshape(-1)
+        if arr.size >= 2 and np.isfinite(arr[:2]).all():
+            return float(arr[0]), float(arr[1])
+    return None, None
+
+def _bbox_from_detection(det: Any, img_shape) -> list[float] | None:
+    # No keypoint fallback here: matched tracks should use the bbox stored on the Detection.
+    return clip_bbox_to_image(get_detection_bbox(det), img_shape)
+
+def _track_bbox_from_track(track: Any, img_shape) -> list[float] | None:
+    for attr in ("last_bbox", "bbox", "tlbr", "last_tlbr"):
+        value = getattr(track, attr, None)
+        value = value() if callable(value) else value
+        bbox = clip_bbox_to_image(value, img_shape)
+        if bbox is not None:
+            return bbox
+    kps = getattr(track, "last_keypoints", None)
+    if kps is None:
+        return None
+    return bbox_from_keypoints_for_image(normalize_keypoints_xy(kps), normalize_kp_conf(getattr(track, "last_kp_conf", None)), img_shape)
+
+def collect_tracker_state_rows(*, tracker, frame_idx: int, epoch_id: int, matches, img_shape, detections=None):
+    matched_det_by_track = {int(tid): int(did) for tid, did in (matches or [])}
+    detections = detections or []
+    rows = []
+    for trk in getattr(tracker, "tracks", []) or []:
+        tid = int(getattr(trk, "track_id"))
+        det_id = matched_det_by_track.get(tid)
+        bbox = _bbox_from_detection(detections[det_id], img_shape) if det_id is not None and 0 <= det_id < len(detections) else None
+        bbox = bbox or _track_bbox_from_track(trk, img_shape)
+        cx, cy = _track_center(trk)
+        rows.append({
+            "frame_idx": int(frame_idx), "epoch_id": int(epoch_id), "local_track_id": tid,
+            "det_id": int(det_id) if det_id is not None else -1, "is_matched": det_id is not None,
+            "confirmed": _safe_bool_attr(trk, "confirmed", False), "hits": _safe_int_attr(trk, "hits", 0),
+            "age": _safe_int_attr(trk, "age", 0), "time_since_update": _safe_int_attr(trk, "time_since_update", 0),
+            "bbox_x1": None if bbox is None else float(bbox[0]), "bbox_y1": None if bbox is None else float(bbox[1]),
+            "bbox_x2": None if bbox is None else float(bbox[2]), "bbox_y2": None if bbox is None else float(bbox[3]),
+            "center_x": None if cx is None else float(cx), "center_y": None if cy is None else float(cy),
+        })
+    return rows
+
+def save_tracker_checkpoint(path: Path, tracker: Any, last_completed_frame: int) -> None:
+    payload = {"mode": "pickle_tracker", "tracker": tracker, "last_completed_frame": int(last_completed_frame)}
+    try:
+        atomic_write_bytes(path, pickle.dumps(payload))
+    except (pickle.PickleError, TypeError, AttributeError) as exc:
+        raise RuntimeError("Failed to serialize tracker checkpoint; implement explicit tracker state serialization.") from exc
+
+def load_tracker_checkpoint(path: Path) -> tuple[Any, int]:
+    try:
+        payload = pickle.loads(path.read_bytes())
+    except (pickle.PickleError, EOFError, AttributeError, ImportError, IndexError) as exc:
+        raise RuntimeError(f"Corrupt tracker checkpoint: {path}") from exc
+    if payload.get("mode") != "pickle_tracker":
+        raise RuntimeError(f"Unsupported checkpoint mode: {payload.get('mode')}")
+    return payload["tracker"], int(payload.get("last_completed_frame", -1))
+
+def top_track_ids_by_hits(tracker, k: int = 4) -> set[int]:
+    """Return up to `k` active track ids sorted by descending `hits`.
+
+    The adaptive detector-selection logic uses this to increase candidate count
+    when the strongest tracks are suddenly missed.
+    """
+    tracks = tracker.get_active_tracks(confirmed_only=False)
+    tracks = sorted(tracks, key=lambda t: int(getattr(t, "hits", 0)), reverse=True)
+    return {int(t.track_id) for t in tracks[:k]}
+
+def attach_center_distance_overlap_metadata(detections, cfg) -> None:
+    """Attach adaptive center-distance overlap risk metadata to detections."""
+    centers = [np.asarray(det.center, dtype=np.float32) for det in detections]
+    if len(centers) < 2:
+        return
+    img_diag = float(max(getattr(cfg, "image_diag", 1.0), 1.0))
+    threshold = float(getattr(cfg, "center_dist_overlap_threshold", 0.08))
+    for i, det_i in enumerate(detections):
+        best = 1e9
+        for j, det_j in enumerate(detections):
+            if i == j:
+                continue
+            d = float(np.linalg.norm(centers[i] - centers[j])) / img_diag
+            best = min(best, d)
+        det_i.meta["center_dist_norm_min"] = None if best == 1e9 else best
+        det_i.meta["center_dist_overlap_risk"] = bool(best <= threshold) if best != 1e9 else False
+
+def prepare_frame_detections_from_keypoints(
+    *,
+    kps: np.ndarray,
+    original_img,
+    conf_th: float,
+    tracker,
+    app_embedder,
+    select_top_with_nearest,
+    extract_features_with_hsv,
+    build_fused_appearance_embedding_with_mask,
+):
+    """Convert raw OpenPose keypoints to tracker detections with appearance data.
+
+    This builds detections with crop features and overlap metadata before tracker update.
+    """
+    extra_n = int(getattr(tracker, "_adaptive_extra_n", 9))
+    kps = select_top_with_nearest(kps, conf_th=conf_th, top_count=3, n=extra_n, intersect=2)
+
+    h, w = original_img.shape[:2]
+    people = []
+    for person_kps in kps:
+        intersection_bb = keypoints_to_intersection_bbox(
+            person_kps,
+            conf_th=conf_th,
+            img_w=w,
+            img_h=h,
+        )
+        parts = extract_boxing_crops(frame_bgr=original_img, kps=person_kps, conf_threshold=conf_th)
+        people.append(
+            {
+                "keypoints": person_kps,
+                "bbox": intersection_bb,
+                "bbox_for_intersection": intersection_bb,
+                "left_glove_crop": parts["left_glove"],
+                "right_glove_crop": parts["right_glove"],
+                "shorts_crop": parts["shorts"],
+            }
+        )
+
+    detections = openpose_people_to_detections(people, min_kp_conf=tracker.cfg.min_kp_conf)
+
+    attach_overlap_info_to_detections(
+        detections=detections,
+        overlap_threshold=tracker.cfg.overlap_log_threshold,
+        skeleton_overlap_threshold=tracker.cfg.skeleton_overlap_threshold,
+        skeleton_overlap_full_weight=tracker.cfg.skeleton_overlap_full_weight,
+        skeleton_overlap_core_weight=tracker.cfg.skeleton_overlap_core_weight,
+        skeleton_overlap_conf_threshold=tracker.cfg.skeleton_overlap_conf_threshold,
+        skeleton_overlap_thickness=tracker.cfg.skeleton_overlap_thickness,
+    )
+
+    attach_center_distance_overlap_metadata(detections, tracker.cfg)
+
+    for det in detections:
+        raw = det.meta.get("raw", {})
+        bbox = raw.get("bbox", None)
+
+        left_glove_crop = raw.get("left_glove_crop")
+        right_glove_crop = raw.get("right_glove_crop")
+        shorts_crop = raw.get("shorts_crop")
+
+        body_feat = app_embedder.embed(original_img, bbox) if (app_embedder is not None and bbox is not None) else None
+        left_glove_features = extract_features_with_hsv(left_glove_crop)
+        right_glove_features = extract_features_with_hsv(right_glove_crop)
+        shorts_features = extract_features_with_hsv(shorts_crop)
+
+        det.meta["body_features"] = body_feat
+        det.meta["left_glove_features"] = left_glove_features
+        det.meta["right_glove_features"] = right_glove_features
+        det.meta["shorts_features"] = shorts_features
+
+        e_app, e_app_valid_mask, e_app_coverage = build_fused_appearance_embedding_with_mask(
+            body_feat,
+            left_glove_features,
+            right_glove_features,
+            shorts_features,
+            w_body=getattr(tracker.cfg, "w_body", 1.0),
+            w_left_glove=getattr(tracker.cfg, "w_left_glove", 0.5),
+            w_right_glove=getattr(tracker.cfg, "w_right_glove", 0.5),
+            w_shorts=getattr(tracker.cfg, "w_shorts", 0.75),
+        )
+        det.meta["e_app"] = e_app
+        det.meta["e_app_valid_mask"] = e_app_valid_mask
+        det.meta["e_app_coverage"] = e_app_coverage
+
+    return detections
+
+def update_tracker_from_detections(*, detections, tracker, g: float, reset_mode: bool):
+    """Update tracker and preserve adaptive candidate-count behavior."""
+    top_before = top_track_ids_by_hits(tracker, k=4)
+    extra_n = int(getattr(tracker, "_adaptive_extra_n", 9))
+
+    log = tracker.update(detections, g=g, reset_mode=reset_mode)
+
+    matched_track_ids = {int(track_id) for track_id, _ in log.get("matches", [])}
+    missed_top_track_ids = top_before - matched_track_ids
+
+    tracker._adaptive_extra_n = extra_n + 9 if missed_top_track_ids else 7
+    log["adaptive_extra_n_used"] = int(extra_n)
+    log["adaptive_extra_n_next"] = int(tracker._adaptive_extra_n)
+    log["missed_top_track_ids"] = sorted(missed_top_track_ids)
+
+    return detections, log
 
 def init_openpose_from_config(openpose_cfg: dict):
-    """
-    Initialize OpenPose wrapper from YAML config.
-    Returns (op_module, opWrapper).
-    """
+    """Initialize OpenPose wrapper from YAML config and return (op_module, opWrapper)."""
     global op
 
     root = os.path.expanduser(openpose_cfg["root"])
@@ -48,17 +433,18 @@ def init_openpose_from_config(openpose_cfg: dict):
     op = op_module
     set_openpose_module(op_module)
 
-    params = dict()
-    params["model_folder"] = os.path.join(root, "models")
-    params["hand"] = openpose_cfg.get("hand", False)
-    params["face"] = openpose_cfg.get("face", False)
-    params["net_resolution"] = openpose_cfg.get("net_resolution", "-1x256")
-    params["num_gpu"] = openpose_cfg.get("num_gpu", 1)
-    params["num_gpu_start"] = openpose_cfg.get("num_gpu_start", 0)
-    params["render_pose"] = openpose_cfg.get("render_pose", 0)
-    params["disable_blending"] = openpose_cfg.get("disable_blending", True)
-    params["number_people_max"] = openpose_cfg.get("number_people_max", 5)
-    params["disable_multi_thread"] = openpose_cfg.get("disable_multi_thread", True)
+    params = {
+        "model_folder": os.path.join(root, "models"),
+        "hand": openpose_cfg.get("hand", False),
+        "face": openpose_cfg.get("face", False),
+        "net_resolution": openpose_cfg.get("net_resolution", "-1x256"),
+        "num_gpu": openpose_cfg.get("num_gpu", 1),
+        "num_gpu_start": openpose_cfg.get("num_gpu_start", 0),
+        "render_pose": openpose_cfg.get("render_pose", 0),
+        "disable_blending": openpose_cfg.get("disable_blending", True),
+        "number_people_max": openpose_cfg.get("number_people_max", 5),
+        "disable_multi_thread": openpose_cfg.get("disable_multi_thread", True),
+    }
 
     opWrapper = op.WrapperPython()
     opWrapper.configure(params)
@@ -66,63 +452,17 @@ def init_openpose_from_config(openpose_cfg: dict):
 
     return op_module, opWrapper
 
-
-def _clip_bbox_xyxy(bbox, img_w: int, img_h: int):
-    if bbox is None:
-        return None
-    x1, y1, x2, y2 = bbox
-    x1 = max(0, min(int(x1), img_w - 1))
-    x2 = max(0, min(int(x2), img_w))
-    y1 = max(0, min(int(y1), img_h - 1))
-    y2 = max(0, min(int(y2), img_h))
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return x1, y1, x2, y2
-
-
-def extract_features_with_hsv(image: np.ndarray) -> np.ndarray:
-    """
-    Extracts a 32-dimensional HSV color histogram feature vector.
-
-    Steps:
-    1. Resize image to 32x32 for consistency
-    2. Convert from BGR to HSV color space
-    3. Compute histogram over H and S channels
-    4. Normalize and flatten to a 1D feature vector
-    """
-
-    # Check for invalid input
+def extract_features_with_hsv(image: np.ndarray) -> np.ndarray | None:
+    """Extract a 32-dimensional HSV color histogram feature vector."""
     if image is None or image.size == 0:
         return None
 
-    # Step 1: Resize image to fixed size (improves histogram stability)
     image = cv2.resize(image, (32, 32))
-
-    # Step 2: Convert image from BGR (OpenCV default) to HSV
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    hist = cv2.calcHist([hsv], [0, 1], None, [8, 4], [0, 180, 0, 256])
+    hist = cv2.normalize(hist, hist).flatten()
 
-    # Step 3: Compute 2D histogram for H and S channels
-    # Channels:
-    #   0 -> Hue (color)
-    #   1 -> Saturation (color intensity)
-    # We ignore V (brightness) to make features robust to lighting
-    hist = cv2.calcHist(
-        [hsv],          # input image
-        [0, 1],         # channels: H and S
-        None,           # no mask (use entire image)
-        [8, 4],         # number of bins (H: 8, S: 4)
-        [0, 180, 0, 256]  # value ranges for H and S
-    )
-
-    # Step 4: Normalize histogram (scale values to comparable range)
-    hist = cv2.normalize(hist, hist)
-
-    # Flatten histogram to 1D vector (shape: 32,)
-    hist = hist.flatten()
-
-    # Convert to float32 (useful for ML models)
     return hist.astype(np.float32)
-
 
 def _l2_normalize_feature(vec):
     if vec is None:
@@ -138,48 +478,6 @@ def _l2_normalize_feature(vec):
 
     return (arr / norm).astype(np.float32)
 
-
-def build_fused_appearance_embedding(
-    body_feat,
-    left_glove_feat,
-    right_glove_feat,
-    shorts_feat,
-    *,
-    w_body: float = 1.0,
-    w_left_glove: float = 0.5,
-    w_right_glove: float = 0.5,
-    w_shorts: float = 0.75,
-    part_dim: int = 32,
-) -> np.ndarray | None:
-    body = _l2_normalize_feature(body_feat)
-    if body is None:
-        return None
-
-    part_dim = max(0, int(part_dim))
-
-    def _part_or_zero(part_feat):
-        part = _l2_normalize_feature(part_feat)
-        if part is None or part.size != part_dim:
-            return np.zeros(part_dim, dtype=np.float32)
-        return part
-
-    left = _part_or_zero(left_glove_feat)
-    right = _part_or_zero(right_glove_feat)
-    shorts = _part_or_zero(shorts_feat)
-
-    fused = np.concatenate(
-        [
-            float(w_body) * body,
-            float(w_left_glove) * left,
-            float(w_right_glove) * right,
-            float(w_shorts) * shorts,
-        ],
-        axis=0,
-    ).astype(np.float32)
-
-    return _l2_normalize_feature(fused)
-
-
 def build_fused_appearance_embedding_with_mask(
     body_feat,
     left_glove_feat,
@@ -192,12 +490,7 @@ def build_fused_appearance_embedding_with_mask(
     w_shorts: float = 0.75,
     part_dim: int = 32,
 ):
-    """Build fixed-length fused appearance plus valid-part mask and coverage.
-
-    Body appearance is required. Optional part segments are zero-filled when
-    unavailable and marked invalid in the returned mask so matching treats them
-    as unknown rather than different.
-    """
+    """Build fixed-length fused appearance vector plus valid-part mask and coverage."""
     body = _l2_normalize_feature(body_feat)
     if body is None:
         return None, None, 0.0
@@ -214,12 +507,10 @@ def build_fused_appearance_embedding_with_mask(
 
     def _part_or_zero_and_mask(part_feat, weight):
         nonlocal visible_weight
+
         part = _l2_normalize_feature(part_feat)
         if part is None or part.size != part_dim:
-            return (
-                np.zeros(part_dim, dtype=np.float32),
-                np.zeros(part_dim, dtype=bool),
-            )
+            return np.zeros(part_dim, dtype=np.float32), np.zeros(part_dim, dtype=bool)
 
         visible_weight += max(float(weight), 0.0)
         return part, np.ones(part_dim, dtype=bool)
@@ -256,27 +547,16 @@ def build_fused_appearance_embedding_with_mask(
 
     return e_app, e_app_valid_mask, e_app_coverage
 
-
 def _kp_center(kp: np.ndarray, conf_th: float):
     valid = kp[:, 2] > conf_th
     if not np.any(valid):
         return None
     return np.mean(kp[valid, :2], axis=0)
 
-
 def _center_dist(a, b) -> float:
     if a is None or b is None:
         return float("inf")
     return float(np.linalg.norm(a - b))
-
-
-def _attach_center_distance_overlap_metadata(detections, cfg) -> None:
-    # Geometry is attached by image_utils; tracker owns adaptive risk decisions.
-    for det in detections:
-        det.meta.setdefault("min_center_dist_norm", float("inf"))
-        det.meta.setdefault("center_dist_norm_det_idx", None)
-        det.meta.setdefault("overlap_relations", [])
-
 
 def select_top_with_nearest(
     kps: np.ndarray,
@@ -285,52 +565,32 @@ def select_top_with_nearest(
     n: int = 3,
     intersect: int = 1,
 ) -> np.ndarray:
-    """
-    Keep top detections by original OpenPose order.
-    Then add up to n nearest extra detections.
-
-    intersect:
-        max number of top detections that may point to the same extra detection.
-
-    Important:
-        top detections are never used as nearest extras.
-    """
-
+    """Keep top detections by OpenPose order, then add up to n nearest extra detections."""
     total = len(kps)
     if total <= top_count:
         return kps
 
     top_count = min(top_count, total)
     top_indices = list(range(top_count))
-
-    # extra candidates start only AFTER top detections
     extra_indices = list(range(top_count, total))
 
     centers = [_kp_center(kps[i], conf_th) for i in range(total)]
-
-    # extra_idx -> how many top detections selected it as neighbor
     usage_count = {idx: 0 for idx in extra_indices}
-
     selected = list(top_indices)
     selected_extras = []
 
-    # candidates: (distance, top_idx, extra_idx)
     pairs = []
     for top_idx in top_indices:
         for extra_idx in extra_indices:
             dist = _center_dist(centers[top_idx], centers[extra_idx])
-            pairs.append((dist, top_idx, extra_idx))
+            pairs.append((dist, extra_idx))
 
-    pairs.sort(key=lambda x: x[0])
-
-    for dist, top_idx, extra_idx in pairs:
+    for _, extra_idx in sorted(pairs, key=lambda x: x[0]):
         if len(selected_extras) >= n:
             break
-
         if usage_count[extra_idx] >= intersect:
             continue
 
-        # додаємо extra detection у фінальний список тільки один раз
         if extra_idx not in selected:
             selected.append(extra_idx)
             selected_extras.append(extra_idx)
@@ -338,221 +598,6 @@ def select_top_with_nearest(
         usage_count[extra_idx] += 1
 
     return kps[selected]
-
-def _store_matched_crops(
-    frame: np.ndarray,
-    detections,
-    matches,
-    frame_dir: Optional[Path] = None,
-) -> None:
-    h, w = frame.shape[:2]
-    if frame_dir is None:
-        return
-
-    base_dir = Path(frame_dir) / "extra" / "matched_local"
-    base_dir.mkdir(parents=True, exist_ok=True)
-
-    for track_id, det_idx in matches:
-        if det_idx < 0 or det_idx >= len(detections):
-            continue
-
-        track_dir = base_dir / f"track_{int(track_id):03d}"
-        track_dir.mkdir(parents=True, exist_ok=True)
-
-        det = detections[det_idx]
-        raw = det.meta.get("raw", {})
-
-        # 1. Save tight person bbox crop
-        bb = _clip_bbox_xyxy(raw.get("bbox", None), img_w=w, img_h=h)
-        if bb is not None:
-            x1, y1, x2, y2 = bb
-            crop = frame[y1:y2, x1:x2]
-
-            if crop.size != 0:
-                out_name = f"det_{int(det_idx):03d}_person.jpg"
-                cv2.imwrite(str(track_dir / out_name), crop)
-
-        # 2. Save intersection bbox crop
-        intersection_bb = _clip_bbox_xyxy(
-            raw.get("bbox_for_intersection", None),
-            img_w=w,
-            img_h=h,
-        )
-
-        if intersection_bb is not None:
-            x1, y1, x2, y2 = intersection_bb
-            crop = frame[y1:y2, x1:x2]
-
-            if crop.size != 0:
-                out_name = f"det_{int(det_idx):03d}_intersection_bbox.jpg"
-                cv2.imwrite(str(track_dir / out_name), crop)
-
-        # 3. Save part crops
-        left_glove_crop = raw.get("left_glove_crop")
-        right_glove_crop = raw.get("right_glove_crop")
-        shorts_crop = raw.get("shorts_crop")
-
-        if left_glove_crop is not None and left_glove_crop.size != 0:
-            out_name = f"det_{int(det_idx):03d}_left_glove.jpg"
-            cv2.imwrite(str(track_dir / out_name), left_glove_crop)
-
-        if right_glove_crop is not None and right_glove_crop.size != 0:
-            out_name = f"det_{int(det_idx):03d}_right_glove.jpg"
-            cv2.imwrite(str(track_dir / out_name), right_glove_crop)
-
-        if shorts_crop is not None and shorts_crop.size != 0:
-            out_name = f"det_{int(det_idx):03d}_shorts.jpg"
-            cv2.imwrite(str(track_dir / out_name), shorts_crop)
-
-def _save_global_matched_crops(
-    frame: np.ndarray,
-    detections,
-    global_matches,
-    frame_dir: Optional[Path] = None,
-) -> None:
-    h, w = frame.shape[:2]
-    if frame_dir is None:
-        return
-
-    matched_dir = Path(frame_dir) / "extra" / "matched_global"
-    matched_dir.mkdir(parents=True, exist_ok=True)
-
-    for global_id, det_idx in global_matches:
-        if det_idx < 0 or det_idx >= len(detections):
-            continue
-        raw = detections[det_idx].meta.get("raw", {})
-        bb = _clip_bbox_xyxy(raw.get("bbox", None), img_w=w, img_h=h)
-        if bb is None:
-            continue
-        x1, y1, x2, y2 = bb
-        crop = frame[y1:y2, x1:x2]
-        if crop.size == 0:
-            continue
-        out_name = f"global_id_{int(global_id):03d}_det_{int(det_idx):03d}.jpg"
-        cv2.imwrite(str(matched_dir / out_name), crop)
-
-def show_crop(ax, img, title: str):
-    """
-    Показує одну картинку в одному subplot.
-
-    Parameters
-    ----------
-    ax : matplotlib axis
-        Область, куди малюємо картинку.
-    img : np.ndarray | None
-        Crop-зображення або None.
-    title : str
-        Назва над картинкою.
-    """
-    # Підпис над картинкою
-    ax.set_title(title)
-
-    # Прибираємо осі, бо для картинок вони не потрібні
-    ax.axis("off")
-
-    # Якщо crop відсутній, показуємо текст "None"
-    if img is None:
-        ax.text(0.5, 0.5, "None", ha="center", va="center", fontsize=12)
-        return
-
-    # OpenCV читає зображення як BGR,
-    # а matplotlib очікує RGB,
-    # тому перед показом треба конвертувати
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-    # Відображаємо картинку
-    ax.imshow(img_rgb)
-
-def visualize_boxing_crops(original_img, people):
-    """
-    Для кожної людини показує 4 зображення в одному рядку:
-    1. повний кадр з bbox людини
-    2. crop лівої рукавиці
-    3. crop правої рукавиці
-    4. crop шортів
-    """
-    for i, person in enumerate(people):
-        # Створюємо 4 subplot-и в одному рядку
-        fig, axes = plt.subplots(1, 4, figsize=(16, 4))
-
-        # -------------------------------------------------
-        # 1. Повне зображення + bbox людини
-        # -------------------------------------------------
-        full_img = original_img.copy()
-
-        bbox = person.get("bbox", None)
-        if bbox is not None:
-            x1, y1, x2, y2 = map(int, bbox)
-
-            # Малюємо bbox людини зеленим прямокутником
-            cv2.rectangle(full_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-        show_crop(axes[0], full_img, f"Person {i} bbox")
-
-        # -------------------------------------------------
-        # 2. Ліва рукавиця
-        # -------------------------------------------------
-        show_crop(axes[1], person.get("left_glove_crop"), "Left glove")
-
-        # -------------------------------------------------
-        # 3. Права рукавиця
-        # -------------------------------------------------
-        show_crop(axes[2], person.get("right_glove_crop"), "Right glove")
-
-        # -------------------------------------------------
-        # 4. Шорти
-        # -------------------------------------------------
-        show_crop(axes[3], person.get("shorts_crop"), "Shorts")
-
-        # Робимо відступи між subplot-ами красивішими
-        plt.tight_layout()
-
-        # Показуємо весь рядок картинок
-        plt.show()
-
-@dataclass
-class FrameTrackingResult:
-    """
-    Lightweight per-frame result.
-    Stores only tracking data and path to frame on disk.
-    """
-    frame_idx: int
-    detections: list
-    log: dict
-    frame_path: Path
-
-
-def _top_track_ids_by_hits(tracker, k: int = 4) -> set[int]:
-    tracks = tracker.get_active_tracks(confirmed_only=False)
-
-    tracks = sorted(
-        tracks,
-        key=lambda t: int(getattr(t, "hits", 0)),
-        reverse=True,
-    )
-
-    return {int(t.track_id) for t in tracks[:k]}
-
-
-def process_frame(result, tracker, original_img, conf_th, app_embedder, g: int, reset_mode: bool, frame_dir: Optional[Path] = None):
-    """Backward-compatible single-frame wrapper used by legacy call sites."""
-    if result.poseKeypoints is None:
-        return [], {"matches": [], "cost_matrix": np.zeros((0, 0)), "active_tracks": [], "epoch_id": int(getattr(tracker, "_epoch_id", 1))}
-
-    detections = prepare_frame_detections_from_keypoints(
-        kps=result.poseKeypoints,
-        original_img=original_img,
-        conf_th=conf_th,
-        tracker=tracker,
-        app_embedder=app_embedder,
-        select_top_with_nearest=select_top_with_nearest,
-        extract_features_with_hsv=extract_features_with_hsv,
-        build_fused_appearance_embedding_with_mask=build_fused_appearance_embedding_with_mask,
-    )
-    detections, log = update_tracker_from_detections(detections=detections, tracker=tracker, g=g, reset_mode=reset_mode)
-    if frame_dir is not None:
-        _store_matched_crops(original_img, detections, log.get("matches", []), frame_dir=frame_dir)
-    return detections, log
 
 def visualize_sequence(
     opWrapper,
@@ -601,15 +646,10 @@ def visualize_sequence(
 
     owns_progress = progress is None
     if progress is None:
-        progress = RichStageProgress(
-            enabled=bool(cfg.get("progress", {}).get("enabled", True))
-        )
+        progress = RichStageProgress(enabled=bool(cfg.get("progress", {}).get("enabled", True)))
 
     try:
-        progress.update(
-            "setup",
-            description="[0/5] Initializing appearance embedder",
-        )
+        progress.update("setup", description="[0/5] Initializing appearance embedder")
         app_embedder = AppearanceEmbedder(AppearanceEmbedConfig(model_path=app_emb_path))
 
         save_dir = Path(save_dir) if save_dir is not None else Path("output")
@@ -630,10 +670,6 @@ def visualize_sequence(
             build_fused_appearance_embedding_with_mask=build_fused_appearance_embedding_with_mask,
         )
 
-        # IMPORTANT:
-        # Local det saving is a real pipeline stage and should not disappear
-        # because of an old/extra local_det_saving.enabled flag.
-        # It is controlled only by stages.local_det_saving.
         run_local_det_saving = bool(cfg["stages"].get("local_det_saving", True))
         run_global_clustering = (
             bool(cfg["stages"].get("global_clustering", True))
@@ -644,7 +680,6 @@ def visualize_sequence(
             and bool(cfg["stages"].get("global_saving", True))
             and bool(cfg.get("global_saving", {}).get("enabled", True))
         )
-
 
         PreprocessingStage(ctx, progress).run()
         LocalTrackingStage(ctx, progress).run()

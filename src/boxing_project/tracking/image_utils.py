@@ -1068,3 +1068,79 @@ def render_tracking_overlays(frame: np.ndarray, detections, matches, frame_idx: 
     label_prefix = "GID" if use_global_ids else "ID"
     draw_matched_tracks(frame=frame, detections=detections, matches=matches, label_prefix=label_prefix)
     draw_frame_index(frame, frame_idx)
+
+# ============================================================
+# Stage rendering/crop adapters
+# ============================================================
+
+class _LightDet:
+    """Small detection-like object compatible with render_tracking_overlays."""
+
+    def __init__(self, bbox, keypoints, kp_conf):
+        bbox = [float(v) for v in bbox]
+        self.meta = {"raw": {"bbox": bbox, "bbox_for_intersection": bbox}}
+        self.center = ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
+        self.keypoints = keypoints
+        self.kp_conf = kp_conf
+
+
+def clip_bbox_to_image(bbox, img_shape) -> Optional[List[float]]:
+    """Clip an xyxy bbox to an image shape and return floats."""
+    if img_shape is None or len(img_shape) < 2:
+        return None
+    h, w = img_shape[:2]
+    clipped = clip_bbox_xyxy(bbox, img_w=w, img_h=h)
+    return None if clipped is None else [float(v) for v in clipped]
+
+
+def bbox_from_keypoints_for_image(kps, kp_conf, img_shape, conf_th: float = 0.05) -> Optional[List[float]]:
+    """Build an image-clipped bbox from separate xy keypoints and confidence arrays."""
+    xy, conf = _coerce_keypoints_and_conf(kps, kp_conf)
+    if xy is None or conf is None:
+        return None
+    h, w = img_shape[:2]
+    person = np.concatenate([xy, conf[:, None]], axis=1).astype(np.float32, copy=False)
+    bbox = keypoints_to_intersection_bbox(person, conf_th=conf_th, img_w=w, img_h=h)
+    return None if bbox is None else [float(v) for v in bbox]
+
+
+def bbox_from_parquet_row(row, kps, kp_conf, img_shape) -> Optional[List[float]]:
+    """Use parquet bbox columns first; fall back to keypoints when they are missing."""
+    try:
+        values = [float(row.bbox_x1), float(row.bbox_y1), float(row.bbox_x2), float(row.bbox_y2)]
+    except (AttributeError, TypeError, ValueError):
+        values = None
+
+    if values is not None and np.isfinite(values).all():
+        bbox = clip_bbox_to_image(values, img_shape)
+        if bbox is not None:
+            return bbox
+
+    return bbox_from_keypoints_for_image(kps, kp_conf, img_shape)
+
+
+def build_visual_detections_from_rows(frame_rows, img: np.ndarray):
+    """Convert parquet detection rows into lightweight detections for overlay rendering."""
+    detections, row_by_det_id, vis_idx_by_det_id = [], {}, {}
+    if frame_rows is None or frame_rows.empty:
+        return detections, row_by_det_id, vis_idx_by_det_id
+
+    if "det_id" in frame_rows.columns:
+        frame_rows = frame_rows.sort_values("det_id").reset_index(drop=True)
+
+    for row in frame_rows.itertuples(index=False):
+        det_id = int(row.det_id) if hasattr(row, "det_id") else len(detections)
+        kps, kp_conf = _coerce_keypoints_and_conf(row.keypoints, getattr(row, "kp_conf", None))
+        if kps is None or kp_conf is None:
+            kps = np.empty((0, 2), dtype=np.float32)
+            kp_conf = np.empty((0,), dtype=np.float32)
+
+        bbox = bbox_from_parquet_row(row, kps, kp_conf, img.shape)
+        if bbox is None:
+            continue
+
+        vis_idx_by_det_id[det_id] = len(detections)
+        row_by_det_id[det_id] = row
+        detections.append(_LightDet(bbox, kps, kp_conf))
+
+    return detections, row_by_det_id, vis_idx_by_det_id

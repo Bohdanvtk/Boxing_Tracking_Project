@@ -1,17 +1,15 @@
-"""Refactored staged tracking pipeline.
+"""Staged tracking pipeline orchestration.
 
-Same staged idea as the original version, but with duplicated manifest/restore/progress
-logic centralized in BaseStage helpers and noisy broad exception handling reduced.
+The heavy helper logic lives in:
+- inference_utils.py: atomic writes, parquet chunks, normalization, tracker checkpoints, frame processing
+- image_utils.py: bbox/crop/render adapters
+
+This file should mostly contain stage classes and their run order.
 """
 from __future__ import annotations
 
-import gc
 import json
-import os
-import pickle
-import re
 import shutil
-import tempfile
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,369 +19,38 @@ import cv2
 import numpy as np
 import pandas as pd
 
-from boxing_project.tracking.frame_processing import (
+from boxing_project.tracking.global_clustering import GlobalTrackClusterer
+from boxing_project.tracking.image_utils import (
+    build_visual_detections_from_rows,
+    keypoints_to_intersection_bbox,
+    render_tracking_overlays,
+)
+from boxing_project.tracking.inference_utils import (
+    FRAMES_METADATA_COLUMNS,
+    GLOBAL_MAP_COLUMNS,
+    LOCAL_TRACKS_COLUMNS,
+    OPENPOSE_RESULTS_COLUMNS,
+    TRACKING_LOGS_COLUMNS,
+    TRACK_STATES_COLUMNS,
+    atomic_write_json,
+    atomic_write_parquet,
+    chunk_path,
+    collect_tracker_state_rows,
+    df_by_frame,
+    first_by_frame,
+    free,
+    iter_batches,
+    load_manifest,
+    load_tracker_checkpoint,
+    normalize_keypoints_xy,
+    normalize_kp_conf,
     prepare_frame_detections_from_keypoints,
+    read_chunked_parquet_for_frames,
+    save_tracker_checkpoint,
     update_tracker_from_detections,
 )
-from boxing_project.tracking.global_clustering import GlobalTrackClusterer
-from boxing_project.tracking.image_utils import keypoints_to_intersection_bbox, render_tracking_overlays
 from boxing_project.tracking.openpose_processing import preprocess_image
 from boxing_project.tracking.progress_utils import RichStageProgress
-
-
-OPENPOSE_RESULTS_COLUMNS = [
-    "frame_idx", "frame_path", "det_id", "keypoints", "kp_conf", "confidence",
-    "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2", "crop_shard_id", "crop_index",
-]
-FRAMES_METADATA_COLUMNS = ["frame_idx", "frame_path", "g", "reset_mode", "has_detections"]
-LOCAL_TRACKS_COLUMNS = ["frame_idx", "epoch_id", "local_track_id", "det_id"]
-TRACK_STATES_COLUMNS = [
-    "frame_idx", "epoch_id", "local_track_id", "det_id", "is_matched", "confirmed",
-    "hits", "age", "time_since_update", "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2",
-    "center_x", "center_y",
-]
-TRACKING_LOGS_COLUMNS = ["frame_idx", "epoch_id", "g", "reset_mode", "log_json"]
-GLOBAL_MAP_COLUMNS = ["epoch_id", "local_track_id", "global_track_id"]
-
-
-class _LightDet:
-    """Small detection-like object compatible with render_tracking_overlays."""
-
-    def __init__(self, bbox, keypoints, kp_conf):
-        bbox = [float(v) for v in bbox]
-        self.meta = {"raw": {"bbox": bbox, "bbox_for_intersection": bbox}}
-        self.center = ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
-        self.keypoints = keypoints
-        self.kp_conf = kp_conf
-
-
-def atomic_write_bytes(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=f"{path.name}.", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-
-
-def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    atomic_write_bytes(path, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
-
-
-def atomic_write_parquet(path: Path, df: pd.DataFrame) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".parquet", dir=str(path.parent))
-    os.close(fd)
-    tmp_path = Path(tmp)
-    try:
-        df.to_parquet(tmp_path, index=False)
-        os.replace(tmp_path, path)
-    finally:
-        tmp_path.unlink(missing_ok=True)
-
-
-def load_manifest(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-
-
-def iter_batches(items: list[int], batch_size: int):
-    size = max(1, int(batch_size))
-    for i in range(0, len(items), size):
-        yield i // size + 1, items[i:i + size]
-
-
-def chunk_path(chunks_dir: Path, prefix: str, start_frame: int, end_frame: int) -> Path:
-    return chunks_dir / f"{prefix}_{start_frame:06d}_{end_frame:06d}.parquet"
-
-
-def parse_chunk_range(path: Path, prefix: str) -> tuple[int, int] | None:
-    m = re.match(rf"^{re.escape(prefix)}_(\d+)_(\d+)\.parquet$", path.name)
-    return None if m is None else (int(m.group(1)), int(m.group(2)))
-
-
-def iter_chunk_files(chunks_dir: Path, prefix: str):
-    if not chunks_dir.exists():
-        return []
-    files = []
-    for path in chunks_dir.glob(f"{prefix}_*.parquet"):
-        parsed = parse_chunk_range(path, prefix)
-        if parsed:
-            files.append((*parsed, path))
-    return sorted(files, key=lambda x: (x[0], x[1]))
-
-
-def read_chunked_parquet_for_frames(
-    chunks_dir: Path,
-    prefix: str,
-    frames: list[int],
-    columns: list[str] | None = None,
-    expected_columns: list[str] | None = None,
-) -> pd.DataFrame:
-    if not frames:
-        return pd.DataFrame(columns=expected_columns or columns)
-
-    frame_set = {int(f) for f in frames}
-    min_frame, max_frame = min(frame_set), max(frame_set)
-    dfs = []
-
-    for start, end, path in iter_chunk_files(chunks_dir, prefix):
-        if end < min_frame or start > max_frame:
-            continue
-        try:
-            df = pd.read_parquet(path, columns=columns)
-        except (KeyError, ValueError, TypeError):
-            df = pd.read_parquet(path)
-            if columns is not None:
-                df = df[[c for c in columns if c in df.columns]]
-        if not df.empty and "frame_idx" in df.columns:
-            df = df[df["frame_idx"].isin(frame_set)]
-            if not df.empty:
-                dfs.append(df)
-
-    if not dfs:
-        return pd.DataFrame(columns=expected_columns or columns)
-    out = pd.concat(dfs, ignore_index=True)
-    return out.reindex(columns=expected_columns) if expected_columns else out
-
-
-def df_by_frame(df: pd.DataFrame) -> dict[int, pd.DataFrame]:
-    if df is None or df.empty or "frame_idx" not in df.columns:
-        return {}
-    return {int(k): v for k, v in df.groupby("frame_idx", sort=False)}
-
-
-def first_by_frame(df: pd.DataFrame) -> dict[int, Any]:
-    if df is None or df.empty or "frame_idx" not in df.columns:
-        return {}
-    return {int(r.frame_idx): r for r in df.itertuples(index=False)}
-
-
-def free(*objects) -> None:
-    del objects
-    gc.collect()
-
-
-def ensure_openpose_chunks_from_legacy(preprocessed_dir: Path, *, batch_size: int, progress=None) -> bool:
-    chunks_dir = preprocessed_dir / "openpose_chunks"
-    chunks_dir.mkdir(parents=True, exist_ok=True)
-    if any(chunks_dir.glob("openpose_*.parquet")):
-        return True
-
-    legacy_path = preprocessed_dir / "openpose_results.parquet"
-    if not legacy_path.exists():
-        return False
-
-    if progress:
-        progress.message("Converting legacy openpose_results.parquet into chunk files")
-
-    legacy = pd.read_parquet(legacy_path)
-    if legacy.empty or "frame_idx" not in legacy.columns:
-        atomic_write_parquet(chunk_path(chunks_dir, "openpose", 0, 0), pd.DataFrame(columns=OPENPOSE_RESULTS_COLUMNS))
-        return True
-
-    for _, batch in iter_batches(sorted(map(int, legacy.frame_idx.unique())), batch_size):
-        part = legacy.loc[legacy.frame_idx.isin(batch)].reindex(columns=OPENPOSE_RESULTS_COLUMNS)
-        atomic_write_parquet(chunk_path(chunks_dir, "openpose", int(batch[0]), int(batch[-1])), part)
-    return True
-
-
-def normalize_keypoints_xy(value) -> np.ndarray:
-    if value is None:
-        return np.empty((0, 2), dtype=np.float32)
-    try:
-        arr = np.asarray(value, dtype=np.float32)
-    except (TypeError, ValueError):
-        rows = []
-        for item in np.asarray(value, dtype=object):
-            try:
-                item_arr = np.asarray(item, dtype=np.float32).reshape(-1)
-            except (TypeError, ValueError):
-                continue
-            if item_arr.size >= 2:
-                rows.append(item_arr[:2])
-        arr = np.asarray(rows, dtype=np.float32) if rows else np.empty((0, 2), dtype=np.float32)
-
-    if arr.dtype == object:
-        rows = []
-        for item in arr:
-            try:
-                item_arr = np.asarray(item, dtype=np.float32).reshape(-1)
-            except (TypeError, ValueError):
-                continue
-            if item_arr.size >= 2:
-                rows.append(item_arr[:2])
-        arr = np.asarray(rows, dtype=np.float32) if rows else np.empty((0, 2), dtype=np.float32)
-
-    if arr.ndim == 1:
-        arr = arr[: arr.size - arr.size % 2].reshape(-1, 2)
-    if arr.ndim != 2 or arr.shape[1] < 2:
-        return np.empty((0, 2), dtype=np.float32)
-    return arr[:, :2].astype(np.float32, copy=False)
-
-
-def normalize_kp_conf(value) -> np.ndarray:
-    if value is None:
-        return np.empty((0,), dtype=np.float32)
-    try:
-        return np.asarray(value, dtype=np.float32).reshape(-1)
-    except (TypeError, ValueError):
-        vals = []
-        for item in np.asarray(value, dtype=object):
-            try:
-                item_arr = np.asarray(item, dtype=np.float32).reshape(-1)
-            except (TypeError, ValueError):
-                continue
-            if item_arr.size:
-                vals.append(float(item_arr[0]))
-        return np.asarray(vals, dtype=np.float32)
-
-
-def _sanitize_xyxy_bbox(bbox, img_shape) -> list[float] | None:
-    if bbox is None or len(bbox) != 4:
-        return None
-    h, w = img_shape[:2]
-    x1, y1, x2, y2 = map(float, bbox)
-    if not np.isfinite([x1, y1, x2, y2]).all():
-        return None
-    x1, x2 = max(0.0, min(w - 1.0, x1)), max(0.0, min(float(w), x2))
-    y1, y2 = max(0.0, min(h - 1.0, y1)), max(0.0, min(float(h), y2))
-    return None if x2 <= x1 or y2 <= y1 else [x1, y1, x2, y2]
-
-
-def _bbox_from_keypoints(kps: np.ndarray, kp_conf: np.ndarray, img_shape, conf_th=0.05) -> list[float] | None:
-    h, w = img_shape[:2]
-    k = min(kps.shape[0], kp_conf.shape[0])
-    if k <= 0:
-        return None
-    person = np.concatenate([kps[:k], kp_conf[:k, None]], axis=1).astype(np.float32, copy=False)
-    return _sanitize_xyxy_bbox(keypoints_to_intersection_bbox(person, conf_th=conf_th, img_w=w, img_h=h), img_shape)
-
-
-def _bbox_from_parquet_row(row, kps: np.ndarray, kp_conf: np.ndarray, img_shape) -> list[float] | None:
-    values = [row.bbox_x1, row.bbox_y1, row.bbox_x2, row.bbox_y2]
-    if not any(pd.isna(v) for v in values):
-        bbox = _sanitize_xyxy_bbox(values, img_shape)
-        if bbox is not None:
-            return bbox
-    return _bbox_from_keypoints(kps, kp_conf, img_shape)
-
-
-def build_visual_detections_from_rows(frame_rows: pd.DataFrame, img: np.ndarray):
-    detections, row_by_det_id, vis_idx_by_det_id = [], {}, {}
-    if frame_rows is None or frame_rows.empty:
-        return detections, row_by_det_id, vis_idx_by_det_id
-    if "det_id" in frame_rows.columns:
-        frame_rows = frame_rows.sort_values("det_id").reset_index(drop=True)
-    for row in frame_rows.itertuples(index=False):
-        det_id = int(row.det_id) if hasattr(row, "det_id") else len(detections)
-        kps, kp_conf = normalize_keypoints_xy(row.keypoints), normalize_kp_conf(row.kp_conf)
-        bbox = _bbox_from_parquet_row(row, kps, kp_conf, img.shape)
-        if bbox is None:
-            continue
-        vis_idx_by_det_id[det_id] = len(detections)
-        row_by_det_id[det_id] = row
-        detections.append(_LightDet(bbox, kps, kp_conf))
-    return detections, row_by_det_id, vis_idx_by_det_id
-
-
-def _safe_bool_attr(obj: Any, name: str, default: bool = False) -> bool:
-    value = getattr(obj, name, default)
-    return bool(value() if callable(value) else value)
-
-
-def _safe_int_attr(obj: Any, name: str, default: int = 0) -> int:
-    value = getattr(obj, name, default)
-    return int(value() if callable(value) else value)
-
-
-def _track_center(track: Any) -> tuple[float | None, float | None]:
-    for value in (getattr(track, "last_det_center", None), getattr(track, "center", None)):
-        if value is None:
-            continue
-        arr = np.asarray(value, dtype=np.float32).reshape(-1)
-        if arr.size >= 2 and np.isfinite(arr[:2]).all():
-            return float(arr[0]), float(arr[1])
-    for name in ("pos", "state"):
-        value = getattr(track, name, None)
-        if callable(value):
-            value = value()
-        if value is None:
-            continue
-        arr = np.asarray(value, dtype=np.float32).reshape(-1)
-        if arr.size >= 2 and np.isfinite(arr[:2]).all():
-            return float(arr[0]), float(arr[1])
-    return None, None
-
-
-def _bbox_from_detection(det: Any, img_shape) -> list[float] | None:
-    raw = getattr(det, "meta", {})
-    raw = raw.get("raw", {}) if isinstance(raw, dict) else {}
-    for key in ("bbox", "bbox_for_intersection"):
-        bbox = _sanitize_xyxy_bbox(raw.get(key), img_shape)
-        if bbox is not None:
-            return bbox
-    kps = getattr(det, "keypoints", None)
-    if kps is None:
-        return None
-    return _bbox_from_keypoints(normalize_keypoints_xy(kps), normalize_kp_conf(getattr(det, "kp_conf", None)), img_shape)
-
-
-def _track_bbox_from_track(track: Any, img_shape) -> list[float] | None:
-    for attr in ("last_bbox", "bbox", "tlbr", "last_tlbr"):
-        value = getattr(track, attr, None)
-        value = value() if callable(value) else value
-        bbox = _sanitize_xyxy_bbox(value, img_shape)
-        if bbox is not None:
-            return bbox
-    kps = getattr(track, "last_keypoints", None)
-    if kps is None:
-        return None
-    return _bbox_from_keypoints(normalize_keypoints_xy(kps), normalize_kp_conf(getattr(track, "last_kp_conf", None)), img_shape)
-
-
-def collect_tracker_state_rows(*, tracker, frame_idx: int, epoch_id: int, matches, img_shape, detections=None):
-    matched_det_by_track = {int(tid): int(did) for tid, did in (matches or [])}
-    detections = detections or []
-    rows = []
-    for trk in getattr(tracker, "tracks", []) or []:
-        tid = int(getattr(trk, "track_id"))
-        det_id = matched_det_by_track.get(tid)
-        bbox = _bbox_from_detection(detections[det_id], img_shape) if det_id is not None and 0 <= det_id < len(detections) else None
-        bbox = bbox or _track_bbox_from_track(trk, img_shape)
-        cx, cy = _track_center(trk)
-        rows.append({
-            "frame_idx": int(frame_idx), "epoch_id": int(epoch_id), "local_track_id": tid,
-            "det_id": int(det_id) if det_id is not None else -1, "is_matched": det_id is not None,
-            "confirmed": _safe_bool_attr(trk, "confirmed", False), "hits": _safe_int_attr(trk, "hits", 0),
-            "age": _safe_int_attr(trk, "age", 0), "time_since_update": _safe_int_attr(trk, "time_since_update", 0),
-            "bbox_x1": None if bbox is None else float(bbox[0]), "bbox_y1": None if bbox is None else float(bbox[1]),
-            "bbox_x2": None if bbox is None else float(bbox[2]), "bbox_y2": None if bbox is None else float(bbox[3]),
-            "center_x": None if cx is None else float(cx), "center_y": None if cy is None else float(cy),
-        })
-    return rows
-
-
-def save_tracker_checkpoint(path: Path, tracker: Any, last_completed_frame: int) -> None:
-    payload = {"mode": "pickle_tracker", "tracker": tracker, "last_completed_frame": int(last_completed_frame)}
-    try:
-        atomic_write_bytes(path, pickle.dumps(payload))
-    except (pickle.PickleError, TypeError, AttributeError) as exc:
-        raise RuntimeError("Failed to serialize tracker checkpoint; implement explicit tracker state serialization.") from exc
-
-
-def load_tracker_checkpoint(path: Path) -> tuple[Any, int]:
-    try:
-        payload = pickle.loads(path.read_bytes())
-    except (pickle.PickleError, EOFError, AttributeError, ImportError, IndexError) as exc:
-        raise RuntimeError(f"Corrupt tracker checkpoint: {path}") from exc
-    if payload.get("mode") != "pickle_tracker":
-        raise RuntimeError(f"Unsupported checkpoint mode: {payload.get('mode')}")
-    return payload["tracker"], int(payload.get("last_completed_frame", -1))
 
 
 @dataclass
@@ -492,11 +159,10 @@ class PreprocessingStage(BaseStage):
         start = keep_until + 1
 
         if self.ctx.restore_mode and total and keep_until >= total:
-            ensure_openpose_chunks_from_legacy(self.stage_dir, batch_size=batch_size, progress=self.progress)
-            self.write_manifest("completed", last_flushed_frame=total, last_completed_frame=total, total_frames=total)
-            self.start_progress(total, " | op=RESTORE | dev=IO")
-            self.progress_update(completed=total, frame=total, total=total, op="restored complete", force=True)
-            return
+            raise RuntimeError(
+                "Restore requested, but preprocessing chunks/metadata are incomplete. "
+                "Legacy openpose_results.parquet conversion is no longer supported."
+            )
 
         meta_rows = []
         if keep_until > 0 and out_meta.exists():
@@ -619,7 +285,6 @@ class LocalTrackingStage(BaseStage):
         meta_path = self.ctx.save_dir / "preprocessed" / "frames_metadata.parquet"
         det_chunks_dir = self.ctx.save_dir / "preprocessed" / "openpose_chunks"
         self.require(meta_path, "preprocessing output")
-        ensure_openpose_chunks_from_legacy(self.ctx.save_dir / "preprocessed", batch_size=self.cfg_int("preprocessing", "batch_size", 32), progress=self.progress)
         if not any(det_chunks_dir.glob("openpose_*.parquet")):
             raise RuntimeError(f"Missing preprocessing chunks directory: {det_chunks_dir}")
 
@@ -761,7 +426,6 @@ class LocalDetSavingStage(BaseStage):
         det_chunks_dir = self.ctx.save_dir / "preprocessed" / "openpose_chunks"
         meta_path = self.ctx.save_dir / "preprocessed" / "frames_metadata.parquet"
         local_chunks_dir = self.ctx.save_dir / "local_tracking" / "chunks"
-        ensure_openpose_chunks_from_legacy(self.ctx.save_dir / "preprocessed", batch_size=self.cfg_int("preprocessing", "batch_size", 32), progress=self.progress)
         if not any(det_chunks_dir.glob("openpose_*.parquet")):
             raise RuntimeError(f"Missing preprocessing chunks directory: {det_chunks_dir}")
         self.require(local_chunks_dir, "local tracking chunks directory")
@@ -925,7 +589,6 @@ class GlobalSavingStage(BaseStage):
         meta_path = self.ctx.save_dir / "preprocessed" / "frames_metadata.parquet"
         local_chunks_dir = self.ctx.save_dir / "local_tracking" / "chunks"
         mapping_path = self.ctx.save_dir / "global_clustering" / "local_to_global.parquet"
-        ensure_openpose_chunks_from_legacy(self.ctx.save_dir / "preprocessed", batch_size=self.cfg_int("preprocessing", "batch_size", 32), progress=self.progress)
         if not any(det_chunks_dir.glob("openpose_*.parquet")):
             raise RuntimeError(f"Missing preprocessing chunks directory: {det_chunks_dir}")
         self.require(local_chunks_dir, "local tracking chunks directory")
