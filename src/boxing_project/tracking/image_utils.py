@@ -221,6 +221,8 @@ def _coerce_keypoints_and_conf(kps, kp_conf=None) -> Tuple[Optional[np.ndarray],
     except (TypeError, ValueError):
         return None, None
 
+    if arr.ndim == 1:
+        arr = arr[: arr.size - arr.size % 2].reshape(-1, 2)
     if arr.ndim != 2 or arr.shape[1] < 2 or arr.shape[0] == 0:
         return None, None
 

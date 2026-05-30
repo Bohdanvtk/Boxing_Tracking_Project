@@ -15,20 +15,25 @@ data:
   save_width: 800
   save_dir: "/home/bohdan/Документи/Samples/Images/boxing_tracker/test"
 
-restore_mode: false
+restore_mode: true
 save_log: true
 
 stages:
   preprocessing: true
+  detection_preparation: true
   local_tracking: true
   local_det_saving: true
   global_clustering: true
   global_saving: true
 
+
 preprocessing:
   batch_size: 32
   checkpoint_every_frames: 100
   save_crops: auto
+
+detection_preparation:
+  batch_size: 128
 
 local_tracking:
   batch_size: 64

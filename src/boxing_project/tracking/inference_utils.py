@@ -8,6 +8,7 @@ This module owns non-image pipeline utilities:
 - keypoint/confidence normalization for parquet data
 - tracker checkpoint/state helpers
 - frame-level detection preparation/update logic
+- prepared detection parquet serialization helpers
 - stage-based inference entrypoint
 """
 from __future__ import annotations
@@ -21,7 +22,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
-
+from pathlib import Path
 import cv2
 import numpy as np
 import pandas as pd
@@ -34,7 +35,7 @@ from boxing_project.tracking.image_utils import (
     get_detection_bbox,
     keypoints_to_intersection_bbox,
 )
-from boxing_project.tracking.openpose_processing import set_openpose_module
+from boxing_project.tracking.track import Detection
 from boxing_project.tracking.tracker import openpose_people_to_detections
 
 
@@ -43,6 +44,18 @@ op = None  # set in init_openpose_from_config()
 OPENPOSE_RESULTS_COLUMNS = [
     "frame_idx", "frame_path", "det_id", "keypoints", "kp_conf", "confidence",
     "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2", "crop_shard_id", "crop_index",
+]
+PREPARED_DETECTIONS_COLUMNS = [
+    "frame_idx", "det_id", "center_x", "center_y", "keypoints", "kp_conf",
+    "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2",
+    "bbox_inter_x1", "bbox_inter_y1", "bbox_inter_x2", "bbox_inter_y2",
+    "body_features", "left_glove_features", "right_glove_features", "shorts_features",
+    "e_app", "e_app_valid_mask", "e_app_coverage",
+    "has_body_features", "has_left_glove_features", "has_right_glove_features", "has_shorts_features",
+    "has_e_app", "has_valid_bbox", "is_prepared",
+    "max_overlap_iou", "max_overlap_det_idx", "overlap_relations_json", "is_overlapping",
+    "min_center_dist_norm", "center_dist_norm_det_idx", "raw_bbox_max_overlap_iou", "overlap_mechanism",
+    "center_dist_norm_min", "center_dist_overlap_risk",
 ]
 FRAMES_METADATA_COLUMNS = ["frame_idx", "frame_path", "g", "reset_mode", "has_detections"]
 LOCAL_TRACKS_COLUMNS = ["frame_idx", "epoch_id", "local_track_id", "det_id"]
@@ -282,6 +295,220 @@ def load_tracker_checkpoint(path: Path) -> tuple[Any, int]:
         raise RuntimeError(f"Unsupported checkpoint mode: {payload.get('mode')}")
     return payload["tracker"], int(payload.get("last_completed_frame", -1))
 
+
+def _missing(value) -> bool:
+    if value is None:
+        return True
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _as_float_list(value):
+    if _missing(value):
+        return None
+    try:
+        arr = np.asarray(value, dtype=np.float32).reshape(-1)
+    except (TypeError, ValueError):
+        return None
+    if arr.size == 0 or not np.all(np.isfinite(arr)):
+        return None
+    return arr.astype(float).tolist()
+
+
+def _keypoints_to_list(value):
+    if _missing(value):
+        return None
+    try:
+        arr = np.asarray(value, dtype=np.float32)
+    except (TypeError, ValueError):
+        return None
+    if arr.ndim == 1:
+        arr = arr[: arr.size - arr.size % 2].reshape(-1, 2)
+    if arr.ndim != 2 or arr.shape[1] < 2:
+        return None
+    return arr[:, :2].astype(float).tolist()
+
+
+def _as_bool_list(value):
+    if _missing(value):
+        return None
+    try:
+        arr = np.asarray(value, dtype=bool).reshape(-1)
+    except (TypeError, ValueError):
+        return None
+    return arr.astype(bool).tolist()
+
+
+def _bbox_to_columns(bbox):
+    vals = _as_float_list(bbox)
+    if vals is None or len(vals) < 4:
+        return (None, None, None, None)
+    return tuple(float(v) for v in vals[:4])
+
+
+def _bbox_from_columns(row, prefix: str = "bbox"):
+    if prefix == "bbox_inter":
+        names = ("bbox_inter_x1", "bbox_inter_y1", "bbox_inter_x2", "bbox_inter_y2")
+    else:
+        names = ("bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2")
+    values = []
+    for name in names:
+        value = getattr(row, name, None)
+        if _missing(value):
+            return None
+        values.append(float(value))
+    return values
+
+
+def _feature_array(value, *, dtype=np.float32):
+    vals = _as_float_list(value)
+    if vals is None:
+        return None
+    return np.asarray(vals, dtype=dtype)
+
+
+def _mask_array(value):
+    if _missing(value):
+        return None
+    try:
+        return np.asarray(value, dtype=bool).reshape(-1)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_json_dumps(value) -> str:
+    try:
+        return json.dumps(value or [], default=str)
+    except (TypeError, ValueError):
+        return "[]"
+
+
+def _safe_json_loads(value):
+    if _missing(value):
+        return []
+    try:
+        loaded = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return loaded if isinstance(loaded, list) else []
+
+
+def detections_to_prepared_rows(detections, frame_idx: int) -> list[dict[str, Any]]:
+    """Serialize prepared Detection objects into parquet-friendly rows."""
+    rows: list[dict[str, Any]] = []
+    for det_id, det in enumerate(detections or []):
+        raw = det.meta.get("raw", {}) if isinstance(det.meta, dict) else {}
+        bbox = raw.get("bbox")
+        bbox_inter = raw.get("bbox_for_intersection", bbox)
+        bx1, by1, bx2, by2 = _bbox_to_columns(bbox)
+        ibx1, iby1, ibx2, iby2 = _bbox_to_columns(bbox_inter)
+        center = np.asarray(getattr(det, "center", (None, None)), dtype=object).reshape(-1)
+        center_x = None if center.size < 1 or _missing(center[0]) else float(center[0])
+        center_y = None if center.size < 2 or _missing(center[1]) else float(center[1])
+
+        body_features = _as_float_list(det.meta.get("body_features"))
+        left_glove_features = _as_float_list(det.meta.get("left_glove_features"))
+        right_glove_features = _as_float_list(det.meta.get("right_glove_features"))
+        shorts_features = _as_float_list(det.meta.get("shorts_features"))
+        e_app = _as_float_list(det.meta.get("e_app"))
+        e_app_valid_mask = _as_bool_list(det.meta.get("e_app_valid_mask"))
+
+        rows.append({
+            "frame_idx": int(frame_idx),
+            "det_id": int(det_id),
+            "center_x": center_x,
+            "center_y": center_y,
+            "keypoints": _keypoints_to_list(getattr(det, "keypoints", None)),
+            "kp_conf": _as_float_list(getattr(det, "kp_conf", None)),
+            "bbox_x1": bx1, "bbox_y1": by1, "bbox_x2": bx2, "bbox_y2": by2,
+            "bbox_inter_x1": ibx1, "bbox_inter_y1": iby1, "bbox_inter_x2": ibx2, "bbox_inter_y2": iby2,
+            "body_features": body_features,
+            "left_glove_features": left_glove_features,
+            "right_glove_features": right_glove_features,
+            "shorts_features": shorts_features,
+            "e_app": e_app,
+            "e_app_valid_mask": e_app_valid_mask,
+            "e_app_coverage": float(det.meta.get("e_app_coverage", 0.0) or 0.0),
+            "has_body_features": body_features is not None,
+            "has_left_glove_features": left_glove_features is not None,
+            "has_right_glove_features": right_glove_features is not None,
+            "has_shorts_features": shorts_features is not None,
+            "has_e_app": e_app is not None,
+            "has_valid_bbox": bx1 is not None,
+            "is_prepared": True,
+            "max_overlap_iou": float(det.meta.get("max_overlap_iou", 0.0) or 0.0),
+            "max_overlap_det_idx": det.meta.get("max_overlap_det_idx"),
+            "overlap_relations_json": _safe_json_dumps(det.meta.get("overlap_relations", [])),
+            "is_overlapping": bool(det.meta.get("is_overlapping", False)),
+            "min_center_dist_norm": float(det.meta.get("min_center_dist_norm", float("inf"))),
+            "center_dist_norm_det_idx": det.meta.get("center_dist_norm_det_idx"),
+            "raw_bbox_max_overlap_iou": float(det.meta.get("raw_bbox_max_overlap_iou", 0.0) or 0.0),
+            "overlap_mechanism": str(det.meta.get("overlap_mechanism", "")),
+            "center_dist_norm_min": det.meta.get("center_dist_norm_min"),
+            "center_dist_overlap_risk": bool(det.meta.get("center_dist_overlap_risk", False)),
+        })
+    return rows
+
+
+def prepared_rows_to_detections(frame_rows: pd.DataFrame) -> list[Detection]:
+    """Rebuild Detection objects from prepared detection parquet rows."""
+    if frame_rows is None or frame_rows.empty:
+        return []
+    if "det_id" in frame_rows.columns:
+        frame_rows = frame_rows.sort_values("det_id").reset_index(drop=True)
+
+    detections: list[Detection] = []
+    for row in frame_rows.itertuples(index=False):
+        xy = normalize_keypoints_xy(getattr(row, "keypoints", None))
+        conf = normalize_kp_conf(getattr(row, "kp_conf", None))
+        k = min(xy.shape[0], conf.shape[0])
+        xy, conf = xy[:k], conf[:k]
+
+        bbox = _bbox_from_columns(row, "bbox")
+        bbox_inter = _bbox_from_columns(row, "bbox_inter") or bbox
+        center_x = getattr(row, "center_x", None)
+        center_y = getattr(row, "center_y", None)
+        if _missing(center_x) or _missing(center_y):
+            if bbox is not None:
+                center = ((bbox[0] + bbox[2]) * 0.5, (bbox[1] + bbox[3]) * 0.5)
+            elif k > 0:
+                center_arr = np.mean(xy, axis=0)
+                center = (float(center_arr[0]), float(center_arr[1]))
+            else:
+                center = (0.0, 0.0)
+        else:
+            center = (float(center_x), float(center_y))
+
+        raw = {"bbox": bbox, "bbox_for_intersection": bbox_inter}
+        meta = {
+            "raw": raw,
+            "body_features": _feature_array(getattr(row, "body_features", None)),
+            "left_glove_features": _feature_array(getattr(row, "left_glove_features", None)),
+            "right_glove_features": _feature_array(getattr(row, "right_glove_features", None)),
+            "shorts_features": _feature_array(getattr(row, "shorts_features", None)),
+            "e_app": _feature_array(getattr(row, "e_app", None)),
+            "e_app_valid_mask": _mask_array(getattr(row, "e_app_valid_mask", None)),
+            "e_app_coverage": float(getattr(row, "e_app_coverage", 0.0) or 0.0),
+            "max_overlap_iou": float(getattr(row, "max_overlap_iou", 0.0) or 0.0),
+            "max_overlap_det_idx": getattr(row, "max_overlap_det_idx", None),
+            "overlap_relations": _safe_json_loads(getattr(row, "overlap_relations_json", "[]")),
+            "is_overlapping": bool(getattr(row, "is_overlapping", False)),
+            "min_center_dist_norm": float(getattr(row, "min_center_dist_norm", float("inf"))),
+            "center_dist_norm_det_idx": getattr(row, "center_dist_norm_det_idx", None),
+            "raw_bbox_max_overlap_iou": float(getattr(row, "raw_bbox_max_overlap_iou", 0.0) or 0.0),
+            "overlap_mechanism": str(getattr(row, "overlap_mechanism", "")),
+            "center_dist_norm_min": getattr(row, "center_dist_norm_min", None),
+            "center_dist_overlap_risk": bool(getattr(row, "center_dist_overlap_risk", False)),
+            "has_body_features": bool(getattr(row, "has_body_features", False)),
+            "has_e_app": bool(getattr(row, "has_e_app", False)),
+            "is_prepared": bool(getattr(row, "is_prepared", True)),
+        }
+        detections.append(Detection(center=center, keypoints=xy, kp_conf=conf, meta=meta))
+    return detections
+
+
 def top_track_ids_by_hits(tracker, k: int = 4) -> set[int]:
     """Return up to `k` active track ids sorted by descending `hits`.
 
@@ -452,6 +679,39 @@ def init_openpose_from_config(openpose_cfg: dict):
 
     return op_module, opWrapper
 
+op = None  # set in init_openpose_from_config()
+
+
+def set_openpose_module(op_module) -> None:
+    """Set global pyopenpose module used by preprocess_image."""
+    global op
+    op = op_module
+
+
+def preprocess_image(opWrapper, img_path: Path, save_width: int, return_img: bool = False):
+    """Read frame, resize to save_width and run OpenPose forward pass."""
+    if op is None:
+        raise RuntimeError("OpenPose module is not initialized. Call init_openpose_from_config first.")
+
+    img = cv2.imread(str(img_path))
+    if img is None:
+        raise RuntimeError(f"Failed to load image: {img_path}")
+
+    h, w = img.shape[:2]
+    if w > save_width:
+        scale = save_width / w
+        img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+
+    datum = op.Datum()
+    datum.cvInputData = img
+
+    datums = op.VectorDatum()
+    datums.append(datum)
+
+    opWrapper.emplaceAndPop(datums)
+
+    return (datums[0], img) if return_img else datums[0]
+
 def extract_features_with_hsv(image: np.ndarray) -> np.ndarray | None:
     """Extract a 32-dimensional HSV color histogram feature vector."""
     if image is None or image.size == 0:
@@ -611,11 +871,14 @@ def visualize_sequence(
     pipeline_cfg: dict | None = None,
     progress=None,
 ):
+    import shutil
+
     from boxing_project.apperance_embedding.inference import AppearanceEmbedder, AppearanceEmbedConfig
     from boxing_project.tracking.progress_utils import RichStageProgress
     from boxing_project.tracking.tracking_stages import (
         PipelineContext,
         PreprocessingStage,
+        DetectionPreparationStage,
         LocalTrackingStage,
         LocalDetSavingStage,
         GlobalClusteringStage,
@@ -628,6 +891,7 @@ def visualize_sequence(
             "stages",
             {
                 "preprocessing": True,
+                "detection_preparation": True,
                 "local_tracking": True,
                 "local_det_saving": True,
                 "global_clustering": True,
@@ -637,6 +901,7 @@ def visualize_sequence(
         "restore_mode": bool(runtime_cfg.get("restore_mode", False)),
         "save_log": bool(runtime_cfg.get("save_log", False)),
         "preprocessing": runtime_cfg.get("preprocessing", {}),
+        "detection_preparation": runtime_cfg.get("detection_preparation", {}),
         "local_tracking": runtime_cfg.get("local_tracking", {}),
         "local_det_saving": runtime_cfg.get("local_det_saving", {}),
         "global_clustering": runtime_cfg.get("global_clustering", {}),
@@ -649,10 +914,11 @@ def visualize_sequence(
         progress = RichStageProgress(enabled=bool(cfg.get("progress", {}).get("enabled", True)))
 
     try:
-        progress.update("setup", description="[0/5] Initializing appearance embedder")
+        progress.update("setup", description="[0/6] Initializing appearance embedder")
         app_embedder = AppearanceEmbedder(AppearanceEmbedConfig(model_path=app_emb_path))
 
         save_dir = Path(save_dir) if save_dir is not None else Path("output")
+
         ctx = PipelineContext(
             opWrapper=opWrapper,
             tracker=tracker,
@@ -670,27 +936,70 @@ def visualize_sequence(
             build_fused_appearance_embedding_with_mask=build_fused_appearance_embedding_with_mask,
         )
 
+        run_preprocessing = bool(cfg["stages"].get("preprocessing", True))
+
+        run_detection_preparation = (
+            bool(cfg["stages"].get("detection_preparation", True))
+            and bool(cfg.get("detection_preparation", {}).get("enabled", True))
+        )
+
+        run_local_tracking = bool(cfg["stages"].get("local_tracking", True))
+
         run_local_det_saving = bool(cfg["stages"].get("local_det_saving", True))
+
         run_global_clustering = (
             bool(cfg["stages"].get("global_clustering", True))
             and bool(cfg.get("global_clustering", {}).get("enabled", True))
         )
+
         run_global_saving = (
             run_global_clustering
             and bool(cfg["stages"].get("global_saving", True))
             and bool(cfg.get("global_saving", {}).get("enabled", True))
         )
 
-        PreprocessingStage(ctx, progress).run()
-        LocalTrackingStage(ctx, progress).run()
+        stages = []
+
+        if run_preprocessing:
+            stages.append(PreprocessingStage(ctx, progress))
+
+        if run_detection_preparation:
+            stages.append(DetectionPreparationStage(ctx, progress))
+
+        if run_local_tracking:
+            stages.append(LocalTrackingStage(ctx, progress))
 
         if run_local_det_saving:
-            LocalDetSavingStage(ctx, progress).run()
+            stages.append(LocalDetSavingStage(ctx, progress))
 
         if run_global_clustering:
-            GlobalClusteringStage(ctx, progress).run()
-            if run_global_saving:
-                GlobalSavingStage(ctx, progress).run()
+            stages.append(GlobalClusteringStage(ctx, progress))
+
+        if run_global_saving:
+            stages.append(GlobalSavingStage(ctx, progress))
+
+        if ctx.restore_mode:
+            dirty = False
+
+            for stage in stages:
+                manifest = stage.manifest()
+
+                is_completed = (
+                    stage.stage_dir.exists()
+                    and manifest.get("status") == "completed"
+                )
+
+                if dirty or not is_completed:
+                    if stage.stage_dir.exists():
+                        progress.warning(
+                            f"Restore invalidation: removing stage output: {stage.stage_dir}"
+                        )
+                        shutil.rmtree(stage.stage_dir)
+
+                    dirty = True
+
+        for stage in stages:
+            stage.run()
 
     finally:
         if owns_progress:

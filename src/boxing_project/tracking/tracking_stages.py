@@ -30,12 +30,14 @@ from boxing_project.tracking.inference_utils import (
     GLOBAL_MAP_COLUMNS,
     LOCAL_TRACKS_COLUMNS,
     OPENPOSE_RESULTS_COLUMNS,
+    PREPARED_DETECTIONS_COLUMNS,
     TRACKING_LOGS_COLUMNS,
     TRACK_STATES_COLUMNS,
     atomic_write_json,
     atomic_write_parquet,
     chunk_path,
     collect_tracker_state_rows,
+    detections_to_prepared_rows,
     df_by_frame,
     first_by_frame,
     free,
@@ -44,12 +46,14 @@ from boxing_project.tracking.inference_utils import (
     load_tracker_checkpoint,
     normalize_keypoints_xy,
     normalize_kp_conf,
+    prepared_rows_to_detections,
+    preprocess_image,
     prepare_frame_detections_from_keypoints,
     read_chunked_parquet_for_frames,
     save_tracker_checkpoint,
     update_tracker_from_detections,
 )
-from boxing_project.tracking.openpose_processing import preprocess_image
+
 from boxing_project.tracking.progress_utils import RichStageProgress
 
 
@@ -135,7 +139,7 @@ class BaseStage:
 
 
 class PreprocessingStage(BaseStage):
-    name, progress_key, progress_label, progress_step = "preprocessed", "pre", "Preprocessing", "[1/5]"
+    name, progress_key, progress_label, progress_step = "preprocessed", "pre", "Preprocessing", "[1/6]"
 
     def run(self) -> None:
         self.prepare_output()
@@ -259,8 +263,108 @@ class PreprocessingStage(BaseStage):
             rows.append(row)
 
 
+class DetectionPreparationStage(BaseStage):
+    name, progress_key, progress_label, progress_step = "detection_preparation", "dp", "Detection Preparation", "[2/6]"
+
+    def run(self) -> None:
+        self.prepare_output()
+        chunks_dir = self.stage_dir / "prepared_chunks"
+        chunks_dir.mkdir(parents=True, exist_ok=True)
+
+        meta_path = self.ctx.save_dir / "preprocessed" / "frames_metadata.parquet"
+        raw_chunks_dir = self.ctx.save_dir / "preprocessed" / "openpose_chunks"
+        self.require(meta_path, "preprocessing metadata")
+        if not any(raw_chunks_dir.glob("openpose_*.parquet")):
+            raise RuntimeError(f"Missing preprocessing chunks directory: {raw_chunks_dir}")
+
+        meta = pd.read_parquet(meta_path)
+        if "frame_idx" not in meta.columns:
+            raise RuntimeError("frames_metadata.parquet is missing required column: frame_idx")
+        meta_by_frame = first_by_frame(meta)
+        frames = sorted(meta_by_frame)
+        total, max_frame = len(frames), max(frames) if frames else 0
+
+        manifest = self.manifest()
+        if self.restore_completed(total or 1, needed_globs=[(chunks_dir, "prepared_detections_*.parquet")]):
+            free(meta)
+            return
+
+        start = int(manifest.get("last_completed_frame", 0) or 0) + 1 if self.ctx.restore_mode else 1
+        if not frames:
+            self.start_progress(1)
+            self.progress_update(completed=1, frame=0, total=0, op="no frames", force=True)
+            self.write_manifest("completed", last_completed_frame=0, total_frames=0)
+            free(meta)
+            return
+        if self.ctx.restore_mode and start > max_frame:
+            self.start_progress(total, " | op=RESTORE | dev=IO")
+            self.progress_update(completed=total, frame=max_frame, total=max_frame, op="restored complete", force=True)
+            self.write_manifest("completed", last_completed_frame=max_frame, total_frames=total)
+            free(meta)
+            return
+
+        batch_size = self.cfg_int("detection_preparation", "batch_size", 128)
+        self.start_progress(total)
+        if start > 1:
+            self.progress_update(completed=start - 1, frame=start - 1, total=max_frame, op="restored", force=True)
+
+        for batch_no, batch in iter_batches([f for f in frames if f >= start], batch_size):
+            raw_batch = read_chunked_parquet_for_frames(
+                raw_chunks_dir,
+                "openpose",
+                batch,
+                columns=["frame_idx", "keypoints", "kp_conf"],
+                expected_columns=["frame_idx", "keypoints", "kp_conf"],
+            )
+            raw_by_frame = df_by_frame(raw_batch)
+            prepared_rows = []
+
+            for frame_idx in batch:
+                meta_row = meta_by_frame.get(frame_idx)
+                if meta_row is None:
+                    continue
+                img = cv2.imread(str(meta_row.frame_path))
+                if img is None:
+                    raise RuntimeError(f"Failed to read preprocessed frame: {meta_row.frame_path}")
+
+                detections = self._prepare_frame(raw_by_frame.get(frame_idx, pd.DataFrame()), img)
+                prepared_rows.extend(detections_to_prepared_rows(detections, frame_idx))
+                self.progress_update(advance=1, frame=frame_idx, total=max_frame, batch=batch_no, op="prepare detections")
+
+            batch_start, batch_end = int(batch[0]), int(batch[-1])
+            out_chunk = chunk_path(chunks_dir, "prepared_detections", batch_start, batch_end)
+            atomic_write_parquet(out_chunk, pd.DataFrame(prepared_rows, columns=PREPARED_DETECTIONS_COLUMNS))
+            self.write_manifest("in_progress", last_completed_frame=batch_end, last_chunk_path=str(out_chunk), total_frames=total)
+            free(raw_batch, raw_by_frame, prepared_rows)
+
+        self.write_manifest("completed", last_completed_frame=max_frame, total_frames=total)
+        free(meta)
+
+    def _prepare_frame(self, frame_rows: pd.DataFrame, img: np.ndarray):
+        if frame_rows is None or frame_rows.empty:
+            return []
+        persons = []
+        for row in frame_rows.itertuples(index=False):
+            xy, cf = normalize_keypoints_xy(row.keypoints), normalize_kp_conf(row.kp_conf)
+            k = min(xy.shape[0], cf.shape[0])
+            if k > 0:
+                persons.append(np.concatenate([xy[:k], cf[:k, None]], axis=1).astype(np.float32, copy=False))
+        if not persons:
+            return []
+        return prepare_frame_detections_from_keypoints(
+            kps=np.stack(persons).astype(np.float32, copy=False),
+            original_img=img,
+            conf_th=self.ctx.tracker.cfg.min_kp_conf,
+            tracker=self.ctx.tracker,
+            app_embedder=self.ctx.app_embedder,
+            select_top_with_nearest=self.ctx.select_top_with_nearest,
+            extract_features_with_hsv=self.ctx.extract_features_with_hsv,
+            build_fused_appearance_embedding_with_mask=self.ctx.build_fused_appearance_embedding_with_mask,
+        )
+
+
 class LocalTrackingStage(BaseStage):
-    name, progress_key, progress_label, progress_step = "local_tracking", "lt", "Local Tracking", "[2/5]"
+    name, progress_key, progress_label, progress_step = "local_tracking", "lt", "Local Tracking", "[3/6]"
 
     def run(self) -> None:
         self.prepare_output()
@@ -283,10 +387,10 @@ class LocalTrackingStage(BaseStage):
             raise RuntimeError("Restore requested, but local_tracking/checkpoints/state_latest.pkl is missing.")
 
         meta_path = self.ctx.save_dir / "preprocessed" / "frames_metadata.parquet"
-        det_chunks_dir = self.ctx.save_dir / "preprocessed" / "openpose_chunks"
-        self.require(meta_path, "preprocessing output")
-        if not any(det_chunks_dir.glob("openpose_*.parquet")):
-            raise RuntimeError(f"Missing preprocessing chunks directory: {det_chunks_dir}")
+        prepared_chunks_dir = self.ctx.save_dir / "detection_preparation" / "prepared_chunks"
+        self.require(meta_path, "preprocessing metadata")
+        if not any(prepared_chunks_dir.glob("prepared_detections_*.parquet")):
+            raise RuntimeError(f"Missing detection preparation chunks directory: {prepared_chunks_dir}")
 
         meta = pd.read_parquet(meta_path)
         if "frame_idx" not in meta.columns:
@@ -311,8 +415,14 @@ class LocalTrackingStage(BaseStage):
             self.progress_update(completed=start_frame - 1, frame=start_frame - 1, total=max_frame, op="restored", force=True)
 
         for batch_no, batch in iter_batches([f for f in frame_ids if f >= start_frame], batch_size):
-            det_batch = read_chunked_parquet_for_frames(det_chunks_dir, "openpose", batch, columns=["frame_idx", "keypoints", "kp_conf"], expected_columns=["frame_idx", "keypoints", "kp_conf"])
-            det_by_frame = df_by_frame(det_batch)
+            prepared_batch = read_chunked_parquet_for_frames(
+                prepared_chunks_dir,
+                "prepared_detections",
+                batch,
+                columns=PREPARED_DETECTIONS_COLUMNS,
+                expected_columns=PREPARED_DETECTIONS_COLUMNS,
+            )
+            prepared_by_frame = df_by_frame(prepared_batch)
             track_rows, state_rows, log_rows = [], [], []
 
             for frame_idx in batch:
@@ -322,11 +432,17 @@ class LocalTrackingStage(BaseStage):
                 img = cv2.imread(str(meta_row.frame_path))
                 if img is None:
                     raise RuntimeError(f"Failed to read preprocessed frame: {meta_row.frame_path}")
-                dets, log = self._update_tracker_for_frame(det_by_frame.get(frame_idx, pd.DataFrame()), img, meta_row)
+                detections = prepared_rows_to_detections(prepared_by_frame.get(frame_idx, pd.DataFrame()))
+                detections, log = update_tracker_from_detections(
+                    detections=detections,
+                    tracker=self.ctx.tracker,
+                    g=float(meta_row.g),
+                    reset_mode=bool(meta_row.reset_mode),
+                )
                 matches = [(int(tid), int(did)) for tid, did in (log or {}).get("matches", [])]
                 epoch_id = int((log or {}).get("epoch_id", 1))
                 track_rows.extend({"frame_idx": int(frame_idx), "epoch_id": epoch_id, "local_track_id": int(tid), "det_id": int(did)} for tid, did in matches)
-                state_rows.extend(collect_tracker_state_rows(tracker=self.ctx.tracker, frame_idx=frame_idx, epoch_id=epoch_id, matches=matches, img_shape=img.shape, detections=dets or []))
+                state_rows.extend(collect_tracker_state_rows(tracker=self.ctx.tracker, frame_idx=frame_idx, epoch_id=epoch_id, matches=matches, img_shape=img.shape, detections=detections or []))
                 if self.ctx.save_log:
                     log_rows.append({"frame_idx": frame_idx, "epoch_id": epoch_id, "g": float(meta_row.g), "reset_mode": bool(meta_row.reset_mode), "log_json": json.dumps(log or {}, default=str)})
                 self.progress_update(advance=1, frame=frame_idx, total=max_frame, batch=batch_no)
@@ -344,36 +460,15 @@ class LocalTrackingStage(BaseStage):
             if ck_every > 0 and (batch_end % ck_every == 0 or batch_end == max_frame):
                 save_tracker_checkpoint(ck / f"state_frame_{batch_end:06d}.pkl", self.ctx.tracker, batch_end)
             self.write_manifest("in_progress", last_flushed_frame=batch_end, last_checkpoint_frame=batch_end, last_completed_frame=batch_end, last_chunk_path=str(local_chunk), last_state_chunk_path=str(state_chunk), total_frames=total)
-            free(det_batch, det_by_frame, track_rows, state_rows, log_rows)
+            free(prepared_batch, prepared_by_frame, track_rows, state_rows, log_rows)
 
         save_tracker_checkpoint(checkpoint_path, self.ctx.tracker, max_frame)
         self.write_manifest("completed", last_flushed_frame=max_frame, last_checkpoint_frame=max_frame, last_completed_frame=max_frame, total_frames=total)
         free(meta)
 
-    def _update_tracker_for_frame(self, frame_rows: pd.DataFrame, img: np.ndarray, meta_row):
-        if frame_rows is None or frame_rows.empty:
-            return None, self.ctx.tracker.update([], g=float(meta_row.g), reset_mode=bool(meta_row.reset_mode))
-        persons = []
-        for row in frame_rows.itertuples(index=False):
-            xy, cf = normalize_keypoints_xy(row.keypoints), normalize_kp_conf(row.kp_conf)
-            k = min(xy.shape[0], cf.shape[0])
-            if k > 0:
-                persons.append(np.concatenate([xy[:k], cf[:k, None]], axis=1).astype(np.float32, copy=False))
-        if not persons:
-            return None, self.ctx.tracker.update([], g=float(meta_row.g), reset_mode=bool(meta_row.reset_mode))
-        dets = prepare_frame_detections_from_keypoints(
-            kps=np.stack(persons).astype(np.float32, copy=False), original_img=img,
-            conf_th=self.ctx.tracker.cfg.min_kp_conf, tracker=self.ctx.tracker, app_embedder=self.ctx.app_embedder,
-            select_top_with_nearest=self.ctx.select_top_with_nearest,
-            extract_features_with_hsv=self.ctx.extract_features_with_hsv,
-            build_fused_appearance_embedding_with_mask=self.ctx.build_fused_appearance_embedding_with_mask,
-        )
-        _, log = update_tracker_from_detections(detections=dets, tracker=self.ctx.tracker, g=float(meta_row.g), reset_mode=bool(meta_row.reset_mode))
-        return dets, log
-
 
 class LocalDetSavingStage(BaseStage):
-    name, progress_key, progress_label, progress_step = "local_track_saving", "lds", "Local Det Saving", "[3/5]"
+    name, progress_key, progress_label, progress_step = "local_track_saving", "lds", "Local Det Saving", "[4/6]"
 
     def run(self) -> None:
         self.prepare_output()
@@ -397,7 +492,7 @@ class LocalDetSavingStage(BaseStage):
 
         for batch_no, batch in iter_batches([f for f in frames if f >= start], bs):
             self.progress_update(completed=max(batch[0] - 1, 0), frame=batch[0], total=max_frame, batch=batch_no, op="read chunks", force=True)
-            det_batch = read_chunked_parquet_for_frames(det_chunks_dir, "openpose", batch, columns=OPENPOSE_RESULTS_COLUMNS, expected_columns=OPENPOSE_RESULTS_COLUMNS)
+            det_batch = read_chunked_parquet_for_frames(det_chunks_dir, "prepared_detections", batch, columns=PREPARED_DETECTIONS_COLUMNS, expected_columns=PREPARED_DETECTIONS_COLUMNS)
             local_batch = read_chunked_parquet_for_frames(local_chunks_dir, "local_tracks", batch, columns=LOCAL_TRACKS_COLUMNS, expected_columns=LOCAL_TRACKS_COLUMNS)
             det_by_frame, local_by_frame = df_by_frame(det_batch), df_by_frame(local_batch)
             match_idx = {(int(r.frame_idx), int(r.det_id)): int(r.local_track_id) for r in local_batch.itertuples(index=False)}
@@ -423,11 +518,11 @@ class LocalDetSavingStage(BaseStage):
         free(meta)
 
     def _required_inputs(self):
-        det_chunks_dir = self.ctx.save_dir / "preprocessed" / "openpose_chunks"
+        det_chunks_dir = self.ctx.save_dir / "detection_preparation" / "prepared_chunks"
         meta_path = self.ctx.save_dir / "preprocessed" / "frames_metadata.parquet"
         local_chunks_dir = self.ctx.save_dir / "local_tracking" / "chunks"
-        if not any(det_chunks_dir.glob("openpose_*.parquet")):
-            raise RuntimeError(f"Missing preprocessing chunks directory: {det_chunks_dir}")
+        if not any(det_chunks_dir.glob("prepared_detections_*.parquet")):
+            raise RuntimeError(f"Missing detection preparation chunks directory: {det_chunks_dir}")
         self.require(local_chunks_dir, "local tracking chunks directory")
         self.require(meta_path, "preprocessing metadata")
         return det_chunks_dir, meta_path, local_chunks_dir
@@ -481,7 +576,7 @@ class LocalDetSavingStage(BaseStage):
 
 
 class GlobalClusteringStage(BaseStage):
-    name, progress_key, progress_label, progress_step = "global_clustering", "gc", "Global Clustering", "[4/5]"
+    name, progress_key, progress_label, progress_step = "global_clustering", "gc", "Global Clustering", "[5/6]"
 
     def run(self) -> None:
         self.prepare_output()
@@ -531,7 +626,7 @@ class GlobalClusteringStage(BaseStage):
 
 
 class GlobalSavingStage(BaseStage):
-    name, progress_key, progress_label, progress_step = "global_saving", "gs", "Global Saving", "[5/5]"
+    name, progress_key, progress_label, progress_step = "global_saving", "gs", "Global Saving", "[6/6]"
 
     def run(self) -> None:
         self.prepare_output()
@@ -560,7 +655,7 @@ class GlobalSavingStage(BaseStage):
             self.progress_update(completed=start - 1, frame=start - 1, total=max_frame, op="restored", force=True)
 
         for batch_no, batch in iter_batches([f for f in frames if f >= start], self.cfg_int("global_saving", "batch_size", 128)):
-            det_batch = read_chunked_parquet_for_frames(det_chunks_dir, "openpose", batch, columns=OPENPOSE_RESULTS_COLUMNS, expected_columns=OPENPOSE_RESULTS_COLUMNS)
+            det_batch = read_chunked_parquet_for_frames(det_chunks_dir, "prepared_detections", batch, columns=PREPARED_DETECTIONS_COLUMNS, expected_columns=PREPARED_DETECTIONS_COLUMNS)
             local_batch = read_chunked_parquet_for_frames(local_chunks_dir, "local_tracks", batch, columns=LOCAL_TRACKS_COLUMNS, expected_columns=LOCAL_TRACKS_COLUMNS)
             det_by_frame, local_by_frame = df_by_frame(det_batch), df_by_frame(local_batch)
 
@@ -585,12 +680,12 @@ class GlobalSavingStage(BaseStage):
         free(meta, mapping, map_idx)
 
     def _required_inputs(self):
-        det_chunks_dir = self.ctx.save_dir / "preprocessed" / "openpose_chunks"
+        det_chunks_dir = self.ctx.save_dir / "detection_preparation" / "prepared_chunks"
         meta_path = self.ctx.save_dir / "preprocessed" / "frames_metadata.parquet"
         local_chunks_dir = self.ctx.save_dir / "local_tracking" / "chunks"
         mapping_path = self.ctx.save_dir / "global_clustering" / "local_to_global.parquet"
-        if not any(det_chunks_dir.glob("openpose_*.parquet")):
-            raise RuntimeError(f"Missing preprocessing chunks directory: {det_chunks_dir}")
+        if not any(det_chunks_dir.glob("prepared_detections_*.parquet")):
+            raise RuntimeError(f"Missing detection preparation chunks directory: {det_chunks_dir}")
         self.require(local_chunks_dir, "local tracking chunks directory")
         self.require(meta_path, "preprocessing metadata")
         self.require(mapping_path, "global mapping")
