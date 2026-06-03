@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional, Union
@@ -59,6 +59,7 @@ class TrackerConfig:
     w_left_glove: float = 0.5
     w_right_glove: float = 0.5
     w_shorts: float = 0.75
+    graph_clustering: Dict[str, Any] = field(default_factory=dict)
 
 
 def openpose_people_to_detections(

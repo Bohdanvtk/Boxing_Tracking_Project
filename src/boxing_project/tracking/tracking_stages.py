@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -19,7 +18,7 @@ import cv2
 import numpy as np
 import pandas as pd
 
-from boxing_project.tracking.global_clustering import GlobalTrackClusterer
+from boxing_project.tracking.global_clustering import GlobalTrackClusterer, format_global_clustering_debug_text
 from boxing_project.tracking.image_utils import (
     build_visual_detections_from_rows,
     keypoints_to_intersection_bbox,
@@ -31,15 +30,16 @@ from boxing_project.tracking.inference_utils import (
     LOCAL_TRACKS_COLUMNS,
     OPENPOSE_RESULTS_COLUMNS,
     PREPARED_DETECTIONS_COLUMNS,
-    TRACKING_LOGS_COLUMNS,
     TRACK_STATES_COLUMNS,
     atomic_write_json,
     atomic_write_parquet,
+    atomic_write_text,
     chunk_path,
     collect_tracker_state_rows,
     detections_to_prepared_rows,
     df_by_frame,
     first_by_frame,
+    frame_log_to_text,
     free,
     iter_batches,
     load_manifest,
@@ -368,15 +368,25 @@ class LocalTrackingStage(BaseStage):
 
     def run(self) -> None:
         self.prepare_output()
-        ck, chunks_dir, states_dir, logs_dir = [self.stage_dir / p for p in ("checkpoints", "chunks", "track_states", "logs")]
+        ck, chunks_dir, states_dir, text_logs_dir = [
+            self.stage_dir / p
+            for p in ("checkpoints", "chunks", "track_states", "text_logs")
+        ]
         for d in (ck, chunks_dir, states_dir):
             d.mkdir(parents=True, exist_ok=True)
         if self.ctx.save_log:
-            logs_dir.mkdir(parents=True, exist_ok=True)
+            text_logs_dir.mkdir(parents=True, exist_ok=True)
 
         checkpoint_path = ck / "state_latest.pkl"
         manifest = self.manifest()
-        if self.restore_completed(int(manifest.get("total_frames", 1) or 1), needed_paths=[checkpoint_path], needed_globs=[(chunks_dir, "local_tracks_*.parquet")]):
+        needed_globs = [(chunks_dir, "local_tracks_*.parquet")]
+        if self.ctx.save_log:
+            needed_globs.append((text_logs_dir, "frame_*.txt"))
+        if self.restore_completed(
+            int(manifest.get("total_frames", 1) or 1),
+            needed_paths=[checkpoint_path],
+            needed_globs=needed_globs,
+        ):
             return
 
         start_frame = 1
@@ -423,7 +433,7 @@ class LocalTrackingStage(BaseStage):
                 expected_columns=PREPARED_DETECTIONS_COLUMNS,
             )
             prepared_by_frame = df_by_frame(prepared_batch)
-            track_rows, state_rows, log_rows = [], [], []
+            track_rows, state_rows = [], []
 
             for frame_idx in batch:
                 meta_row = meta_by_frame.get(frame_idx)
@@ -444,7 +454,13 @@ class LocalTrackingStage(BaseStage):
                 track_rows.extend({"frame_idx": int(frame_idx), "epoch_id": epoch_id, "local_track_id": int(tid), "det_id": int(did)} for tid, did in matches)
                 state_rows.extend(collect_tracker_state_rows(tracker=self.ctx.tracker, frame_idx=frame_idx, epoch_id=epoch_id, matches=matches, img_shape=img.shape, detections=detections or []))
                 if self.ctx.save_log:
-                    log_rows.append({"frame_idx": frame_idx, "epoch_id": epoch_id, "g": float(meta_row.g), "reset_mode": bool(meta_row.reset_mode), "log_json": json.dumps(log or {}, default=str)})
+                    frame_log = (log or {}).get("frame_log")
+                    text_log = frame_log_to_text(frame_idx, frame_log)
+                    if text_log:
+                        atomic_write_text(
+                            text_logs_dir / f"frame_{int(frame_idx):06d}.txt",
+                            text_log,
+                        )
                 self.progress_update(advance=1, frame=frame_idx, total=max_frame, batch=batch_no)
 
             batch_start, batch_end = int(batch[0]), int(batch[-1])
@@ -452,15 +468,13 @@ class LocalTrackingStage(BaseStage):
             state_chunk = chunk_path(states_dir, "track_states", batch_start, batch_end)
             atomic_write_parquet(local_chunk, pd.DataFrame(track_rows, columns=LOCAL_TRACKS_COLUMNS))
             atomic_write_parquet(state_chunk, pd.DataFrame(state_rows, columns=TRACK_STATES_COLUMNS))
-            if self.ctx.save_log:
-                atomic_write_parquet(chunk_path(logs_dir, "tracking_logs", batch_start, batch_end), pd.DataFrame(log_rows, columns=TRACKING_LOGS_COLUMNS))
             if hasattr(self.ctx.tracker, "compact_memory"):
                 self.ctx.tracker.compact_memory()
             save_tracker_checkpoint(checkpoint_path, self.ctx.tracker, batch_end)
             if ck_every > 0 and (batch_end % ck_every == 0 or batch_end == max_frame):
                 save_tracker_checkpoint(ck / f"state_frame_{batch_end:06d}.pkl", self.ctx.tracker, batch_end)
             self.write_manifest("in_progress", last_flushed_frame=batch_end, last_checkpoint_frame=batch_end, last_completed_frame=batch_end, last_chunk_path=str(local_chunk), last_state_chunk_path=str(state_chunk), total_frames=total)
-            free(prepared_batch, prepared_by_frame, track_rows, state_rows, log_rows)
+            free(prepared_batch, prepared_by_frame, track_rows, state_rows)
 
         save_tracker_checkpoint(checkpoint_path, self.ctx.tracker, max_frame)
         self.write_manifest("completed", last_flushed_frame=max_frame, last_checkpoint_frame=max_frame, last_completed_frame=max_frame, total_frames=total)
@@ -597,20 +611,31 @@ class GlobalClusteringStage(BaseStage):
             self._write_empty_outputs()
             return
 
-        params = self.ctx.graph_clustering_params or {}
-        clusterer = GlobalTrackClusterer(
-            k=int(params.get("k", 5)), sim_threshold=float(params.get("sim_threshold", 0.5)),
-            n_clusters=int(params.get("n_clusters", 2)), random_state=int(params.get("random_state", 42)),
-            assign_labels=str(params.get("assign_labels", "kmeans")),
+        loaded_tracker_cfg = getattr(loaded_tracker, "cfg", None)
+        ctx_tracker_cfg = getattr(getattr(self.ctx, "tracker", None), "cfg", None)
+        params = (
+            getattr(loaded_tracker_cfg, "graph_clustering", None)
+            or getattr(ctx_tracker_cfg, "graph_clustering", None)
+            or self.ctx.graph_clustering_params
+            or {}
         )
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="Graph is not fully connected.*", category=UserWarning)
-            mapping, sim = clusterer.build_mapping(epoch_tracks=epoch_tracks, return_similarity=True)
+        allowed_params = set(GlobalTrackClusterer.__dataclass_fields__.keys())
+        clusterer = GlobalTrackClusterer(**{k: v for k, v in params.items() if k in allowed_params})
+        mapping, sim = clusterer.build_mapping(epoch_tracks=epoch_tracks, return_similarity=True)
         rows = [{"epoch_id": int(e), "local_track_id": int(l), "global_track_id": int(g)} for (e, l), g in mapping.items()]
         df = pd.DataFrame(rows, columns=GLOBAL_MAP_COLUMNS)
         atomic_write_parquet(self.stage_dir / "local_to_global.parquet", df)
         atomic_write_parquet(self.stage_dir / "global_clusters.parquet", df)
         np.savez_compressed(str(self.stage_dir / "tracks_similarity.npz"), sim=sim["sim"], nodes=np.asarray(sim["nodes"], dtype=np.int32))
+        atomic_write_text(
+            self.stage_dir / "global_clustering_debug.txt",
+            format_global_clustering_debug_text(
+                sim.get("global_debug", {}),
+                mapping=mapping,
+                sim=sim.get("sim"),
+                nodes=sim.get("nodes"),
+            ),
+        )
         save_tracker_checkpoint(checkpoints_dir / "state_latest.pkl", loaded_tracker, len(rows) - 1)
         self.write_manifest("completed", last_completed_track=len(rows) - 1, total_tracks=len(rows))
         self.progress_update(completed=1, frame=1, total=1, batch=1, force=True)
@@ -621,6 +646,10 @@ class GlobalClusteringStage(BaseStage):
         atomic_write_parquet(self.stage_dir / "local_to_global.parquet", empty)
         atomic_write_parquet(self.stage_dir / "global_clusters.parquet", empty)
         np.savez_compressed(str(self.stage_dir / "tracks_similarity.npz"), sim=np.zeros((0, 0), dtype=np.float32), nodes=np.zeros((0, 2), dtype=np.int32))
+        atomic_write_text(
+            self.stage_dir / "global_clustering_debug.txt",
+            "GLOBAL CLUSTERING DEBUG\n" + "=" * 80 + "\nNO_TRACKS_AVAILABLE\n",
+        )
         self.write_manifest("completed", last_completed_track=-1, total_tracks=0)
         self.progress_update(completed=1, frame=1, total=1, batch=1, force=True)
 

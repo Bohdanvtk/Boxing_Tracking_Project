@@ -64,7 +64,6 @@ TRACK_STATES_COLUMNS = [
     "hits", "age", "time_since_update", "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2",
     "center_x", "center_y",
 ]
-TRACKING_LOGS_COLUMNS = ["frame_idx", "epoch_id", "g", "reset_mode", "log_json"]
 GLOBAL_MAP_COLUMNS = ["epoch_id", "local_track_id", "global_track_id"]
 
 
@@ -83,6 +82,27 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     atomic_write_bytes(path, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+
+def atomic_write_text(path: Path, text: str) -> None:
+    atomic_write_bytes(path, text.encode("utf-8"))
+
+def frame_log_to_text(frame_idx: int, frame_log) -> str:
+    """Preserve the authentic human-readable matcher debug report."""
+    if frame_log is None:
+        return ""
+
+    buffer = list(getattr(frame_log, "buffer", []) or [])
+    if not buffer:
+        return ""
+
+    return "\n".join([
+        f"FRAME {int(frame_idx):06d}",
+        "=" * 80,
+        "",
+        *[str(line) for line in buffer],
+        "",
+        "=" * 80,
+    ])
 
 def atomic_write_parquet(path: Path, df: pd.DataFrame) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

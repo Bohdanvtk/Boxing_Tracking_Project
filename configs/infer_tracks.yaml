@@ -28,20 +28,20 @@ stages:
 
 
 preprocessing:
-  batch_size: 32
+  batch_size: 256
   checkpoint_every_frames: 100
   save_crops: auto
 
 detection_preparation:
-  batch_size: 128
+  batch_size: 256
 
 local_tracking:
-  batch_size: 64
+  batch_size: 500
   checkpoint_every_frames: 50
 
 local_det_saving:
   enabled: false
-  batch_size: 128
+  batch_size: 700
   matched_dir: matched_dets
   unmatched_dir: unmatched_dets
 
@@ -51,8 +51,8 @@ global_clustering:
 
 global_saving:
   enabled: true
-  batch_size: 128
-  checkpoint_every_frames: 10
+  batch_size: 700
+  checkpoint_every_frames: 100
 
 progress:
   enabled: true

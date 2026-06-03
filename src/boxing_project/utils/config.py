@@ -2,12 +2,15 @@ import yaml, random, numpy as np
 import tensorflow as tf
 from pathlib import Path
 
+
 def load_cfg(path: str) -> dict:
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
+
 def set_seed(seed: int):
     random.seed(seed); np.random.seed(seed); tf.random.set_seed(seed)
+
 
 
 def _get(d: dict, path: str, default=None):
@@ -122,6 +125,8 @@ def make_match_config(cfg: dict) -> MatchConfig:
         pose_core=pose_core,
         pose_center=pose_center
     )
+
+
 def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
     fps = _get(cfg, "tracking.fps", None)
 
@@ -156,6 +161,8 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
     w_left_glove = float(_get(cfg, "tracking.tracker.w_left_glove", 0.5))
     w_right_glove = float(_get(cfg, "tracking.tracker.w_right_glove", 0.5))
     w_shorts = float(_get(cfg, "tracking.tracker.w_shorts", 0.75))
+
+    graph_clustering = make_graph_clustering_config(cfg)
 
     max_age = int(_get(cfg, "tracking.tracker.max_age", 10))
     max_confirmed_age = int(_get(cfg, "tracking.tracker.max_confirmed_age", 40))
@@ -198,13 +205,38 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
         w_left_glove=w_left_glove,
         w_right_glove=w_right_glove,
         w_shorts=w_shorts,
+        graph_clustering=graph_clustering,
     )
+
+
+
+def make_graph_clustering_config(cfg: dict) -> dict:
+    """Return pairwise global-clustering params with backward-compatible defaults."""
+    gc = _get(cfg, "tracking.graph_clustering", {}) or {}
+    defaults = {
+        "method": "pairwise_clique",
+        "confirmed_only": True,
+        "min_track_history": 5,
+        "pair_threshold": 0.95,
+        "min_group_size": 3,
+        "allow_same_epoch_in_group": False,
+        "assign_unknown": False,
+        "unknown_global_id": 999,
+        "max_debug_edges": 200,
+        "log_pair_threshold_rejections": False,
+    }
+    merged = {**defaults, **gc}
+
+    return merged
+
+
 
 def load_tracking_config(path: str):
     cfg = load_cfg(path)
     match_cfg = make_match_config(cfg)
     tracker_cfg = make_tracker_config(cfg, match_cfg)
     return tracker_cfg, match_cfg, cfg
+
 
 
 def load_birth_config(path: str) -> BirthConfig:

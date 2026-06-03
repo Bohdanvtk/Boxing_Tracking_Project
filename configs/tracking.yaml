@@ -146,8 +146,30 @@ tracking:
     w_shorts: 0.5           # Weight of shorts features in fused e_app
 
   graph_clustering:
-    k: 9                      # Number of neighbors / graph connectivity parameter
-    sim_threshold: 0.8        # Minimum similarity for linking nodes
-    n_clusters: 3             # Number of output clusters
-    random_state: 42          # Random seed for reproducibility
-    assign_labels: kmeans     # Label assignment strategy
+    method: pairwise_clique        # Global ID grouping strategy. Uses strict pairwise similarity groups.
+
+    # Track eligibility
+    confirmed_only: true           # Use only confirmed local tracks for global grouping.
+    min_track_history: 5           # Minimum number of accepted appearance embeddings required for a track.
+
+    # Pairwise clique grouping
+    pair_threshold: 0.89          # Every pair inside a valid global group must have similarity >= this value.
+    min_group_size: 3              # Minimum number of tracks required to create a global ID.
+
+    # Same-epoch behavior
+    allow_same_epoch_in_group: false
+    # false -> one global group cannot contain two tracks from the same epoch.
+    # true  -> same-epoch tracks may be grouped if all pairwise checks pass.
+
+    # The strict clique rule already checks every pair inside a group.
+    # Therefore no extra group-mean/member-mean or KNN filtering is needed.
+
+    # Unknown handling
+    assign_unknown: false          # If false, uncertain tracks are excluded from local_to_global.parquet.
+    unknown_global_id: 880         # Used only when assign_unknown is true.
+
+    # Debug
+    max_debug_edges: 200           # Maximum number of accepted/rejected edge records stored in debug.
+    log_pair_threshold_rejections: false
+    # false -> do not store every low-similarity pair in rejected_edges.
+    # This prevents huge O(N^2) debug payloads.
