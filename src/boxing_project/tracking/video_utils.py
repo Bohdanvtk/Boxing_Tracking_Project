@@ -68,6 +68,31 @@ def _is_video_path(path: Path) -> bool:
     }
 
 
+def input_fingerprint(data_cfg: dict, project_root: Path) -> dict:
+    input_path = _resolve(project_root, data_cfg.get("input_dir"))
+    if input_path is None:
+        raise KeyError("Missing data.input_dir for inference.")
+    input_path = input_path.resolve()
+
+    if not _is_video_path(input_path):
+        raise RuntimeError("Restore input fingerprint expects a video file.")
+
+    stat = input_path.stat()
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Failed to open video: {input_path}")
+    try:
+        return {
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "frames": int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
+            "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        }
+    finally:
+        cap.release()
+
+
 def load_inference_images(data_cfg: dict, project_root: Path) -> list[Path]:
     input_path = _resolve(project_root, data_cfg.get("input_dir"))
     if input_path is None:

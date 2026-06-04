@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shutil
 import sys
@@ -13,7 +14,7 @@ import yaml
 from boxing_project.tracking.inference_utils import init_openpose_from_config, visualize_sequence
 from boxing_project.tracking.progress_utils import RichStageProgress
 from boxing_project.tracking.tracker import MultiObjectTracker
-from boxing_project.tracking.video_utils import load_inference_images
+from boxing_project.tracking.video_utils import input_fingerprint, load_inference_images
 
 
 def _load_yaml(path: Path) -> Dict[str, Any]:
@@ -138,6 +139,30 @@ class InferRunner:
             )
 
             data_cfg = cfg.get("data", {})
+            save_dir_raw = data_cfg.get("save_dir", None)
+            save_dir = _resolve(pr, save_dir_raw) if save_dir_raw else None
+
+            if restore_mode and save_dir is not None:
+                # Restore mode reuses intermediate files in save_dir. If the same
+                # directory is pointed at a different input, old manifests/cached
+                # frames can be mixed with new frames and corrupt the resumed run.
+                # Run this guard before load_inference_images(), because video
+                # loading extracts frames and may overwrite the existing frame cache.
+                save_dir.mkdir(parents=True, exist_ok=True)
+                fp_path = save_dir / ".restore_input.json"
+                fp = input_fingerprint(data_cfg, pr)
+                if fp_path.exists():
+                    with open(fp_path, "r") as f:
+                        old_fp = json.load(f)
+                    if old_fp != fp:
+                        raise RuntimeError(
+                            "Restore input mismatch: this output directory was created for a different input. "
+                            "Use another save_dir or disable restore_mode."
+                        )
+                else:
+                    with open(fp_path, "w") as f:
+                        json.dump(fp, f, indent=2, sort_keys=True)
+
             images = load_inference_images(data_cfg, pr)
 
             save_width = int(data_cfg.get("save_width", 800))
@@ -152,9 +177,6 @@ class InferRunner:
                 description="[0/5] PREPARING OUTPUT DIRECTORY",
                 force=True,
             )
-
-            save_dir_raw = data_cfg.get("save_dir", None)
-            save_dir = _resolve(pr, save_dir_raw) if save_dir_raw else None
 
             if save_dir is not None:
                 if restore_mode:
