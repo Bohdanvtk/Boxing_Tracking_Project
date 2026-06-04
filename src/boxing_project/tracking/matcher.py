@@ -41,6 +41,12 @@ class MatchConfig:
     w_app: float
     min_core_kps: int
 
+    # Configurable overlap-safety matching controls.  These replace temporary
+    # field-test constants while preserving old YAML compatibility.
+    overlap_app_cost_boost: float = 1.0
+    min_core_kps_update: int = 5
+    min_core_kps_create_track: int = 5
+
     pose_core: list = field(default_factory=list)
     pose_center: list = field(default_factory=list)
     save_log: bool = False
@@ -100,6 +106,7 @@ class PairwiseArtifacts:
     row_preferences: List[List[int]]
 
     log: DebugLog
+    detections: List[Detection] = field(default_factory=list)
 
 
 # ============================================================================
@@ -633,6 +640,27 @@ def _compute_pairwise_matrices(
     return motion, pose, app, update_cost, valid
 
 
+
+def _detection_has_overlap_context(det: Detection) -> bool:
+    """Return true when detection metadata marks risky overlap context."""
+    meta = det.meta if isinstance(det.meta, dict) else {}
+    if bool(meta.get("is_overlapping", False)):
+        return True
+    try:
+        if float(meta.get("max_overlap_iou", 0.0) or 0.0) > 0.0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    relations = meta.get("overlap_relations", None)
+    return bool(relations)
+
+
+def _overlap_app_cost_boost(det: Detection, cfg: MatchConfig) -> float:
+    """Configurable overlap-safety appearance-cost boost for matching only."""
+    if _detection_has_overlap_context(det):
+        return float(getattr(cfg, "overlap_app_cost_boost", 1.0))
+    return 1.0
+
 # ============================================================================
 # Row-relative preference construction
 # ============================================================================
@@ -642,6 +670,7 @@ def _compute_row_relative_costs(
     pose: np.ndarray,
     app: np.ndarray,
     valid: np.ndarray,
+    detections: Sequence[Detection],
     cfg: MatchConfig,
     log: DebugLog,
 ) -> np.ndarray:
@@ -685,10 +714,14 @@ def _compute_row_relative_costs(
                 cell.cost = float(cfg.large_cost)
                 continue
 
+            det = detections[j]
+            app_boost = _overlap_app_cost_boost(det, cfg)
+            w_app_eff = float(cfg.w_app) * float(app_boost)
+
             cost = (
-                cfg.w_motion * float(rel_motion[j])
-                + cfg.w_pose * float(rel_pose[j])
-                + cfg.w_app * float(rel_app[j])
+                float(cfg.w_motion) * float(rel_motion[j])
+                + float(cfg.w_pose) * float(rel_pose[j])
+                + w_app_eff * float(rel_app[j])
             )
 
             row_cost[i, j] = float(cost)
@@ -697,6 +730,9 @@ def _compute_row_relative_costs(
             cell.rel_pose = float(rel_pose[j])
             cell.rel_app = float(rel_app[j])
             cell.cost = float(cost)
+            cell.overlap_app_cost_boost = float(app_boost)
+            cell.w_app_eff = float(w_app_eff)
+            cell.overlap_app_boost_active = bool(float(app_boost) != 1.0)
 
     return row_cost
 
@@ -762,6 +798,7 @@ def build_cost_matrix(
         pose=pose,
         app=app,
         valid=valid,
+        detections=detections,
         cfg=cfg,
         log=log,
     )
@@ -778,6 +815,7 @@ def build_cost_matrix(
     log.meta["w_motion"] = float(cfg.w_motion)
     log.meta["w_pose"] = float(cfg.w_pose)
     log.meta["w_app"] = float(cfg.w_app)
+    log.meta["overlap_app_cost_boost"] = float(getattr(cfg, "overlap_app_cost_boost", 1.0))
     log.meta["max_update_cost"] = float(cfg.max_update_cost)
 
     row_preferences = _build_row_preferences(
@@ -795,6 +833,7 @@ def build_cost_matrix(
         row_cost=row_cost,
         row_preferences=row_preferences,
         log=log,
+        detections=list(detections),
     )
 
     if cfg.save_log:
@@ -821,6 +860,12 @@ def _compute_column_conflict_costs(
         return {}
 
     active = np.ones((cand.size,), dtype=bool)
+    if artifacts.detections and int(det_idx) < len(artifacts.detections):
+        det = artifacts.detections[int(det_idx)]
+        app_boost = _overlap_app_cost_boost(det, cfg)
+    else:
+        app_boost = 1.0
+    w_app_eff = float(cfg.w_app) * float(app_boost)
 
     rel_motion = _compute_subset_relative_penalties(
         values=artifacts.motion[cand, det_idx],
@@ -844,11 +889,15 @@ def _compute_column_conflict_costs(
     result: Dict[int, float] = {}
     for local_idx, track_idx in enumerate(cand.tolist()):
         col_cost = (
-            cfg.w_motion * float(rel_motion[local_idx])
-            + cfg.w_pose * float(rel_pose[local_idx])
-            + cfg.w_app * float(rel_app[local_idx])
+            float(cfg.w_motion) * float(rel_motion[local_idx])
+            + float(cfg.w_pose) * float(rel_pose[local_idx])
+            + w_app_eff * float(rel_app[local_idx])
         )
         result[int(track_idx)] = float(col_cost)
+        cell = artifacts.log[int(track_idx), int(det_idx)]
+        cell.column_overlap_app_cost_boost = float(app_boost)
+        cell.column_w_app_eff = float(w_app_eff)
+        cell.column_overlap_app_boost_active = bool(float(app_boost) != 1.0)
 
     return result
 

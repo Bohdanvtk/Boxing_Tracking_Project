@@ -39,6 +39,14 @@ class MatrixCell:
     # final row-relative matcher cost
     cost: float = 0.0
 
+    # configurable overlap-safety appearance weighting debug
+    overlap_app_cost_boost: float = 1.0
+    w_app_eff: float = 0.0
+    overlap_app_boost_active: bool = False
+    column_overlap_app_cost_boost: float = 1.0
+    column_w_app_eff: float = 0.0
+    column_overlap_app_boost_active: bool = False
+
     # gating/debug info
     allowed: bool = True
     d2: Optional[float] = None
@@ -286,6 +294,11 @@ class DebugLog:
                 self.line(f"    rel_a    = {cell.rel_app:.{precision}f}")
                 if cell.d2 is not None:
                     self.line(f"    d2       = {cell.d2:.{precision}f}")
+                if bool(getattr(cell, "overlap_app_boost_active", False)):
+                    self.line(
+                        f"    app_boost= {float(cell.overlap_app_cost_boost):.{precision}f} "
+                        f"(w_app_eff={float(cell.w_app_eff):.{precision}f})"
+                    )
                 self.line(f"    cost     = {cell.cost:.{precision}f}{gated}{marker}")
                 self.line(f"    upd_cost = {cell.update_cost:.{precision}f}")
 
@@ -414,6 +427,12 @@ def format_track_update_debug_lines(records: List[Dict[str, Any]]) -> List[str]:
             f"max_risk_iou={float(rec.get('max_risky_overlap_iou', 0.0)):.3f}, "
             f"raw_max_iou={float(rec.get('raw_max_overlap_iou', rec.get('max_overlap_iou', 0.0))):.3f}"
         )
+        if rec.get("overlap_motion_weak_update") is not None:
+            lines.append(
+                f"  overlap_motion: weak={str(bool(rec.get('overlap_motion_weak_update', False))).lower()}, "
+                f"alpha={rec.get('overlap_motion_alpha')}, "
+                f"update_center={rec.get('overlap_motion_update_center')}"
+            )
         lines.append(f"  skipped={str(bool(rec.get('track_update_skipped', False))).lower()}")
         lines.append(f"  skip_reason={rec.get('track_update_skip_reason')}")
         lines.append(f"  app_allowed={str(bool(rec.get('track_app_update_allowed', False))).lower()}")

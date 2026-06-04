@@ -81,6 +81,10 @@ tracking:
     app_buffer_clear_on_safety_fail: true   # Clear recovery buffer when motion/pose/coverage safety gates fail.
     missing_app_penalty: 0.08 # Small cost penalty for missing/unknown appearance parts
 
+    # During overlap, boost appearance importance in matching cost.
+    # 1.0 disables the boost; values >1.0 make appearance stronger.
+    overlap_app_cost_boost: 4.0
+
     motion_threshold: 0.09    # Max allowed normalized motion distance
                               # Above this -> reject pair
     pose_threshold: 0.4       # Max allowed pose distance
@@ -110,7 +114,11 @@ tracking:
     miss_relax_full_after: 20
     miss_relax_strength: 2.0
 
-    min_core_kps: 7           # Minimum valid core keypoints for reliable pose matching
+    min_core_kps: 7           # Backward-compatible fallback for core keypoint requirements
+    # Minimum core keypoints for pose memory update on matched tracks.
+    min_core_kps_update: 5
+    # Minimum core keypoints for appearance initialization/update on new tracks.
+    min_core_kps_create_track: 7
 
     pose_core:                # BODY_25 joints used for pose comparison
       - 1   # Neck
@@ -140,6 +148,9 @@ tracking:
     min_kp_conf: 0.009         # Minimum keypoint confidence for track update
     reset_g_threshold: 0.32   # If g < threshold -> activate reset mode
     max_unconfirmed_tracks: 3  # Max number of active unconfirmed tracks (confirmed tracks are never pruned)
+    # During risky overlap, weakly interpolate detection center into Kalman update.
+    # 0.0 ignores detection center; 1.0 uses normal full update.
+    overlap_motion_alpha: 0.25
     w_body: 1.0               # Weight of body appearance features in fused e_app
     w_left_glove: 0.25         # Weight of left glove features in fused e_app
     w_right_glove: 0.25        # Weight of right glove features in fused e_app

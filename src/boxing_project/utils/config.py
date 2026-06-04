@@ -1,5 +1,4 @@
 import yaml, random, numpy as np
-import tensorflow as tf
 from pathlib import Path
 
 
@@ -9,6 +8,8 @@ def load_cfg(path: str) -> dict:
 
 
 def set_seed(seed: int):
+    import tensorflow as tf
+
     random.seed(seed); np.random.seed(seed); tf.random.set_seed(seed)
 
 
@@ -68,7 +69,12 @@ def make_match_config(cfg: dict) -> MatchConfig:
     k_app = _get(cfg, "tracking.matching.k_app", 4)
     miss_relax_full_after = int(_get(cfg, "tracking.matching.miss_relax_full_after", 20))
     miss_relax_strength = float(_get(cfg, "tracking.matching.miss_relax_strength", 2.0))
-    min_core_kps = int(_get(cfg, "tracking.matching.min_core_kps", 8))
+    min_core_kps = int(_get(cfg, "tracking.matching.min_core_kps", 5))
+    # Split configurable keypoint requirements; fall back to old min_core_kps
+    # so older YAML files keep their previous behavior.
+    min_core_kps_update = int(_get(cfg, "tracking.matching.min_core_kps_update", min_core_kps))
+    min_core_kps_create_track = int(_get(cfg, "tracking.matching.min_core_kps_create_track", min_core_kps))
+    overlap_app_cost_boost = float(_get(cfg, "tracking.matching.overlap_app_cost_boost", 1.0))
     pose_core = _get(cfg, "tracking.matching.pose_core", [1, 2, 5, 8, 9, 12] )
     pose_center = _get(cfg, "tracking.matching.pose_center", [8, 1, 9, 12, 5, 2])
 
@@ -120,6 +126,9 @@ def make_match_config(cfg: dict) -> MatchConfig:
         miss_relax_full_after=miss_relax_full_after,
         miss_relax_strength=miss_relax_strength,
         min_core_kps=min_core_kps,
+        overlap_app_cost_boost=overlap_app_cost_boost,
+        min_core_kps_update=min_core_kps_update,
+        min_core_kps_create_track=min_core_kps_create_track,
         pose_scale_eps=pose_scale_eps,
         save_log=save_log,
         pose_core=pose_core,
@@ -157,6 +166,7 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
     adaptive_overlap_iou_far = float(_get(cfg, "tracking.adaptive_overlap_iou_far", 0.08))
     adaptive_overlap_iou_default = float(_get(cfg, "tracking.adaptive_overlap_iou_default", 0.12))
     overlap_app_freeze_after = int(_get(cfg, "tracking.overlap_app_freeze_after", 5))
+    overlap_motion_alpha = float(_get(cfg, "tracking.tracker.overlap_motion_alpha", 0.25))
     w_body = float(_get(cfg, "tracking.tracker.w_body", 1.0))
     w_left_glove = float(_get(cfg, "tracking.tracker.w_left_glove", 0.5))
     w_right_glove = float(_get(cfg, "tracking.tracker.w_right_glove", 0.5))
@@ -201,6 +211,7 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
         adaptive_overlap_iou_far=adaptive_overlap_iou_far,
         adaptive_overlap_iou_default=adaptive_overlap_iou_default,
         overlap_app_freeze_after=overlap_app_freeze_after,
+        overlap_motion_alpha=overlap_motion_alpha,
         w_body=w_body,
         w_left_glove=w_left_glove,
         w_right_glove=w_right_glove,

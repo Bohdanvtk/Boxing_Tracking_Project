@@ -55,6 +55,8 @@ class TrackerConfig:
     adaptive_overlap_iou_far: float = 0.08
     adaptive_overlap_iou_default: float = 0.12
     overlap_app_freeze_after: int = 5
+    # Configurable overlap-safety weak motion update. Clamped at use site.
+    overlap_motion_alpha: float = 0.25
     w_body: float = 1.0
     w_left_glove: float = 0.5
     w_right_glove: float = 0.5
@@ -330,7 +332,7 @@ class MultiObjectTracker:
         if birth_cfg.min_kp_conf <= 0:
             birth_cfg.min_kp_conf = float(self.cfg.match.min_kp_conf)
         if birth_cfg.min_core_kps <= 0:
-            birth_cfg.min_core_kps = int(self.cfg.match.min_core_kps)
+            birth_cfg.min_core_kps = int(self.cfg.match.min_core_kps_create_track)
 
         self.birth_manager = BirthManager(
             cfg=birth_cfg,
@@ -494,12 +496,18 @@ class MultiObjectTracker:
         # Therefore adaptive overlap normally falls back to default.
         has_overlap = self._prepare_overlap_update_meta(trk, det)
 
+        # Configurable create-track threshold controls whether a new track may
+        # initialize/update appearance from this detection.
         trk.update(
             det,
             ema_alpha=self.cfg.match.emb_ema_alpha,
-            update_app=bool(ignore_overlap_on_birth) or self._has_base_keypoints(det, 9),
+            update_app=(
+                bool(ignore_overlap_on_birth)
+                or self._has_base_keypoints(det, self.cfg.match.min_core_kps_create_track)
+            ),
             has_overlap=has_overlap,
             ignore_overlap=ignore_overlap_on_birth,
+            overlap_motion_alpha=self.cfg.overlap_motion_alpha,
         )
 
         return trk
@@ -557,6 +565,7 @@ class MultiObjectTracker:
             "tracking.adaptive_overlap_iou_far": float(cfg.adaptive_overlap_iou_far),
             "tracking.adaptive_overlap_iou_default": float(cfg.adaptive_overlap_iou_default),
             "tracking.overlap_app_freeze_after": int(cfg.overlap_app_freeze_after),
+            "tracking.overlap_motion_alpha": float(cfg.overlap_motion_alpha),
         }
 
         for name, value in vars(cfg.match).items():
@@ -1140,7 +1149,12 @@ class MultiObjectTracker:
             id_pairs.append((trk.track_id, j_det))
 
             update_motion = d_motion <= max_update_motion
-            update_pose = d_pose <= max_update_pose and self._has_base_keypoints(det)
+            # Configurable update threshold controls pose memory update for an
+            # existing matched track; do not accidentally require all core KPs.
+            update_pose = (
+                d_pose <= max_update_pose
+                and self._has_base_keypoints(det, self.cfg.match.min_core_kps_update)
+            )
             has_overlap = self._prepare_overlap_update_meta(
                 trk=trk,
                 det=det,
@@ -1188,6 +1202,7 @@ class MultiObjectTracker:
                 update_pose=update_pose,
                 update_app=update_app,
                 has_overlap=has_overlap,
+                overlap_motion_alpha=self.cfg.overlap_motion_alpha,
             )
             # Finalize appearance stale counter after Track.update().
             # Strict updates are confirmed through det.meta["track_app_update_allowed"].
@@ -1269,6 +1284,9 @@ class MultiObjectTracker:
                 "risky_overlap_det_indices": det.meta.get("risky_overlap_det_indices"),
                 "max_risky_overlap_iou": det.meta.get("max_risky_overlap_iou"),
                 "raw_max_overlap_iou": det.meta.get("raw_max_overlap_iou"),
+                "overlap_motion_weak_update": det.meta.get("overlap_motion_weak_update"),
+                "overlap_motion_alpha": det.meta.get("overlap_motion_alpha"),
+                "overlap_motion_update_center": det.meta.get("overlap_motion_update_center"),
             }
 
             track_update_debug.append(rec)
