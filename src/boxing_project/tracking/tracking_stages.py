@@ -614,8 +614,8 @@ class GlobalClusteringStage(BaseStage):
         loaded_tracker_cfg = getattr(loaded_tracker, "cfg", None)
         ctx_tracker_cfg = getattr(getattr(self.ctx, "tracker", None), "cfg", None)
         params = (
-            getattr(loaded_tracker_cfg, "graph_clustering", None)
-            or getattr(ctx_tracker_cfg, "graph_clustering", None)
+            getattr(ctx_tracker_cfg, "graph_clustering", None)
+            or getattr(loaded_tracker_cfg, "graph_clustering", None)
             or self.ctx.graph_clustering_params
             or {}
         )

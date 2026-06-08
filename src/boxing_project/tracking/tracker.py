@@ -12,7 +12,7 @@ import math
 from boxing_project.kalman_filter.kalman import KalmanTracker
 from .track import Track, Detection
 from .matcher import MatchConfig, match_tracks_and_detections
-from .birth_manager import BirthConfig, BirthManager
+from .birth_manager import BirthManager
 from .tracking_debug import (
     append_birth_debug,
     format_birth_debug_lines,

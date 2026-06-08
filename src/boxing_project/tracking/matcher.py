@@ -887,17 +887,24 @@ def _compute_column_conflict_costs(
     )
 
     result: Dict[int, float] = {}
+
     for local_idx, track_idx in enumerate(cand.tolist()):
         col_cost = (
-            float(cfg.w_motion) * float(rel_motion[local_idx])
-            + float(cfg.w_pose) * float(rel_pose[local_idx])
-            + w_app_eff * float(rel_app[local_idx])
+                float(cfg.w_motion) * float(rel_motion[local_idx])
+                + float(cfg.w_pose) * float(rel_pose[local_idx])
+                + w_app_eff * float(rel_app[local_idx])
         )
+
         result[int(track_idx)] = float(col_cost)
-        cell = artifacts.log[int(track_idx), int(det_idx)]
-        cell.column_overlap_app_cost_boost = float(app_boost)
-        cell.column_w_app_eff = float(w_app_eff)
-        cell.column_overlap_app_boost_active = bool(float(app_boost) != 1.0)
+
+        artifacts.log.meta.setdefault("column_conflict_debug", []).append({
+            "track_idx": int(track_idx),
+            "det_idx": int(det_idx),
+            "column_overlap_app_cost_boost": float(app_boost),
+            "column_w_app_eff": float(w_app_eff),
+            "column_overlap_app_boost_active": bool(float(app_boost) != 1.0),
+            "column_cost": float(col_cost),
+        })
 
     return result
 
