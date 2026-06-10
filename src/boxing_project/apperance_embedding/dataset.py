@@ -23,7 +23,7 @@ class CropPairsFolder:
 
     Output:
       ((img_a, img_b), y)
-      img_*: uint8 RGB (H,W,3)  (без нормалізації)
+      img_*: uint8 RGB (H,W,3), without normalization
       y: float32 0/1
     """
     def __init__(self, cfg: FolderPairsConfig, ids: List[str]):

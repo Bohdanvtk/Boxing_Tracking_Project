@@ -5,12 +5,12 @@ data:
   to_rgb: true                # Convert input images to RGB
 
   train_roots:    # Training dataset directories
-    - /home/bohdan/Документи/Samples/Images/boxing_tracker/fight_2_1/round_merged_train_only/train
-    - /home/bohdan/Документи/Samples/Images/boxing_tracker/fight_2_2/round_merged_train_only/train
-    - /home/bohdan/Документи/Samples/Images/boxing_tracker/fight_1_1/round_1_train/appearance_embedding
-    - /home/bohdan/Документи/Samples/Images/boxing_tracker/fight_1_2/round_merged_train_only/train/
+    - data/appearance/fight_2_1/train
+    - data/appearance/fight_2_2/train
+    - data/appearance/fight_1_1/train
+    - data/appearance/fight_1_2/train
 
-  val_root: "/home/bohdan/Документи/Samples/Images/boxing_tracker/fight_1_1/round_1_test/appearance_embedding"
+  val_root: "data/appearance/fight_1_1/val"
   # Validation dataset directories
 
 

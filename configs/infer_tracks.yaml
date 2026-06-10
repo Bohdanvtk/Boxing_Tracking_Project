@@ -13,7 +13,7 @@ openpose:
 data:
   input_dir: "/home/bohdan/2026-06-07 15-48-35.mp4"
   save_width: 800
-  save_dir: "/home/bohdan/Документи/Samples/Images/boxing_tracker/test"
+  save_dir: "data/output/test"
 
 restore_mode: true
 save_log: true
@@ -61,7 +61,7 @@ progress:
 tracking:
   config_path: "configs/tracking.yaml"
   num_frames_merge: 0
-  apperance_embedding_model_path: "/home/bohdan/Документи/Samples/Images/boxing_tracker/osnet_1_x_ain(26_03)_new_stage_2.onnx"
+  apperance_embedding_model_path: "models/osnet_appearance.onnx"
 
 shot_boundary:
   config_path: "/home/bohdan/PycharmProjects/Boxing_Tracking_Project/configs/shot_boundary.yaml"

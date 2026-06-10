@@ -47,11 +47,11 @@ def main():
 
 
 
-    # preprocessing тепер тут, централізовано
+    # Centralized preprocessing.
     def preprocess_pair(batch, y):
         img_a, img_b = batch
 
-        # preprocess_crops_tf має привести до float32 і нормалізувати як треба
+        # Convert crops to float32 and apply the configured normalization.
         img_a = preprocess_crops_tf(img_a, image_size=image_size, to_rgb=to_rgb)
         img_b = preprocess_crops_tf(img_b, image_size=image_size, to_rgb=to_rgb)
 

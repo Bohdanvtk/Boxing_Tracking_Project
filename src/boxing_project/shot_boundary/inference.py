@@ -8,7 +8,7 @@ from .detector import ShotBoundaryDetector, ShotBoundaryConfig
 
 @dataclass(frozen=True)
 class ShotBoundaryInferConfig:
-    """Конфіг для stateful shot-boundary інференсу (SSIM + EMA)."""
+    """Configuration for stateful shot-boundary inference."""
     resize_w: int = 160
     resize_h: int = 90
     grid_x: int = 4
@@ -17,10 +17,10 @@ class ShotBoundaryInferConfig:
 
 
 class ShotBoundaryInferencer:
-    """Stateful shot-boundary: update(frame) -> g (0..1), де g близько 0 означає сильний cut."""
+    """Stateful shot-boundary detector. Lower g means a stronger cut signal."""
 
     def __init__(self, cfg: ShotBoundaryInferConfig):
-        """Створює внутрішній ShotBoundaryDetector і тримає prev_frame/EMA між кадрами."""
+        """Create the internal detector and keep its state between frames."""
         sb_cfg = ShotBoundaryConfig(
             resize=(cfg.resize_w, cfg.resize_h),
             grid=(cfg.grid_x, cfg.grid_y),
@@ -30,12 +30,12 @@ class ShotBoundaryInferencer:
 
     def update(self, frame_bgr: np.ndarray) -> float:
         """
-        Оновлює детектор новим кадром.
+        Update the detector with a new frame.
 
         Args:
-            frame_bgr: поточний кадр (H,W,3) BGR.
+            frame_bgr: Current OpenCV frame in BGR format, shape (H, W, 3).
 
         Returns:
-            g in [0,1]: довіра до геометрії. Менше g => більше схоже на cut.
+            g in [0, 1]. Lower values indicate a stronger cut signal.
         """
         return float(self.detector.update(frame_bgr))

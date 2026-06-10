@@ -84,7 +84,7 @@ def make_match_config(cfg: dict) -> MatchConfig:
 
 
     if keypoint_weights is not None and not isinstance(keypoint_weights, (list, tuple)):
-        raise ValueError("keypoint_weights має бути списком чисел або None")
+        raise ValueError("keypoint_weights must be a list of numbers or None")
 
 
     return MatchConfig(

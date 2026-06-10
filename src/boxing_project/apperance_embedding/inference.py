@@ -12,7 +12,7 @@ from .preprocessing import preprocess_crops_np
 
 @dataclass(frozen=True)
 class AppearanceEmbedConfig:
-    """Конфіг для AppearanceEmbedder (шлях до моделі + препроцес)."""
+    """Configuration for the appearance embedder."""
 
     model_path: str
     to_rgb: bool = True
@@ -20,10 +20,10 @@ class AppearanceEmbedConfig:
 
 
 class AppearanceEmbedder:
-    """Класовий інференс appearance-embedding: вантажимо модель 1 раз, далі embed() для кожного bbox."""
+    """Reusable appearance-embedding inference wrapper."""
 
     def __init__(self, cfg: AppearanceEmbedConfig):
-        """Завантажує ONNX appearance encoder з cfg.model_path та тримає його в памʼяті."""
+        """Load the ONNX appearance encoder once and keep it in memory."""
         self.cfg = cfg
 
         available = ort.get_available_providers()
@@ -70,14 +70,14 @@ class AppearanceEmbedder:
 
     def embed(self, frame_bgr: np.ndarray, bbox_xyxy: Tuple[int, int, int, int]=(3, 21, 19, 39)) -> np.ndarray:
         """
-        Рахує appearance embedding для одного bbox.
+        Compute an appearance embedding for one bounding box.
 
         Args:
-            frame_bgr: кадр OpenCV (H,W,3) BGR.
-            bbox_xyxy: (x1,y1,x2,y2) int.
+            frame_bgr: OpenCV frame in BGR format, shape (H, W, 3).
+            bbox_xyxy: Bounding box as (x1, y1, x2, y2).
 
         Returns:
-            np.ndarray (D,) — embedding (опційно L2-normalized).
+            A 1D embedding vector, optionally L2-normalized.
         """
         x1, y1, x2, y2 = bbox_xyxy
         h, w = frame_bgr.shape[:2]
