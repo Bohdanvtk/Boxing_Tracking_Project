@@ -1,263 +1,153 @@
 # Boxing-Specific Multi-Object Tracking
 
-A computer vision pipeline designed to preserve boxer identities through fast motion, close-range overlap, partial occlusion, missed detections, and broadcast camera cuts.
+A computer vision pipeline for tracking boxers through fast motion, close-range exchanges, missed detections, and broadcast camera cuts.
+
+This project was built to solve a practical problem in boxing analysis: before you can classify punches or count boxer-specific actions, you first need stable identities over time.
 
 <p align="center">
-  <img
-    src="assets/demo/tracking_demo.gif"
-    alt="Boxing tracking demo"
-    width="900"
-  />
+  <img src="assets/demo/tracking_demo.gif" alt="Boxing tracking demo" width="900" />
 </p>
 
-## Overview
+## Why This Project Exists
 
-This project implements a multi-object tracking system specialized for boxing footage.
+Pose detectors can find people and keypoints on individual frames, but they do not reliably preserve identity over time.
 
-The tracker was developed as a foundation for downstream boxing-analysis tasks such as:
+In boxing, that becomes a major problem:
 
-* punch classification;
-* punch counting;
-* per-boxer event attribution;
-* temporal pose analysis;
-* movement and action recognition.
+- fighters move quickly;
+- they overlap often;
+- body parts disappear during clinches and close exchanges;
+- detections can be noisy or missing;
+- the broadcast frequently cuts to a different camera angle.
 
-Pose-estimation systems such as OpenPose can detect people and body keypoints independently on each frame. However, they do not reliably preserve the identity of each detected person over time.
+Without a tracker, the same temporal sequence can accidentally combine skeletons from different athletes. That makes punch classification, punch counting, and per-boxer analysis unreliable.
 
-Without stable boxer identities, skeletons from different athletes can be mixed inside the same temporal sequence. This makes punch classification and per-boxer statistics unreliable.
-
-The purpose of this project is therefore to provide stable boxer tracks before higher-level action-recognition models are applied.
+This project solves that identity problem first.
 
 <p align="center">
-  <img
-    src="assets/readme/tracking_overview.jpg"
-    alt="Stable boxer tracking overview"
-    width="900"
-  />
+  <img src="assets/readme/tracking_overview.jpg" alt="Stable boxer tracking overview" width="900" />
 </p>
 
-## Why Boxing Tracking Is Difficult
+## What The Tracker Does
 
-Boxing footage contains several challenges that are less common in ordinary pedestrian tracking:
+The tracker combines three types of evidence when deciding which detection belongs to which boxer:
 
-* very fast and irregular movement;
-* frequent close-range overlap;
-* partial or complete body occlusion;
-* missing or noisy keypoints;
-* visually similar athletes;
-* large pose changes;
-* frequent camera cuts and perspective changes;
-* small visible regions during close exchanges.
+- **motion** — whether a detection agrees with the predicted track position;
+- **pose** — whether the current skeleton matches the previous body configuration;
+- **appearance** — whether the boxer still looks visually similar.
 
-A simple frame-to-frame skeleton comparison is not sufficient.
-
-When a pose detector misses a boxer for several frames, the next detected skeleton can easily be attached to the wrong temporal sequence. During close exchanges, keypoints from two athletes can also become mixed or unstable.
-
-Camera cuts create an additional problem: the same boxer can appear from a completely different perspective, making direct keypoint comparison unreliable.
-
-## System Pipeline
-
-```mermaid
-flowchart LR
-    A[Input Video] --> B[Pose Detection]
-    B --> C[Shot Boundary Detection]
-    C --> D[Detection Preparation]
-    D --> E[Local Multi-Object Tracking]
-    E --> F[Local Track Fragments]
-    F --> G[Global Identity Clustering]
-    G --> H[Global Boxer Identities]
-```
-
-The system separates tracking into two levels:
-
-1. **Local tracking** preserves identity inside continuous camera segments.
-2. **Global clustering** connects compatible track fragments across different camera epochs.
-
-## Multi-Cue Matching
-
-The local tracker does not rely on a single similarity measurement.
-
-Each possible track–detection pair is evaluated using three complementary distances:
-
-* `d_motion` — consistency with the Kalman-filter motion prediction;
-* `d_pose` — similarity between normalized body-keypoint structures;
-* `d_app` — visual similarity between appearance representations.
+That makes the system more robust than a simple frame-to-frame skeleton comparison.
 
 <p align="center">
-  <img
-    src="assets/readme/multi_cue_matching.png"
-    alt="Motion pose and appearance matching"
-    width="850"
-  />
+  <img src="assets/readme/multi_cue_matching.png" alt="Multi-cue matching with motion pose and appearance" width="860" />
 </p>
 
-These signals are combined to determine which detection most likely belongs to each existing track.
-
-The matching system first ranks candidates from the perspective of each track and then resolves conflicts when multiple tracks prefer the same detection.
-
-This is more robust than assigning detections using only nearest-neighbor distance or only skeleton similarity.
-
-## Pose Comparison
-
-Pose similarity is calculated from the available body keypoints.
-
-The comparison explicitly accounts for:
-
-* reliable keypoints;
-* low-confidence keypoints;
-* missing body joints;
-* normalization of the skeleton geometry.
+Pose comparison is treated as useful, but not fully trustworthy on its own, because boxing posture changes quickly and some joints may be partially hidden.
 
 <p align="center">
-  <img
-    src="assets/readme/pose_comparison.png"
-    alt="Pose comparison between boxer detections"
-    width="850"
-  />
+  <img src="assets/readme/pose_comparison.png" alt="Pose comparison between track and candidate detection" width="860" />
 </p>
 
-Pose information is useful for local identity association, but it is not treated as fully reliable because boxing poses can change significantly between consecutive frames.
+The appearance representation is also boxing-specific. Instead of relying only on a generic body embedding, the tracker can combine:
 
-## Boxing-Specific Appearance Representation
+- body appearance;
+- left glove color information;
+- right glove color information;
+- shorts color information.
 
-The appearance descriptor combines multiple visual signals:
+This makes it easier to distinguish visually similar fighters in difficult scenes.
 
-* a body appearance embedding;
-* HSV information from the left glove;
-* HSV information from the right glove;
-* HSV information from the boxer’s shorts.
+## Why Overlap Handling Matters
 
-The individual feature vectors are weighted, concatenated, and normalized into a unified appearance representation.
+Boxers often move into close contact. In these moments, a normal tracker can easily corrupt identity memory because the crop or skeleton may contain mixed information from both athletes.
 
-This allows the system to use boxing-specific visual cues instead of relying only on a generic full-body embedding.
+To reduce that risk, this tracker includes overlap-aware logic such as:
 
-The tracker also stores information about which appearance regions are visible. Missing gloves, hidden shorts, or partially visible body regions therefore do not have to be treated as complete appearance observations.
-
-## Overlap-Aware Tracking
-
-Boxers frequently overlap during close exchanges.
-
-During these moments, appearance crops and body keypoints can contain information from both athletes. Updating a track normally with such observations can permanently corrupt its identity representation.
-
-The tracker therefore maintains overlap groups and applies adaptive overlap thresholds based on:
-
-* distance between athletes;
-* track stability;
-* current overlap conditions;
-* visibility and confidence of the observation.
-
-When an update is considered risky, the tracker can perform a **partial update**:
-
-* motion can still be updated using a reduced-strength measurement;
-* pose updates can be blocked;
-* appearance updates can be blocked;
-* identity memory can be temporarily frozen.
-
-Source-based freeze counters protect related tracks after a boxer disappears from an overlap group. This reduces the risk of immediately assigning contaminated appearance information to the remaining boxer.
-
-## Appearance Recovery Buffer
-
-Appearance updates are not handled only as accepted or rejected.
-
-Medium-confidence appearance observations can be placed into a temporary recovery buffer.
-
-The buffer allows the tracker to preserve potentially useful evidence without immediately modifying the main appearance representation.
-
-When enough consistent observations accumulate, buffered embeddings can be applied through a cautious batch update.
-
-This mechanism is useful when:
-
-* a boxer is partially visible;
-* the crop is imperfect;
-* appearance information is temporarily stale;
-* the observation is useful but not reliable enough for a direct update.
-
-## Conservative Track Creation
-
-Unmatched detections do not immediately become permanent tracks.
-
-They first become **pending candidates** and must collect enough evidence over multiple frames.
+- adaptive overlap thresholds;
+- partial track updates;
+- temporarily blocked appearance updates;
+- freeze logic for risky identity states.
 
 <p align="center">
-  <img
-    src="assets/readme/pending_tracks.png"
-    alt="Pending track candidate lifecycle"
-    width="900"
-  />
+  <img src="assets/readme/overlap_visualization.png" alt="Overlap-aware tracking and partial updates" width="900" />
 </p>
 
-The track lifecycle is approximately:
-
-```text
-pending → unconfirmed → subconfirmed → confirmed
-```
-
-* **Pending candidates** represent possible new identities.
-* **Unconfirmed tracks** have been promoted but are still unstable.
-* **Subconfirmed tracks** have accumulated enough evidence to participate in more reliable overlap handling.
-* **Confirmed tracks** represent stable identities.
-
-The number of old unconfirmed tracks is limited to prevent unstable detections from creating an unlimited number of identities.
-
-Newborn tracks are temporarily protected so that they are not removed immediately after creation.
-
-## Camera Cuts and Tracking Epochs
-
-Broadcast boxing videos frequently switch between cameras.
-
-A hard camera cut can change:
-
-* the apparent skeleton geometry;
-* body scale;
-* viewpoint;
-* visible clothing regions;
-* spatial position of both athletes.
-
-The project uses shot-boundary detection to divide the video into local tracking epochs.
-
-Local identity continuity is handled inside each epoch. Track fragments are then compared offline to recover global boxer identities across camera changes.
+The system also uses a temporary buffer for medium-confidence appearance observations. That allows the tracker to save potentially useful visual evidence without immediately contaminating the main identity representation.
 
 <p align="center">
-  <img
-    src="assets/readme/global_tracking.jpg"
-    alt="Global boxer identities across camera epochs"
-    width="850"
-  />
+  <img src="assets/readme/buffer_visualization.png" alt="Appearance recovery buffer visualization" width="900" />
 </p>
 
-## Global Identity Clustering
+## Why New Tracks Are Created Conservatively
 
-Each sufficiently stable local track is represented using its accumulated appearance history.
+Not every unmatched detection should immediately become a confirmed track.
 
-Track-level appearance representations are compared using cosine similarity, and compatible fragments are conservatively grouped into global identities.
+In fast boxing footage, noisy detections can appear briefly and disappear again. To avoid creating unstable identities, the tracker uses a conservative birth process.
 
 <p align="center">
-  <img
-    src="assets/readme/global_similarity_matrix.png"
-    alt="Global boxer identity clustering"
-    width="950"
-  />
+  <img src="assets/readme/pending_tracks.png" alt="Pending track candidate lifecycle" width="900" />
 </p>
 
-The clustering method intentionally requires strong internal agreement between grouped track fragments.
+A new candidate must survive long enough and collect enough evidence before it becomes a stable confirmed track.
 
-This reduces incorrect identity merges, although ambiguous fragments can remain unassigned.
+This helps reduce duplicate tracks and short-lived false identities.
 
-The appearance used for global clustering is based on track-level aggregation of the fused local appearance descriptors containing body, glove, and shorts information.
+## Local Tracks And Global Boxer Identities
 
-## Demo Videos
+The project separates identity handling into two levels:
 
-### Local Tracking
+- **local tracks** preserve identity inside one continuous camera segment;
+- **global identities** merge compatible local fragments across different camera shots.
 
-[![Watch local tracking demo](assets/readme/tracking_overview.jpg)](VIDEO_URL_1)
+This distinction matters because a broadcast camera cut can completely change viewpoint, scale, and visible body regions.
 
-### Overlap Handling and Matching Debugger
+### Local Tracking Inside One Camera Segment
 
-[![Watch overlap handling demo](assets/readme/multi_cue_matching.png)](VIDEO_URL_2)
+Inside a single shot, the tracker maintains local track IDs frame by frame.
 
-### Tracking Across Camera Cuts
+<p align="center">
+  <img src="assets/readme/local_tracking_difference.png" alt="Local tracking example in one camera segment" width="445" />
+  <img src="assets/readme/local_tracking_difference_2.png" alt="Local tracking example in another camera segment" width="445" />
+</p>
 
-[![Watch global identity demo](assets/readme/global_tracking.jpg)](VIDEO_URL_3)
+After a camera cut, the same boxer may receive a different **local ID**, because local tracking restarts in a new shot context.
+
+### Global Identity Recovery Across Camera Cuts
+
+After local tracking is finished, the system compares track fragments across different epochs and groups compatible fragments into a shared global boxer identity.
+
+<p align="center">
+  <img src="assets/readme/global_tracking_difference.jpg" alt="One fragment of a boxer assigned to a global identity" width="445" />
+  <img src="assets/readme/global_tracking_difference_2.jpg" alt="Another fragment of the same boxer with a different local ID but the same global identity" width="445" />
+</p>
+
+These two fragments can look different because of viewpoint changes, but they still belong to the same boxer. That is why the project uses **local IDs** and **global IDs** separately.
+
+The final result is a scene where multiple local fragments can be consolidated into stable global boxer identities.
+
+<p align="center">
+  <img src="assets/readme/global_tracking.jpg" alt="Global boxer identities after clustering" width="860" />
+</p>
+
+For this step, stable local fragments are compared using track-level appearance representations, and conservative clustering is used to recover cross-shot identity continuity.
+
+<p align="center">
+  <img src="assets/readme/global_similarity_matrix.png" alt="Global similarity ranking and clustering evidence" width="980" />
+</p>
+
+## Why This Project Is Useful
+
+This tracker is not only a visualization tool.
+
+It is meant to be a foundation for downstream boxing-analysis tasks such as:
+
+- punch classification;
+- punch counting per boxer;
+- temporal action recognition;
+- boxer-specific movement analysis;
+- later dataset preparation for learning-based models.
+
+In other words, the project solves a prerequisite problem: it makes boxer-centered temporal analysis possible.
 
 ## Quick Start
 
@@ -273,7 +163,7 @@ Run the tracker from the repository root:
 PYTHONPATH=src python scripts/infer_tracks.py
 ```
 
-The main tracking parameters are located in:
+Main runtime configuration is currently managed through:
 
 ```text
 configs/tracking.yaml
@@ -281,38 +171,16 @@ configs/birth_manager.yaml
 configs/shot_boundary.yaml
 ```
 
-Model paths, input-video paths, and runtime settings should be configured before starting inference.
-
-## Main Components
-
-```text
-src/boxing_project/tracking/
-├── infer_runner.py
-├── tracking_stages.py
-├── tracker.py
-├── matcher.py
-├── track.py
-├── overlap_manager.py
-├── birth_manager.py
-├── birth_update_pipeline.py
-├── global_clustering.py
-└── inference_utils.py
-```
-
 ## Current Limitations
 
-* Difficult long-term overlaps can still produce identity errors.
-* Tracking quality depends on pose-detection quality.
-* Large appearance changes can make global association ambiguous.
-* Global clustering is intentionally conservative and may leave some fragments unassigned.
-* Some thresholds are currently tuned specifically for boxing footage.
-* The current implementation is a research and engineering prototype rather than a production-ready tracking library.
+- difficult long overlaps can still cause identity errors;
+- tracking quality depends on detection and keypoint quality;
+- some global matches remain ambiguous after severe viewpoint changes;
+- the current implementation is a research-oriented engineering prototype.
 
 ## Future Work
 
-* Improve the public inference API.
-* Add structured export for downstream action-recognition models.
-* Evaluate the tracker on a labeled boxing-tracking dataset.
-* Improve global identity recovery across difficult camera cuts.
-* Add automated tests and quantitative tracking metrics.
-* Integrate punch classification and punch counting.
+- improve the public inference API;
+- add quantitative tracking evaluation;
+- extend global identity recovery across harder camera switches;
+- integrate downstream punch-classification models.
