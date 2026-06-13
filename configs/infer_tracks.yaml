@@ -11,11 +11,11 @@ openpose:
   disable_multi_thread: true
 
 data:
-  input_dir: "/home/bohdan/2026-06-07 15-48-35.mp4"
+  input_dir: "/home/bohdan/check_video_short_mid.mp4"
   save_width: 800
   save_dir: "data/output/test"
 
-restore_mode: true
+restore_mode: false
 save_log: true
 
 stages:
@@ -61,7 +61,7 @@ progress:
 tracking:
   config_path: "configs/tracking.yaml"
   num_frames_merge: 0
-  apperance_embedding_model_path: "models/osnet_appearance.onnx"
+  apperance_embedding_model_path: "/home/bohdan/PycharmProjects/Boxing_Tracking_Project/artifacts/models/apperance_cnn/osnet_1_x_ain(26_03)_new_stage_2.onnx"
 
 shot_boundary:
   config_path: "/home/bohdan/PycharmProjects/Boxing_Tracking_Project/configs/shot_boundary.yaml"

@@ -194,14 +194,13 @@ class InferRunner:
                     # allow deletion ONLY for .../boxing_tracker/test
                     if (
                         save_dir.exists()
-                        and save_dir.name == "test"
                         and save_dir.parent.name == "boxing_tracker"
                     ):
                         progress.message(f"Removing old output directory: {save_dir}")
                         shutil.rmtree(save_dir)
-                    elif save_dir.exists():
+                    else:
                         progress.warning(
-                            f"Not deleting directory outside safe test path: {save_dir}"
+                            f"Not deleting directory boxing_tracker safe path: {save_dir}"
                         )
 
                     save_dir.mkdir(parents=True, exist_ok=True)
