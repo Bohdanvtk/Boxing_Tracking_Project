@@ -25,6 +25,7 @@ stages:
   local_det_saving: true
   global_clustering: true
   global_saving: true
+  dataset_export: true
 
 
 preprocessing:
@@ -54,14 +55,17 @@ global_saving:
   batch_size: 700
   checkpoint_every_frames: 100
 
+dataset_export:
+  enabled: true
+
 progress:
   enabled: true
   library: rich
 
 tracking:
   config_path: "configs/tracking.yaml"
+  birth_config_path: "configs/birth_manager.yaml"
   num_frames_merge: 0
-  apperance_embedding_model_path: "/home/bohdan/PycharmProjects/Boxing_Tracking_Project/artifacts/models/apperance_cnn/osnet_1_x_ain(26_03)_new_stage_2.onnx"
-
+  apperance_embedding_model_path: "artifacts/models/apperance_cnn/osnet_1_x_ain(26_03)_new_stage_2.onnx"
 shot_boundary:
-  config_path: "/home/bohdan/PycharmProjects/Boxing_Tracking_Project/configs/shot_boundary.yaml"
+  config_path: "configs/shot_boundary.yaml"

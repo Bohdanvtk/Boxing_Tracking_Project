@@ -55,6 +55,7 @@ from boxing_project.tracking.inference_utils import (
 )
 
 from boxing_project.tracking.progress_utils import RichStageProgress
+from boxing_project.utils.dataset_export import build_observations, read_all_chunks
 
 
 @dataclass
@@ -139,7 +140,7 @@ class BaseStage:
 
 
 class PreprocessingStage(BaseStage):
-    name, progress_key, progress_label, progress_step = "preprocessed", "pre", "Preprocessing", "[1/6]"
+    name, progress_key, progress_label, progress_step = "preprocessed", "pre", "Preprocessing", "[1/7]"
 
     def run(self) -> None:
         self.prepare_output()
@@ -264,7 +265,7 @@ class PreprocessingStage(BaseStage):
 
 
 class DetectionPreparationStage(BaseStage):
-    name, progress_key, progress_label, progress_step = "detection_preparation", "dp", "Detection Preparation", "[2/6]"
+    name, progress_key, progress_label, progress_step = "detection_preparation", "dp", "Detection Preparation", "[2/7]"
 
     def run(self) -> None:
         self.prepare_output()
@@ -364,7 +365,7 @@ class DetectionPreparationStage(BaseStage):
 
 
 class LocalTrackingStage(BaseStage):
-    name, progress_key, progress_label, progress_step = "local_tracking", "lt", "Local Tracking", "[3/6]"
+    name, progress_key, progress_label, progress_step = "local_tracking", "lt", "Local Tracking", "[3/7]"
 
     def run(self) -> None:
         self.prepare_output()
@@ -482,7 +483,7 @@ class LocalTrackingStage(BaseStage):
 
 
 class LocalDetSavingStage(BaseStage):
-    name, progress_key, progress_label, progress_step = "local_track_saving", "lds", "Local Det Saving", "[4/6]"
+    name, progress_key, progress_label, progress_step = "local_track_saving", "lds", "Local Det Saving", "[4/7]"
 
     def run(self) -> None:
         self.prepare_output()
@@ -590,7 +591,7 @@ class LocalDetSavingStage(BaseStage):
 
 
 class GlobalClusteringStage(BaseStage):
-    name, progress_key, progress_label, progress_step = "global_clustering", "gc", "Global Clustering", "[5/6]"
+    name, progress_key, progress_label, progress_step = "global_clustering", "gc", "Global Clustering", "[5/7]"
 
     def run(self) -> None:
         self.prepare_output()
@@ -655,7 +656,7 @@ class GlobalClusteringStage(BaseStage):
 
 
 class GlobalSavingStage(BaseStage):
-    name, progress_key, progress_label, progress_step = "global_saving", "gs", "Global Saving", "[6/6]"
+    name, progress_key, progress_label, progress_step = "global_saving", "gs", "Global Saving", "[6/7]"
 
     def run(self) -> None:
         self.prepare_output()
@@ -731,3 +732,56 @@ class GlobalSavingStage(BaseStage):
             if gid is not None and vis_idx is not None:
                 matches.append((int(gid), int(vis_idx)))
         return matches
+
+
+class DatasetExportStage(BaseStage):
+    """Stage 7: assemble the public dataset (observations.parquet).
+
+    Additive and read-only: reads stages 1-6 outputs only. Short, single-pass,
+    fully rebuilds the file each run (no chunk-level restore). All join logic
+    lives in boxing_project.utils.dataset_export.
+    """
+    name, progress_key, progress_label, progress_step = "dataset", "ds", "Dataset Export", "[7/7]"
+
+    def run(self) -> None:
+        states_dir = self.ctx.save_dir / "local_tracking" / "track_states"
+        prepared_dir = self.ctx.save_dir / "detection_preparation" / "prepared_chunks"
+        mapping_path = self.ctx.save_dir / "global_clustering" / "local_to_global.parquet"
+        out = self.stage_dir / "observations.parquet"
+
+        # Honor restore: if completed and the file exists, skip the rebuild.
+        if self.restore_completed(1, needed_paths=[out]):
+            return
+
+        self.prepare_output()
+
+        if not any(states_dir.glob("track_states_*.parquet")):
+            raise RuntimeError(f"Missing track_states chunks: {states_dir}")
+        if not any(prepared_dir.glob("prepared_detections_*.parquet")):
+            raise RuntimeError(f"Missing prepared_detections chunks: {prepared_dir}")
+
+        self.start_progress(1)
+
+        states = read_all_chunks(states_dir, "track_states", TRACK_STATES_COLUMNS)
+        prepared = read_all_chunks(prepared_dir, "prepared_detections", PREPARED_DETECTIONS_COLUMNS)
+        if mapping_path.exists():
+            mapping = pd.read_parquet(mapping_path)
+        else:
+            self.progress.warning(
+                f"Global mapping missing ({mapping_path}); global_track_id will be null for all rows"
+            )
+            mapping = pd.DataFrame(columns=GLOBAL_MAP_COLUMNS)
+        if mapping.empty:
+            self.progress.warning("Global mapping is empty; global_track_id will be null for all rows")
+
+        obs = build_observations(states, prepared, mapping)
+        atomic_write_parquet(out, obs)
+
+        self.write_manifest(
+            "completed",
+            rows=int(len(obs)),
+            global_ids=int(obs["global_track_id"].notna().sum()),
+            file="dataset/observations.parquet",
+        )
+        self.progress_update(completed=1, frame=1, total=1, force=True)
+        free(states, prepared, mapping, obs)

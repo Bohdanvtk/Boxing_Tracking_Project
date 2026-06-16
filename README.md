@@ -171,6 +171,39 @@ configs/birth_manager.yaml
 configs/shot_boundary.yaml
 ```
 
+## Dataset Output
+
+The final pipeline stage assembles a single public dataset file:
+
+```text
+<save_dir>/dataset/observations.parquet
+```
+
+Each row is one active local track on one frame — including frames where the
+detection was missed (the track stays alive with its predicted geometry but
+without a detection payload). Geometry (`bbox_*`, `center_*`) always comes from
+the track state; large appearance embeddings and internal/debug fields are not
+exported (only `has_*` availability flags and `e_app_coverage` are kept).
+`global_track_id` is `null` for local tracks without a confident global
+assignment.
+
+Reading it back:
+
+```python
+import pandas as pd
+obs = pd.read_parquet("data/output/test/dataset/observations.parquet")
+
+# a specific local track on a specific frame
+row = obs[(obs.epoch_id == 6) & (obs.local_track_id == 2) & (obs.frame_idx == 348)]
+bbox = row.iloc[0][["bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"]].tolist()
+
+# all observations of a global boxer
+boxer = obs[obs.global_track_id == 1].sort_values(["epoch_id", "frame_idx"])
+
+# a frame range
+segment = obs[(obs.global_track_id == 1) & obs.frame_idx.between(300, 400)]
+```
+
 ## Current Limitations
 
 - difficult long overlaps can still cause identity errors;

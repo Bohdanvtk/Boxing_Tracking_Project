@@ -161,6 +161,7 @@ class MultiObjectTracker:
         self,
         cfg: Optional[TrackerConfig] = None,
         config_path: Optional[Union[str, Path]] = None,
+        birth_config_path: Optional[Union[str, Path]] = None,
     ):
         if cfg is not None and config_path is not None:
             raise ValueError("Provide either cfg or config_path, not both")
@@ -194,7 +195,10 @@ class MultiObjectTracker:
 
         from boxing_project.utils.config import load_birth_config
 
-        birth_cfg = load_birth_config(str(DEFAULT_BIRTH_CONFIG_PATH))
+        # Birth config path comes from infer_tracks.yaml (passed through here).
+        # Fall back to the built-in default only when no path was provided.
+        birth_path = Path(birth_config_path) if birth_config_path is not None else DEFAULT_BIRTH_CONFIG_PATH
+        birth_cfg = load_birth_config(str(birth_path))
 
         if birth_cfg.chi2_gating <= 0:
             birth_cfg.chi2_gating = float(self.cfg.match.chi2_gating)

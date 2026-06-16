@@ -4,3 +4,4 @@ __pycache__/
 artifacts/
 project_core_contents.txt
 .idea/
+docker/openpose_models/

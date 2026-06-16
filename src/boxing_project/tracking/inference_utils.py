@@ -903,6 +903,7 @@ def visualize_sequence(
         LocalDetSavingStage,
         GlobalClusteringStage,
         GlobalSavingStage,
+        DatasetExportStage,
     )
 
     runtime_cfg = pipeline_cfg or {}
@@ -916,6 +917,7 @@ def visualize_sequence(
                 "local_det_saving": True,
                 "global_clustering": True,
                 "global_saving": True,
+                "dataset_export": True,
             },
         ),
         "restore_mode": bool(runtime_cfg.get("restore_mode", False)),
@@ -926,6 +928,7 @@ def visualize_sequence(
         "local_det_saving": runtime_cfg.get("local_det_saving", {}),
         "global_clustering": runtime_cfg.get("global_clustering", {}),
         "global_saving": runtime_cfg.get("global_saving", {}),
+        "dataset_export": runtime_cfg.get("dataset_export", {}),
         "progress": runtime_cfg.get("progress", {"enabled": True, "library": "rich"}),
     }
 
@@ -934,7 +937,7 @@ def visualize_sequence(
         progress = RichStageProgress(enabled=bool(cfg.get("progress", {}).get("enabled", True)))
 
     try:
-        progress.update("setup", description="[0/6] Initializing appearance embedder")
+        progress.update("setup", description="[0/7] Initializing appearance embedder")
         app_embedder = AppearanceEmbedder(AppearanceEmbedConfig(model_path=app_emb_path))
 
         save_dir = Path(save_dir) if save_dir is not None else Path("output")
@@ -978,6 +981,11 @@ def visualize_sequence(
             and bool(cfg.get("global_saving", {}).get("enabled", True))
         )
 
+        run_dataset_export = (
+            bool(cfg["stages"].get("dataset_export", True))
+            and bool(cfg.get("dataset_export", {}).get("enabled", True))
+        )
+
         stages = []
 
         if run_preprocessing:
@@ -997,6 +1005,9 @@ def visualize_sequence(
 
         if run_global_saving:
             stages.append(GlobalSavingStage(ctx, progress))
+
+        if run_dataset_export:
+            stages.append(DatasetExportStage(ctx, progress))
 
         if ctx.restore_mode:
             dirty = False

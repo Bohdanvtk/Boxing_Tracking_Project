@@ -31,6 +31,24 @@ def _resolve(project_root: Path, p: Optional[str | Path]) -> Optional[Path]:
     return p if p.is_absolute() else (project_root / p)
 
 
+def _report_config(progress, label: str, path: Optional[Path], *, required: bool) -> bool:
+    """Emit a uniform message for a config path.
+
+    Two message types:
+    - found:     "<label> config loaded from: <path>"
+    - not found: "<label> config not found ...; using built-in default values"
+                 (or raises if the config is required and has no default).
+    Returns True when the config file was found and read.
+    """
+    if path is not None and path.exists():
+        progress.message(f"{label} config loaded from: {path}")
+        return True
+    if required:
+        raise FileNotFoundError(f"{label} config not found: {path}")
+    progress.warning(f"{label} config not found ({path}); using built-in default values")
+    return False
+
+
 @contextlib.contextmanager
 def suppress_native_stdout(enabled: bool = True):
     """
@@ -89,13 +107,13 @@ class InferRunner:
         )
 
         try:
-            progress.add("setup", "[0/5] SETUP / INITIALIZATION", total=7)
+            progress.add("setup", "[0/7] SETUP / INITIALIZATION", total=7)
 
             # ---------- 1. OpenPose config ----------
             progress.update(
                 "setup",
                 completed=1,
-                description="[0/5] CHECKING OPENPOSE CONFIG",
+                description="[0/7] CHECKING OPENPOSE CONFIG",
                 force=True,
             )
 
@@ -106,7 +124,7 @@ class InferRunner:
             progress.update(
                 "setup",
                 completed=2,
-                description="[0/5] INITIALIZING OPENPOSE",
+                description="[0/7] INITIALIZING OPENPOSE",
                 force=True,
             )
 
@@ -117,24 +135,28 @@ class InferRunner:
             progress.update(
                 "setup",
                 completed=3,
-                description="[0/5] BUILDING TRACKER AND MODELS",
+                description="[0/7] BUILDING TRACKER AND MODELS",
                 force=True,
             )
 
             tracking_cfg = cfg.get("tracking", {})
             tracking_cfg_path = _resolve(pr, tracking_cfg.get("config_path"))
+            _report_config(progress, "Tracking", tracking_cfg_path, required=True)
 
-            if tracking_cfg_path is None or not tracking_cfg_path.exists():
-                raise FileNotFoundError(f"Tracking config not found: {tracking_cfg_path}")
+            birth_cfg_path = _resolve(pr, tracking_cfg.get("birth_config_path"))
+            _report_config(progress, "Birth", birth_cfg_path, required=False)
 
-            tracker = MultiObjectTracker(config_path=str(tracking_cfg_path))
+            tracker = MultiObjectTracker(
+                config_path=str(tracking_cfg_path),
+                birth_config_path=birth_cfg_path,
+            )
             tracking_runtime_cfg = _load_yaml(tracking_cfg_path) or {}
 
             # ---------- 4. Data / Images ----------
             progress.update(
                 "setup",
                 completed=4,
-                description="[0/5] PREPARING INPUT FRAMES",
+                description="[0/7] PREPARING INPUT FRAMES",
                 force=True,
             )
 
@@ -174,7 +196,7 @@ class InferRunner:
             progress.update(
                 "setup",
                 completed=5,
-                description="[0/5] PREPARING OUTPUT DIRECTORY",
+                description="[0/7] PREPARING OUTPUT DIRECTORY",
                 force=True,
             )
 
@@ -191,16 +213,15 @@ class InferRunner:
                     save_dir.mkdir(parents=True, exist_ok=True)
                 else:
                     # STRONG safety guard:
-                    # allow deletion ONLY for .../boxing_tracker/test
                     if (
                         save_dir.exists()
-                        and save_dir.parent.name == "boxing_tracker"
+
                     ):
                         progress.message(f"Removing old output directory: {save_dir}")
                         shutil.rmtree(save_dir)
                     else:
                         progress.warning(
-                            f"Not deleting directory boxing_tracker safe path: {save_dir}"
+                            f"there is no directory: {save_dir}"
                         )
 
                     save_dir.mkdir(parents=True, exist_ok=True)
@@ -209,13 +230,15 @@ class InferRunner:
             progress.update(
                 "setup",
                 completed=6,
-                description="[0/5] RESOLVING EMBEDDINGS AND SHOT BOUNDARY",
+                description="[0/7] RESOLVING EMBEDDINGS AND SHOT BOUNDARY",
                 force=True,
             )
 
-            app_emb_path = tracking_cfg.get("apperance_embedding_model_path")
-            app_emb_path = str(app_emb_path).strip() if app_emb_path is not None else ""
-            app_emb_path = app_emb_path if app_emb_path else None
+            app_emb_raw = tracking_cfg.get("apperance_embedding_model_path")
+            app_emb_raw = str(app_emb_raw).strip() if app_emb_raw is not None else ""
+            # Resolve relative to project_root so configs can use repo-relative paths
+            # (e.g. "artifacts/models/...") regardless of the current working directory.
+            app_emb_path = str(_resolve(pr, app_emb_raw)) if app_emb_raw else None
 
             sb_block = cfg.get("shot_boundary", None)
 
@@ -223,9 +246,7 @@ class InferRunner:
                 raise KeyError("infer_tracks.yaml missing key: shot_boundary")
 
             sb_cfg_path = _resolve(pr, sb_block.get("config_path"))
-
-            if sb_cfg_path is None or not sb_cfg_path.exists():
-                raise FileNotFoundError(f"Shot boundary config not found: {sb_cfg_path}")
+            _report_config(progress, "Shot boundary", sb_cfg_path, required=True)
 
             sb_yaml = _load_yaml(sb_cfg_path)
             sb_cfg = sb_yaml.get("shot_boundary", sb_yaml)
@@ -237,7 +258,7 @@ class InferRunner:
             progress.update(
                 "setup",
                 completed=7,
-                description="[0/5] SETUP COMPLETE",
+                description="[0/7] SETUP COMPLETE",
                 force=True,
             )
 

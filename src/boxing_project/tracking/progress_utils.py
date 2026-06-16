@@ -45,12 +45,7 @@ COLORS = {
 }
 
 STAGE_NAMES = {
-    "[0/5]": "[0/5] SETUP",
-    "[1/5]": "[1/5] PREPROCESS",
-    "[2/5]": "[2/5] LOCAL",
-    "[3/5]": "[3/5] LOCAL SAVE",
-    "[4/5]": "[4/5] GLOBAL CLUST",
-    "[5/5]": "[5/5] GLOBAL SAVE",
+    "[0/7]": "[0/7] SETUP",
 }
 
 DEVICE_COLORS = {
@@ -74,6 +69,35 @@ def _duration(seconds: float) -> str:
 
 def _gb(value_bytes: int | float) -> str:
     return f"{float(value_bytes) / (1024 ** 3):.1f}G"
+
+
+def _read_meminfo_linux() -> tuple[float, float, float] | None:
+    """Fallback system RAM reader for when psutil is unavailable (Linux only)."""
+    try:
+        info = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                key, _, rest = line.partition(":")
+                fields = rest.split()
+                if fields:
+                    info[key.strip()] = float(fields[0]) * 1024  # kB -> bytes
+        total, available = info.get("MemTotal"), info.get("MemAvailable")
+        if not total or available is None:
+            return None
+        used = total - available
+        return used, total, used / total * 100.0
+    except (OSError, ValueError):
+        return None
+
+
+def _read_proc_rss_linux() -> float | None:
+    """Fallback process RSS reader for when psutil is unavailable (Linux only)."""
+    try:
+        with open("/proc/self/statm") as f:
+            resident_pages = int(f.read().split()[1])
+        return resident_pages * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def _style_for_pct(pct: float | None, ok: str, warn: str, bad: str) -> str:
@@ -253,14 +277,18 @@ class RichStageProgress:
             self._last_line_len = 0
 
     def _memory_text(self) -> str:
-        if psutil is None:
-            return self._c("RAM n/a PY n/a", COLORS["muted"] + BOLD)
+        if psutil is not None:
+            mem = psutil.virtual_memory()
+            used, total, percent = mem.total - mem.available, mem.total, float(mem.percent)
+            py_used = psutil.Process(os.getpid()).memory_info().rss
+        else:
+            sys_mem, py_used = _read_meminfo_linux(), _read_proc_rss_linux()
+            if sys_mem is None or py_used is None:
+                return self._c("RAM n/a PY n/a", COLORS["muted"] + BOLD)
+            used, total, percent = sys_mem
 
-        mem = psutil.virtual_memory()
-        py_used = psutil.Process(os.getpid()).memory_info().rss
-        used = mem.total - mem.available
-        text = f"RAM {_gb(used)}/{_gb(mem.total)} {mem.percent:>3.0f}% PY {_gb(py_used)}"
-        return self._c(text, _style_for_pct(float(mem.percent), "ram_ok", "ram_warn", "ram_bad"))
+        text = f"RAM {_gb(used)}/{_gb(total)} {percent:>3.0f}% PY {_gb(py_used)}"
+        return self._c(text, _style_for_pct(percent, "ram_ok", "ram_warn", "ram_bad"))
 
     def _vram_text(self) -> str:
         text, pct = self._vram.read()
@@ -303,8 +331,8 @@ class RichStageProgress:
 
         if force_complete:
             task.completed = task.total
-            if key == "setup" or "[0/5]" in task.description:
-                task.description = "[0/5] SETUP COMPLETE | op=DONE | dev=CPU"
+            if key == "setup" or "[0/7]" in task.description:
+                task.description = "[0/7] SETUP COMPLETE | op=DONE | dev=CPU"
 
         self._render_task(task)
         self._newline()
