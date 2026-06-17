@@ -1,12 +1,1 @@
-numpy
-opencv-python
-Pillow
-PyYAML
-tqdm
-onnxruntime
-scikit-learn
-pandas
-pyarrow
-matplotlib
-filterpy
-psutil
+-r requirements/inference.txt

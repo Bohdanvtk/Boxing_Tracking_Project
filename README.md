@@ -151,6 +151,26 @@ In other words, the project solves a prerequisite problem: it makes boxer-center
 
 ## Quick Start
 
+### Installation
+
+Dependencies are split by use case:
+
+```bash
+# Lightweight: only read observations.parquet with the Results API
+pip install -r requirements/results.txt
+
+# Full inference pipeline (heavy Python dependencies)
+pip install -r requirements/inference.txt   # or: pip install -r requirements.txt
+```
+
+The recommended way to run inference is through Docker — all heavy Python and
+system dependencies (OpenPose, Caffe, CUDA/cuDNN, OpenCV, ONNX Runtime) are
+installed inside the image. If you only consume the resulting
+`observations.parquet`, you do not need to install the inference requirements
+locally; `requirements/results.txt` (numpy, pandas, pyarrow) is enough.
+
+### Inference
+
 The inference pipeline is configured through:
 
 ```text
@@ -203,6 +223,43 @@ boxer = obs[obs.global_track_id == 1].sort_values(["epoch_id", "frame_idx"])
 # a frame range
 segment = obs[(obs.global_track_id == 1) & obs.frame_idx.between(300, 400)]
 ```
+
+### Results API
+
+For convenience, `boxing_project.results` is a small read-only wrapper (numpy +
+pandas only) that turns the parquet into ordered per-boxer sequences ready for
+downstream models:
+
+```python
+from boxing_project.results import BoxingResults
+
+results = BoxingResults("data/output/test")  # or .../dataset/observations.parquet
+
+segment = (
+    results
+    .global_id(1)
+    .epoch(6)
+    .window(start_frame=444, length=20)
+)
+
+model_input = segment.kps            # (20, 25, 3)  -> [x, y, confidence]
+model_mask = segment.detection_mask  # (20,)        -> True where a real detection exists
+```
+
+`window(start_frame, length)` always returns exactly `length` time positions,
+padding frames with no observation; `frames(start, end)` returns only the rows
+that really exist in the inclusive range. Shapes:
+
+```python
+segment.frames.shape            # (20,)
+segment.bbox.shape              # (20, 4)
+segment.kps.shape               # (20, 25, 3)
+segment.observation_mask.shape  # (20,)
+segment.detection_mask.shape    # (20,)
+```
+
+A selection that spans several boxers is split with `selection.segments()`,
+which returns a `SegmentCollection` keyed by global id.
 
 ## Current Limitations
 
