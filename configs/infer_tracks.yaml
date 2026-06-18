@@ -22,16 +22,14 @@ stages:
   preprocessing: true
   detection_preparation: true
   local_tracking: true
-  local_det_saving: true
+  local_det_saving: false
   global_clustering: true
   global_saving: true
   dataset_export: true
 
-
 preprocessing:
   batch_size: 256
   checkpoint_every_frames: 100
-  save_crops: auto
 
 detection_preparation:
   batch_size: 256
@@ -41,31 +39,32 @@ local_tracking:
   checkpoint_every_frames: 50
 
 local_det_saving:
-  enabled: false
   batch_size: 700
-  matched_dir: matched_dets
-  unmatched_dir: unmatched_dets
+  save_matched_dets: true     # write crops into matched_dets/
+  save_unmatched_dets: true   # write crops into unmatched_dets/
 
 global_clustering:
-  enabled: true
   checkpoint_every_tracks: 10
 
 global_saving:
-  enabled: true
   batch_size: 700
-  checkpoint_every_frames: 100
 
 dataset_export:
-  enabled: true
+  video:
+    local:
+      enabled: true        # video with local ids (from local_track_saving frames)
+      fps: 25
+    global:
+      enabled: true        # video with global ids (from global_saving frames)
+      fps: 25
 
 progress:
   enabled: true
-  library: rich
 
 tracking:
   config_path: "configs/tracking.yaml"
   birth_config_path: "configs/birth_manager.yaml"
-  num_frames_merge: 0
   apperance_embedding_model_path: "artifacts/models/apperance_cnn/osnet_1_x_ain(26_03)_new_stage_2.onnx"
+
 shot_boundary:
   config_path: "configs/shot_boundary.yaml"

@@ -929,7 +929,7 @@ def visualize_sequence(
         "global_clustering": runtime_cfg.get("global_clustering", {}),
         "global_saving": runtime_cfg.get("global_saving", {}),
         "dataset_export": runtime_cfg.get("dataset_export", {}),
-        "progress": runtime_cfg.get("progress", {"enabled": True, "library": "rich"}),
+        "progress": runtime_cfg.get("progress", {"enabled": True}),
     }
 
     owns_progress = progress is None
@@ -961,30 +961,20 @@ def visualize_sequence(
 
         run_preprocessing = bool(cfg["stages"].get("preprocessing", True))
 
-        run_detection_preparation = (
-            bool(cfg["stages"].get("detection_preparation", True))
-            and bool(cfg.get("detection_preparation", {}).get("enabled", True))
-        )
+        run_detection_preparation = bool(cfg["stages"].get("detection_preparation", True))
 
         run_local_tracking = bool(cfg["stages"].get("local_tracking", True))
 
         run_local_det_saving = bool(cfg["stages"].get("local_det_saving", True))
 
-        run_global_clustering = (
-            bool(cfg["stages"].get("global_clustering", True))
-            and bool(cfg.get("global_clustering", {}).get("enabled", True))
-        )
+        run_global_clustering = bool(cfg["stages"].get("global_clustering", True))
 
         run_global_saving = (
             run_global_clustering
             and bool(cfg["stages"].get("global_saving", True))
-            and bool(cfg.get("global_saving", {}).get("enabled", True))
         )
 
-        run_dataset_export = (
-            bool(cfg["stages"].get("dataset_export", True))
-            and bool(cfg.get("dataset_export", {}).get("enabled", True))
-        )
+        run_dataset_export = bool(cfg["stages"].get("dataset_export", True))
 
         stages = []
 

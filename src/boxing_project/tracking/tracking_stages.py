@@ -488,8 +488,14 @@ class LocalDetSavingStage(BaseStage):
     def run(self) -> None:
         self.prepare_output()
         matched_dir, unmatched_dir, frames_dir = [self.stage_dir / p for p in ("matched_dets", "unmatched_dets", "frames")]
-        for d in (matched_dir, unmatched_dir, frames_dir):
-            d.mkdir(parents=True, exist_ok=True)
+        save_matched = bool(self.ctx.cfg.get("local_det_saving", {}).get("save_matched_dets", True))
+        save_unmatched = bool(self.ctx.cfg.get("local_det_saving", {}).get("save_unmatched_dets", True))
+        # frames/ is always created (the video stage depends on it); crops dirs are optional.
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        if save_matched:
+            matched_dir.mkdir(parents=True, exist_ok=True)
+        if save_unmatched:
+            unmatched_dir.mkdir(parents=True, exist_ok=True)
         det_chunks_dir, meta_path, local_chunks_dir = self._required_inputs()
         meta = pd.read_parquet(meta_path)
         meta_by_frame = first_by_frame(meta)
@@ -520,7 +526,7 @@ class LocalDetSavingStage(BaseStage):
                 if img is None:
                     raise RuntimeError(f"Failed to read preprocessed frame: {mrow.frame_path}")
                 detections, row_by_det_id, vis_idx_by_det_id = build_visual_detections_from_rows(det_by_frame.get(frame_idx, pd.DataFrame()), img)
-                self._write_crops(frame_idx, img, detections, row_by_det_id, vis_idx_by_det_id, match_idx, matched_dir, unmatched_dir)
+                self._write_crops(frame_idx, img, detections, row_by_det_id, vis_idx_by_det_id, match_idx, matched_dir, unmatched_dir, save_matched, save_unmatched)
                 local_matches = self._local_matches(local_by_frame.get(frame_idx, pd.DataFrame()), vis_idx_by_det_id)
                 local_frame = img.copy()
                 render_tracking_overlays(frame=local_frame, detections=detections, matches=local_matches, frame_idx=frame_idx, use_global_ids=False)
@@ -574,7 +580,9 @@ class LocalDetSavingStage(BaseStage):
         return matches
 
     @staticmethod
-    def _write_crops(frame_idx, img, detections, row_by_det_id, vis_idx_by_det_id, match_idx, matched_dir, unmatched_dir):
+    def _write_crops(frame_idx, img, detections, row_by_det_id, vis_idx_by_det_id, match_idx, matched_dir, unmatched_dir, save_matched=True, save_unmatched=True):
+        if not save_matched and not save_unmatched:
+            return
         for det_id in row_by_det_id:
             det_vis_idx = vis_idx_by_det_id.get(det_id)
             if det_vis_idx is None or det_vis_idx >= len(detections):
@@ -583,6 +591,8 @@ class LocalDetSavingStage(BaseStage):
             if bbox is None:
                 continue
             tid = match_idx.get((frame_idx, int(det_id)))
+            if (tid is None and not save_unmatched) or (tid is not None and not save_matched):
+                continue
             x1, y1, x2, y2 = map(int, bbox)
             crop = img[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
             if crop.size:
@@ -737,23 +747,18 @@ class GlobalSavingStage(BaseStage):
 class DatasetExportStage(BaseStage):
     """Stage 7: assemble the public dataset (observations.parquet).
 
-    Additive and read-only: reads stages 1-6 outputs only. Short, single-pass,
-    fully rebuilds the file each run (no chunk-level restore). All join logic
-    lives in boxing_project.utils.dataset_export.
+    Reads stages 1-6 outputs only. Always fully rebuilds observations.parquet
+    on every run — no restore short-circuit. All join logic lives in
+    boxing_project.utils.dataset_export.
     """
     name, progress_key, progress_label, progress_step = "dataset", "ds", "Dataset Export", "[7/7]"
 
     def run(self) -> None:
+        self.prepare_output()
         states_dir = self.ctx.save_dir / "local_tracking" / "track_states"
         prepared_dir = self.ctx.save_dir / "detection_preparation" / "prepared_chunks"
         mapping_path = self.ctx.save_dir / "global_clustering" / "local_to_global.parquet"
         out = self.stage_dir / "observations.parquet"
-
-        # Honor restore: if completed and the file exists, skip the rebuild.
-        if self.restore_completed(1, needed_paths=[out]):
-            return
-
-        self.prepare_output()
 
         if not any(states_dir.glob("track_states_*.parquet")):
             raise RuntimeError(f"Missing track_states chunks: {states_dir}")
@@ -777,11 +782,61 @@ class DatasetExportStage(BaseStage):
         obs = build_observations(states, prepared, mapping)
         atomic_write_parquet(out, obs)
 
+        videos = self._export_videos()
+
         self.write_manifest(
             "completed",
             rows=int(len(obs)),
-            global_ids=int(obs["global_track_id"].notna().sum()),
+            global_ids=int(obs["global_track_id"].nunique(dropna=True)),
             file="dataset/observations.parquet",
+            videos=videos,
         )
         self.progress_update(completed=1, frame=1, total=1, force=True)
         free(states, prepared, mapping, obs)
+
+    def _export_videos(self) -> dict:
+        """Optionally encode local/global overlay frames into mp4 videos.
+
+        Read-only over stages 4/6: stitches their already-rendered jpg frames.
+        Coupling mirrors the real stage gates in visualize_sequence — a video is
+        skipped (with a warning) when its source stage is disabled or its frames
+        directory is empty.
+        """
+        from boxing_project.tracking.video_utils import frames_to_video
+
+        cfg = self.ctx.cfg
+        vcfg = cfg.get("dataset_export", {}).get("video", {})
+
+        run_local_det_saving = bool(cfg["stages"].get("local_det_saving", True))
+        run_global_clustering = bool(cfg["stages"].get("global_clustering", True))
+        run_global_saving = (
+            run_global_clustering and bool(cfg["stages"].get("global_saving", True))
+        )
+
+        want_local = bool(vcfg.get("local", {}).get("enabled", False))
+        want_global = bool(vcfg.get("global", {}).get("enabled", False))
+
+        if want_local and not run_local_det_saving:
+            self.progress.warning("video.local: local_det_saving disabled — skipping local video")
+            want_local = False
+        if want_global and not run_global_saving:
+            self.progress.warning("video.global: global_saving disabled — skipping global video")
+            want_global = False
+
+        jobs = []
+        if want_local:
+            jobs.append(("local_ids.mp4",
+                         self.ctx.save_dir / "local_track_saving" / "frames",
+                         int(vcfg.get("local", {}).get("fps", 25))))
+        if want_global:
+            jobs.append(("global_ids.mp4",
+                         self.ctx.save_dir / "global_saving" / "frames",
+                         int(vcfg.get("global", {}).get("fps", 25))))
+
+        written: dict = {}
+        for name, frames_dir, fps in jobs:
+            if not frames_dir.exists() or not any(frames_dir.glob("frame_*.jpg")):
+                self.progress.warning(f"No frames in {frames_dir}; skipping {name}")
+                continue
+            written[name] = frames_to_video(frames_dir, self.stage_dir / name, fps)
+        return written

@@ -81,6 +81,18 @@ def build_observations(
     LEFT joins preserve unmatched and unmapped tracks. Export-specific null
     normalization is applied before enforcing the final schema.
     """
+    dup_det = prepared.duplicated(subset=["frame_idx", "det_id"])
+    if dup_det.any():
+        raise RuntimeError(
+            f"Duplicate (frame_idx, det_id) keys in prepared_detections: {int(dup_det.sum())} rows"
+        )
+
+    dup_map = mapping.duplicated(subset=["epoch_id", "local_track_id"])
+    if dup_map.any():
+        raise RuntimeError(
+            f"Duplicate (epoch_id, local_track_id) keys in local_to_global: {int(dup_map.sum())} rows"
+        )
+
     det = prepared[
         [column for column in PREPARED_KEEP_COLUMNS if column in prepared.columns]
     ]
@@ -89,11 +101,13 @@ def build_observations(
         det,
         on=["frame_idx", "det_id"],
         how="left",
+        validate="many_to_one",
     )
     obs = obs.merge(
         mapping,
         on=["epoch_id", "local_track_id"],
         how="left",
+        validate="many_to_one",
     )
 
     # Convert the unmatched sentinel to a nullable integer value.

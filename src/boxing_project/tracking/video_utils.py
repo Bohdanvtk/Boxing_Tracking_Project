@@ -1,9 +1,62 @@
 from __future__ import annotations
 
+import os
+import re
+import tempfile
 from pathlib import Path
 from typing import Optional
 
 import cv2
+
+_FRAME_RE = re.compile(r"frame_(\d+)\.jpg$")
+
+
+def frames_to_video(frames_dir, out_path, fps, *, codec: str = "mp4v") -> int:
+    """Encode sorted ``frame_*.jpg`` from ``frames_dir`` into ``out_path`` (mp4).
+
+    Returns the number of frames written. Streams frame-by-frame (constant
+    memory). Frames are ordered by their parsed numeric index; the output size
+    is taken from the first frame and mismatched frames are resized. The write
+    is atomic (temp file + ``os.replace``).
+    """
+    frames_dir, out_path = Path(frames_dir), Path(out_path)
+    files = sorted(
+        frames_dir.glob("frame_*.jpg"),
+        key=lambda p: int(m.group(1)) if (m := _FRAME_RE.search(p.name)) else 0,
+    )
+    if not files:
+        return 0
+
+    first = cv2.imread(str(files[0]))
+    if first is None:
+        raise RuntimeError(f"Unreadable first frame: {files[0]}")
+    h, w = first.shape[:2]
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(suffix=".mp4", dir=str(out_path.parent))
+    os.close(fd)
+    tmp = Path(tmp_name)
+
+    writer = cv2.VideoWriter(str(tmp), cv2.VideoWriter_fourcc(*codec), float(fps), (w, h))
+    if not writer.isOpened():
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"cv2.VideoWriter failed (codec={codec}); try another fourcc/container")
+
+    n = 0
+    try:
+        for f in files:
+            img = cv2.imread(str(f))
+            if img is None:
+                continue
+            if img.shape[:2] != (h, w):
+                img = cv2.resize(img, (w, h))
+            writer.write(img)
+            n += 1
+    finally:
+        writer.release()
+
+    os.replace(tmp, out_path)
+    return n
 
 
 def _resolve(project_root: Path, p: Optional[str | Path]) -> Optional[Path]:
