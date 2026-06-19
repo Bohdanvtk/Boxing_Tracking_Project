@@ -1,7 +1,7 @@
 *venv*
 __pycache__/
 *.pyc
-artifacts/
 project_core_contents.txt
 .idea/
 docker/openpose_models/
+*.egg-info/

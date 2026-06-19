@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "boxing-tracking-project"
+version = "0.1.0"
+description = "Boxing multi-object tracking inference pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+
+dependencies = [
+"numpy",
+"pandas",
+"pyarrow",
+"opencv-python",
+"Pillow",
+"PyYAML",
+"tqdm",
+"onnxruntime",
+"scikit-learn",
+"matplotlib",
+"filterpy",
+"psutil",
+]
+
+[project.optional-dependencies]
+reid = [
+"torch",
+"torchvision",
+"torchreid",
+"onnx",
+"timm",
+"tensorboard",
+"yacs",
+"gdown",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
