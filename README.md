@@ -5,12 +5,15 @@ A computer vision pipeline for tracking boxers through fast motion, close-range 
 This project was built to solve a practical problem in boxing analysis: before you can classify punches or count boxer-specific actions, you first need stable identities over time.
 
 <p align="center">
-  <img src="assets/demo/tracking_demo.gif" alt="Boxing tracking demo" width="900" />
+  <a href="https://github.com/Bohdanvtk/Boxing_Tracking_Project/releases/latest">
+    <img src="assets/demo/tracking_demo.gif" alt="Boxing tracking demo — click to watch the full videos" width="900" />
+  </a>
 </p>
 
 <p align="center">
-  ▶ <b><a href="https://github.com/Bohdanvtk/Boxing_Tracking_Project/releases/latest">Watch the full tracking demo videos</a></b>
-  — local-ID and global-ID runs
+  <a href="https://github.com/Bohdanvtk/Boxing_Tracking_Project/releases/latest"><b>▶&nbsp; Watch the full tracking demos</b></a>
+  <br/>
+  <sub>full local-ID and global-ID runs in higher quality — click the preview above or this link</sub>
 </p>
 
 ## Why This Project Exists
@@ -544,7 +547,9 @@ quickly-made helpers that just make it easier to look at the output.
 Each one opens a finished pipeline output folder (the `.../test` directory) and
 renders the tracks. They rely on PySide6, OpenCV, pandas, pyarrow and NumPy;
 dependency versions are intentionally not pinned and setup can be finicky, so
-treat them as experimental and provided as-is.
+treat them as experimental and provided as-is. Expect rough edges — they can be
+unstable, and the standard viewer in particular may take a while to load on
+larger outputs.
 
 Download them from the [latest release](https://github.com/Bohdanvtk/Boxing_Tracking_Project/releases/latest).
 
