@@ -8,6 +8,11 @@ This project was built to solve a practical problem in boxing analysis: before y
   <img src="assets/demo/tracking_demo.gif" alt="Boxing tracking demo" width="900" />
 </p>
 
+<p align="center">
+  ▶ <b><a href="https://github.com/Bohdanvtk/Boxing_Tracking_Project/releases/latest">Watch the full tracking demo videos</a></b>
+  — local-ID and global-ID runs
+</p>
+
 ## Why This Project Exists
 
 Pose detectors can find people and keypoints on individual frames, but they do not reliably preserve identity over time.
