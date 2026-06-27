@@ -5,7 +5,15 @@ A computer vision pipeline for tracking boxers through fast motion, close-range 
 This project was built to solve a practical problem in boxing analysis: before you can classify punches or count boxer-specific actions, you first need stable identities over time.
 
 <p align="center">
-  <img src="assets/demo/tracking_demo.gif" alt="Boxing tracking demo" width="900" />
+  <a href="https://github.com/Bohdanvtk/Boxing_Tracking_Project/releases/latest">
+    <img src="assets/demo/tracking_demo.gif" alt="Boxing tracking demo — click to watch the full videos" width="900" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Bohdanvtk/Boxing_Tracking_Project/releases/latest"><b>▶&nbsp; Watch the full tracking demos</b></a>
+  <br/>
+  <sub>full local-ID and global-ID runs in higher quality — click the preview above or this link</sub>
 </p>
 
 ## Why This Project Exists
@@ -526,6 +534,24 @@ segment.detection_mask.shape    # (20,)
 
 A selection that spans several boxers is split with `selection.segments()`,
 which returns a `SegmentCollection` keyed by global id.
+
+## Optional Result Viewers (experimental)
+
+Two small desktop GUIs are available to visually inspect the tracking results.
+They are **auxiliary debug tools, not part of the core pipeline** — rough,
+quickly-made helpers that just make it easier to look at the output.
+
+- **standard** (`jj.py`) — more detailed; best for short clips;
+- **small** (`jj_small.py`) — faster, with fewer features; best for long videos.
+
+Each one opens a finished pipeline output folder (the `.../test` directory) and
+renders the tracks. They rely on PySide6, OpenCV, pandas, pyarrow and NumPy;
+dependency versions are intentionally not pinned and setup can be finicky, so
+treat them as experimental and provided as-is. Expect rough edges — they can be
+unstable, and the standard viewer in particular may take a while to load on
+larger outputs.
+
+Download them from the [latest release](https://github.com/Bohdanvtk/Boxing_Tracking_Project/releases/latest).
 
 ## Current Limitations
 
