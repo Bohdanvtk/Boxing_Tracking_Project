@@ -1,0 +1,217 @@
+# syntax=docker/dockerfile:1.7
+
+# -----------------------------------------------------------------------------
+# Stage 1: openpose-builder. Compile OpenPose with the Python binding.
+# This stage is intentionally large and is NOT part of the final runtime image.
+# -----------------------------------------------------------------------------
+FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04 AS openpose-builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG OPENPOSE_COMMIT=5c5d96523ef917bd30301245fdc8343937cae48d
+ARG CAFFE_COMMIT=1807aadafc934a2a1341021620981cb1ec526b83
+# Default is the RTX 4060 GPU architecture (89). Override during build when
+# producing a more portable public image, for example: "75;80;86;89".
+ARG CUDA_ARCH_BIN=89
+# Pinned because the prebuilt pyopenpose .so is ABI-locked to this NumPy.
+ARG OPENPOSE_NUMPY=1.23.5
+
+ENV OPENPOSE_ROOT=/opt/openpose \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    cmake \
+    git \
+    pkg-config \
+    python3 \
+    python3-dev \
+    python3-pip \
+    python3-setuptools \
+    libopencv-dev \
+    libgoogle-glog-dev \
+    libgflags-dev \
+    libprotobuf-dev \
+    protobuf-compiler \
+    libleveldb-dev \
+    libsnappy-dev \
+    liblmdb-dev \
+    libhdf5-dev \
+    libatlas-base-dev \
+    libopenblas-dev \
+    libboost-all-dev \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone https://github.com/CMU-Perceptual-Computing-Lab/openpose.git "${OPENPOSE_ROOT}" \
+    && git -C "${OPENPOSE_ROOT}" checkout "${OPENPOSE_COMMIT}" \
+    && git -C "${OPENPOSE_ROOT}" submodule update --init --recursive \
+    && git -C "${OPENPOSE_ROOT}/3rdparty/caffe" checkout "${CAFFE_COMMIT}"
+
+# The official OpenPose model server is unreliable, so the checked-in local model
+# is copied into the build instead of downloaded by CMake. The matching
+# pose_deploy.prototxt already ships in the cloned OpenPose repository.
+COPY docker/openpose_models/pose/body_25/pose_iter_584000.caffemodel \
+     ${OPENPOSE_ROOT}/models/pose/body_25/pose_iter_584000.caffemodel
+
+RUN python3 -m pip install --no-cache-dir "numpy==${OPENPOSE_NUMPY}"
+
+# BODY_25 only: build with CUDA + cuDNN, Python binding on, no face/hand models.
+RUN cmake \
+      -S "${OPENPOSE_ROOT}" \
+      -B "${OPENPOSE_ROOT}/build" \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DGPU_MODE=CUDA \
+      -DUSE_CUDNN=ON \
+      -DBUILD_PYTHON=ON \
+      -DBUILD_EXAMPLES=OFF \
+      -DPYTHON_EXECUTABLE=/usr/bin/python3 \
+      -DPYTHON_LIBRARY=/usr/lib/x86_64-linux-gnu/libpython3.10.so \
+      -DCUDA_ARCH=Manual \
+      -DCUDA_ARCH_BIN="${CUDA_ARCH_BIN}" \
+      -DCUDA_ARCH_PTX="" \
+      -DDOWNLOAD_BODY_25_MODEL=OFF \
+      -DDOWNLOAD_FACE_MODEL=OFF \
+      -DDOWNLOAD_HAND_MODEL=OFF \
+    && cmake --build "${OPENPOSE_ROOT}/build" --parallel 2
+
+# Assemble only the files required at runtime. Build trees, compilers and source
+# code stay behind in the builder stage. The full BODY_25 structure (prototxt +
+# caffemodel) is preserved so OpenPose can load the network without downloads.
+RUN set -eux; \
+    mkdir -p \
+      /opt/openpose-runtime/lib \
+      /opt/openpose-runtime/python \
+      /opt/openpose-runtime/models/pose/body_25; \
+    cp -a "${OPENPOSE_ROOT}"/build/src/openpose/libopenpose.so* \
+      /opt/openpose-runtime/lib/; \
+    cp -a "${OPENPOSE_ROOT}"/build/caffe/lib/libcaffe.so* \
+      /opt/openpose-runtime/lib/; \
+    cp -a "${OPENPOSE_ROOT}"/build/python/openpose \
+      /opt/openpose-runtime/python/; \
+    cp -a "${OPENPOSE_ROOT}"/models/pose/body_25/pose_deploy.prototxt \
+      /opt/openpose-runtime/models/pose/body_25/; \
+    cp -a "${OPENPOSE_ROOT}"/models/pose/body_25/pose_iter_584000.caffemodel \
+      /opt/openpose-runtime/models/pose/body_25/; \
+    test -f /opt/openpose-runtime/python/openpose/pyopenpose.cpython-310-x86_64-linux-gnu.so; \
+    test -f /opt/openpose-runtime/models/pose/body_25/pose_deploy.prototxt; \
+    test -f /opt/openpose-runtime/models/pose/body_25/pose_iter_584000.caffemodel
+
+# -----------------------------------------------------------------------------
+# Stage 2: runtime-base. Small CUDA/cuDNN runtime with the OpenPose/Caffe shared
+# libraries and BODY_25 model only. No CUDA compiler, OpenPose source, CMake or
+# object files are copied into this stage. pyopenpose must import here.
+#
+# The Python package is installed at /opt/openpose/build/python because
+# init_openpose_from_config() appends "<openpose.root>/build/python" to sys.path
+# (with openpose.root == /opt/openpose).
+# -----------------------------------------------------------------------------
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04 AS runtime-base
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG OPENPOSE_NUMPY=1.23.5
+
+ENV OPENPOSE_ROOT=/opt/openpose \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/opt/openpose/build/python \
+    LD_LIBRARY_PATH=/opt/openpose/lib:/usr/local/cuda/lib64
+
+# Runtime shared libraries only. The broad OpenCV/Boost packages are kept for the
+# first reliable runtime version; they can later be narrowed using ldd output.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    python3 \
+    python3-pip \
+    python3-setuptools \
+    libopencv-dev \
+    libgoogle-glog0v5 \
+    libgflags2.2 \
+    libprotobuf23 \
+    libleveldb1d \
+    libsnappy1v5 \
+    liblmdb0 \
+    libhdf5-103-1 \
+    libatlas3-base \
+    libopenblas0-pthread \
+    libboost-all-dev \
+    libgl1 \
+    libglib2.0-0 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=openpose-builder /opt/openpose-runtime/lib    /opt/openpose/lib
+COPY --from=openpose-builder /opt/openpose-runtime/python /opt/openpose/build/python
+COPY --from=openpose-builder /opt/openpose-runtime/models /opt/openpose/models
+
+# NumPy is ABI-locked to the version pyopenpose was compiled against. Installing
+# it here lets pyopenpose import inside runtime-base, and the same pin is reused
+# as a constraint when project dependencies are installed in the next stage.
+RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && python3 -m pip install --no-cache-dir "numpy==${OPENPOSE_NUMPY}" \
+    && PYTHONPATH=/opt/openpose/build/python python3 -c "from openpose import pyopenpose; print('pyopenpose OK')"
+
+WORKDIR /app
+
+# -----------------------------------------------------------------------------
+# Stage 3: development. Install Python dependencies and the project itself, then
+# add source, scripts, configs and assets. No ONNX model is bundled yet.
+# Build with: --target development
+# -----------------------------------------------------------------------------
+FROM runtime-base AS development
+
+COPY requirements/ /tmp/requirements/
+COPY docker/constraints.txt /tmp/constraints.txt
+
+# Install runtime dependencies under the NumPy/OpenCV pins in constraints.txt so
+# the pyopenpose ABI is preserved.
+RUN python3 -m pip install --no-cache-dir \
+       --constraint /tmp/constraints.txt \
+       --requirement /tmp/requirements/inference.txt \
+       rich
+
+COPY pyproject.toml /app/pyproject.toml
+COPY README.md /app/README.md
+COPY src /app/src
+COPY scripts /app/scripts
+COPY configs /app/configs
+COPY assets /app/assets
+
+# Install the project itself from pyproject.toml. --no-deps keeps the pinned
+# dependency set installed above (project deps were already satisfied).
+RUN python3 -m pip install --no-cache-dir --no-deps --constraint /tmp/constraints.txt . \
+    && rm -rf /tmp/requirements /tmp/constraints.txt
+
+# infer_tracks.py loads exactly /app/configs/infer_tracks.yaml. Keep the
+# host-friendly and container-friendly configs separate in the repo, but install
+# the Docker one under the name the script expects.
+RUN test -f /app/configs/infer_tracks.docker.yaml \
+    && cp /app/configs/infer_tracks.docker.yaml /app/configs/infer_tracks.yaml \
+    && test -f /app/configs/tracking.yaml \
+    && test -f /app/configs/birth_manager.yaml \
+    && test -f /app/configs/shot_boundary.yaml \
+    && python3 -c "import boxing_project; print('boxing_project OK')" \
+    && python3 -m compileall -q /app/src /app/scripts
+
+CMD ["bash"]
+
+# -----------------------------------------------------------------------------
+# Stage 4: release. Final publishable image. The ONNX appearance model is baked
+# in at /app/models/appearance.onnx so the user never mounts it at run time.
+# Build with: --target release
+# -----------------------------------------------------------------------------
+FROM development AS release
+
+RUN mkdir -p /app/models
+
+# The appearance model is taken straight from the training artifacts tree so the
+# image uses the exact same ONNX as local runs. artifacts/** is excluded from the
+# build context by docker/Dockerfile.runtime.dockerignore, so this specific file
+# is re-included there.
+COPY ["artifacts/models/apperance_cnn/osnet_1_x_ain(26_03)_new_stage_2.onnx", "/app/models/appearance.onnx"]
+
+RUN test -s /app/models/appearance.onnx \
+    && grep -q '/app/models/appearance.onnx' /app/configs/infer_tracks.yaml
+
+CMD ["python3", "-u", "/app/scripts/infer_tracks.py"]

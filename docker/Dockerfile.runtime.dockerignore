@@ -1,0 +1,31 @@
+.git
+.git/**
+.venv
+.venv/**
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.idea
+.vscode
+
+data/output
+data/output/**
+data/input
+data/input/**
+
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Do not send unrelated training/checkpoint artifacts to the Docker daemon.
+artifacts/**
+
+# The release stage bakes this exact appearance model from artifacts, so it must
+# stay in the build context even though the rest of artifacts/ is excluded.
+!artifacts/models/apperance_cnn/osnet_1_x_ain(26_03)_new_stage_2.onnx
+
+# The OpenPose BODY_25 weights are intentionally included in the build context.
+!docker/openpose_models/**

@@ -178,6 +178,26 @@ subpackages so that each responsibility remains explicit.
 
 ## Quick Start
 
+### Docker (recommended for full inference)
+
+The full pipeline needs OpenPose, CUDA, cuDNN and Caffe. Instead of installing
+those natively, use the prebuilt Docker image — it bundles OpenPose (BODY_25),
+the appearance model and the tracking code, so the only host requirement is an
+NVIDIA GPU with the NVIDIA Container Toolkit:
+
+```bash
+docker pull ghcr.io/bohdanvtk/boxing-tracking:runtime
+
+docker run --rm --gpus all --shm-size=2g \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp \
+  -v /absolute/path/to/video.mp4:/data/input/video.mp4:ro \
+  -v /absolute/path/to/output:/data/output \
+  ghcr.io/bohdanvtk/boxing-tracking:runtime
+```
+
+For building the image yourself, GPU portability, running options and publishing,
+see the dedicated **[Docker runtime guide](README_RUNTIME.md)**.
+
 ### Python Package Installation
 
 From the repository root, install the project in editable mode:
