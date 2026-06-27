@@ -1,13 +1,17 @@
 import yaml, random, numpy as np
-import tensorflow as tf
 from pathlib import Path
+
 
 def load_cfg(path: str) -> dict:
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
+
 def set_seed(seed: int):
+    import tensorflow as tf
+
     random.seed(seed); np.random.seed(seed); tf.random.set_seed(seed)
+
 
 
 def _get(d: dict, path: str, default=None):
@@ -65,7 +69,12 @@ def make_match_config(cfg: dict) -> MatchConfig:
     k_app = _get(cfg, "tracking.matching.k_app", 4)
     miss_relax_full_after = int(_get(cfg, "tracking.matching.miss_relax_full_after", 20))
     miss_relax_strength = float(_get(cfg, "tracking.matching.miss_relax_strength", 2.0))
-    min_core_kps = int(_get(cfg, "tracking.matching.min_core_kps", 8))
+    min_core_kps = int(_get(cfg, "tracking.matching.min_core_kps", 5))
+    # Split configurable keypoint requirements; fall back to old min_core_kps
+    # so older YAML files keep their previous behavior.
+    min_core_kps_update = int(_get(cfg, "tracking.matching.min_core_kps_update", min_core_kps))
+    min_core_kps_create_track = int(_get(cfg, "tracking.matching.min_core_kps_create_track", min_core_kps))
+    overlap_app_cost_boost = float(_get(cfg, "tracking.matching.overlap_app_cost_boost", 1.0))
     pose_core = _get(cfg, "tracking.matching.pose_core", [1, 2, 5, 8, 9, 12] )
     pose_center = _get(cfg, "tracking.matching.pose_center", [8, 1, 9, 12, 5, 2])
 
@@ -75,7 +84,7 @@ def make_match_config(cfg: dict) -> MatchConfig:
 
 
     if keypoint_weights is not None and not isinstance(keypoint_weights, (list, tuple)):
-        raise ValueError("keypoint_weights має бути списком чисел або None")
+        raise ValueError("keypoint_weights must be a list of numbers or None")
 
 
     return MatchConfig(
@@ -117,11 +126,16 @@ def make_match_config(cfg: dict) -> MatchConfig:
         miss_relax_full_after=miss_relax_full_after,
         miss_relax_strength=miss_relax_strength,
         min_core_kps=min_core_kps,
+        overlap_app_cost_boost=overlap_app_cost_boost,
+        min_core_kps_update=min_core_kps_update,
+        min_core_kps_create_track=min_core_kps_create_track,
         pose_scale_eps=pose_scale_eps,
         save_log=save_log,
         pose_core=pose_core,
         pose_center=pose_center
     )
+
+
 def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
     fps = _get(cfg, "tracking.fps", None)
 
@@ -152,10 +166,13 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
     adaptive_overlap_iou_far = float(_get(cfg, "tracking.adaptive_overlap_iou_far", 0.08))
     adaptive_overlap_iou_default = float(_get(cfg, "tracking.adaptive_overlap_iou_default", 0.12))
     overlap_app_freeze_after = int(_get(cfg, "tracking.overlap_app_freeze_after", 5))
+    overlap_motion_alpha = float(_get(cfg, "tracking.tracker.overlap_motion_alpha", 0.25))
     w_body = float(_get(cfg, "tracking.tracker.w_body", 1.0))
     w_left_glove = float(_get(cfg, "tracking.tracker.w_left_glove", 0.5))
     w_right_glove = float(_get(cfg, "tracking.tracker.w_right_glove", 0.5))
     w_shorts = float(_get(cfg, "tracking.tracker.w_shorts", 0.75))
+
+    graph_clustering = make_graph_clustering_config(cfg)
 
     max_age = int(_get(cfg, "tracking.tracker.max_age", 10))
     max_confirmed_age = int(_get(cfg, "tracking.tracker.max_confirmed_age", 40))
@@ -194,17 +211,43 @@ def make_tracker_config(cfg: dict, match_cfg: MatchConfig) -> TrackerConfig:
         adaptive_overlap_iou_far=adaptive_overlap_iou_far,
         adaptive_overlap_iou_default=adaptive_overlap_iou_default,
         overlap_app_freeze_after=overlap_app_freeze_after,
+        overlap_motion_alpha=overlap_motion_alpha,
         w_body=w_body,
         w_left_glove=w_left_glove,
         w_right_glove=w_right_glove,
         w_shorts=w_shorts,
+        graph_clustering=graph_clustering,
     )
+
+
+
+def make_graph_clustering_config(cfg: dict) -> dict:
+    """Return pairwise global-clustering params with backward-compatible defaults."""
+    gc = _get(cfg, "tracking.graph_clustering", {}) or {}
+    defaults = {
+        "method": "pairwise_clique",
+        "confirmed_only": True,
+        "min_track_history": 5,
+        "pair_threshold": 0.95,
+        "min_group_size": 3,
+        "allow_same_epoch_in_group": False,
+        "assign_unknown": False,
+        "unknown_global_id": 999,
+        "max_debug_edges": 200,
+        "log_pair_threshold_rejections": False,
+    }
+    merged = {**defaults, **gc}
+
+    return merged
+
+
 
 def load_tracking_config(path: str):
     cfg = load_cfg(path)
     match_cfg = make_match_config(cfg)
     tracker_cfg = make_tracker_config(cfg, match_cfg)
     return tracker_cfg, match_cfg, cfg
+
 
 
 def load_birth_config(path: str) -> BirthConfig:

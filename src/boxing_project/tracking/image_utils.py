@@ -221,6 +221,8 @@ def _coerce_keypoints_and_conf(kps, kp_conf=None) -> Tuple[Optional[np.ndarray],
     except (TypeError, ValueError):
         return None, None
 
+    if arr.ndim == 1:
+        arr = arr[: arr.size - arr.size % 2].reshape(-1, 2)
     if arr.ndim != 2 or arr.shape[1] < 2 or arr.shape[0] == 0:
         return None, None
 
@@ -652,13 +654,9 @@ def attach_overlap_info_to_detections(
 
 def is_valid_keypoint(kps, keypoint_idx: int, conf_threshold: float) -> bool:
     """
-    Перевіряє, чи keypoint можна використовувати.
+    Return True when the keypoint exists and has enough confidence.
 
-    Умова:
-    1. індекс існує в kps
-    2. confidence цієї точки >= conf_threshold
-
-    Очікуваний формат:
+    Expected format:
         kps[idx] = (x, y, conf)
     """
     return (
@@ -669,9 +667,7 @@ def is_valid_keypoint(kps, keypoint_idx: int, conf_threshold: float) -> bool:
 
 def get_keypoint_xy(kps, keypoint_idx: int) -> np.ndarray:
     """
-    Повертає координати keypoint у вигляді numpy-вектора [x, y].
-
-    Confidence тут не повертаємо, бо для геометрії нам потрібні тільки координати.
+    Return keypoint coordinates as a numpy vector [x, y].
     """
     return np.array(
         [float(kps[keypoint_idx][0]), float(kps[keypoint_idx][1])],
@@ -687,13 +683,7 @@ def crop_from_bbox(
     y2: float,
 ):
     """
-    Вирізає область з картинки по bbox.
-
-    Що робить:
-    1. обрізає координати по межах зображення
-    2. переводить їх у int
-    3. перевіряє, що bbox має нормальний розмір
-    4. повертає crop або None
+    Crop an image region by bbox and return None for invalid boxes.
     """
     image_height, image_width = frame_bgr.shape[:2]
 
@@ -718,13 +708,7 @@ def crop_glove_from_arm(
     glove_size_ratio: float = 1.35,
 ):
     """
-    Будує crop рукавиці по геометрії руки: elbow -> wrist.
-
-    Ідея:
-    - лікоть і зап'ястя задають напрямок передпліччя
-    - довжина передпліччя дає локальний масштаб
-    - центр crop ставимо трохи далі за wrist
-    - розмір crop беремо пропорційно довжині передпліччя
+    Build a glove crop from arm geometry: elbow -> wrist.
     """
     if not (
         is_valid_keypoint(kps, elbow_idx, conf_threshold)
@@ -735,24 +719,24 @@ def crop_glove_from_arm(
     elbow_xy = get_keypoint_xy(kps, elbow_idx)
     wrist_xy = get_keypoint_xy(kps, wrist_idx)
 
-    # Вектор від ліктя до зап'ястя
+    # Forearm direction vector.
     forearm_vector = wrist_xy - elbow_xy
 
-    # Довжина передпліччя в пікселях
+    # Forearm length in pixels.
     forearm_length = float(np.linalg.norm(forearm_vector))
     if forearm_length < 1e-6:
         return None
 
-    # Одиничний вектор напряму руки
+    # Unit arm direction.
     forearm_direction = forearm_vector / forearm_length
 
-    # Центр crop трохи попереду wrist у напрямку руки
+    # Shift the crop center slightly past the wrist.
     crop_center = wrist_xy + forward_shift_ratio * forearm_length * forearm_direction
 
-    # Розмір квадрата пропорційний довжині передпліччя
+    # Scale the square crop by forearm length.
     crop_size = glove_size_ratio * forearm_length
 
-    # Перетворюємо center + size у координати bbox
+    # Convert center and size to bbox coordinates.
     x1 = crop_center[0] - crop_size / 2.0
     y1 = crop_center[1] - crop_size / 2.0
     x2 = crop_center[0] + crop_size / 2.0
@@ -771,15 +755,7 @@ def crop_shorts_from_hips(
     fallback_height_ratio: float = 0.9,
 ):
     """
-    Будує crop шортів по тазових точках.
-
-    Ідея:
-    - MID_HIP дає центр шортів
-    - L_HIP і R_HIP дають ширину таза
-    - верх crop ставимо трохи вище mid_hip
-    - низ crop тягнемо вниз:
-        * краще по колінах
-        * якщо колін нема, то по hip_width
+    Build a shorts crop from hip and knee keypoints.
     """
     if not (
         is_valid_keypoint(kps, MID_HIP, conf_threshold)
@@ -792,18 +768,18 @@ def crop_shorts_from_hips(
     right_hip_xy = get_keypoint_xy(kps, R_HIP)
     left_hip_xy = get_keypoint_xy(kps, L_HIP)
 
-    # Ширина таза
+    # Hip width.
     hip_width = float(np.linalg.norm(left_hip_xy - right_hip_xy))
     if hip_width < 1e-6:
         return None
 
-    # Ширина crop для шортів трохи більша за таз
+    # Make the shorts crop wider than the hips.
     shorts_width = shorts_width_ratio * hip_width
 
-    # Верхня межа трохи вище таза
+    # Move the top boundary slightly above the hips.
     top_y = mid_hip_xy[1] - top_lift_ratio * hip_width
 
-    # Якщо є коліна, краще оцінюємо низ шортів через відстань до колін
+    # Use knees when available to estimate the lower boundary.
     if (
         is_valid_keypoint(kps, R_KNEE, conf_threshold)
         and is_valid_keypoint(kps, L_KNEE, conf_threshold)
@@ -813,17 +789,17 @@ def crop_shorts_from_hips(
 
         average_knee_y = 0.5 * (right_knee_xy[1] + left_knee_xy[1])
 
-        # Беремо частину шляху від таза до колін
+        # Use part of the hip-to-knee distance.
         bottom_y = mid_hip_xy[1] + knee_height_ratio * (average_knee_y - mid_hip_xy[1])
     else:
-        # Якщо колін нема, просто йдемо вниз на пропорцію від ширини таза
+        # Fall back to a hip-width-based height.
         bottom_y = mid_hip_xy[1] + fallback_height_ratio * hip_width
 
-    # Горизонтально центр беремо по mid_hip
+    # Center horizontally around MidHip.
     x1 = mid_hip_xy[0] - shorts_width / 2.0
     x2 = mid_hip_xy[0] + shorts_width / 2.0
 
-    # Вертикально беремо вже готові верх і низ
+    # Use the estimated vertical boundaries.
     y1 = top_y
     y2 = bottom_y
 
@@ -836,14 +812,9 @@ def extract_boxing_crops(
     conf_threshold: float = 0.4,
 ):
     """
-    Витягує 3 crop-и для одного боксера:
-    - left_glove
-    - right_glove
-    - shorts
+    Extract glove and shorts crops for one boxer.
 
-    Повертає словник, де кожне значення:
-    - np.ndarray, якщо crop вдалося побудувати
-    - None, якщо ні
+    Returns a dictionary with crops or None for failed crops.
     """
     left_glove_crop = crop_glove_from_arm(
         frame_bgr=frame_bgr,
@@ -881,14 +852,12 @@ def _find_label_position(base_x, base_ty,
                          step,
                          min_y):
     """
-    Підбирає вертикальну позицію для тексту так, щоб
-    його прямокутник не перетинався з уже існуючими в label_rects.
-    Повертає (x, baseline_y) і ДОПИСУЄ прямокутник у label_rects.
+    Find a non-overlapping label position and store its rectangle.
     """
-    # щоб не вилізти за праву межу кадру
+    # Keep the label inside the right frame border.
     base_x = max(0, min(base_x, img_w - label_width - 1))
 
-    # щоб текст не вилазив за верх і був не нижче min_y
+    # Keep the text above min_y and inside the top border.
     ty = max(min_y, base_ty)
 
     while True:
@@ -897,17 +866,17 @@ def _find_label_position(base_x, base_ty,
         rect = (base_x, top, base_x + label_width, bottom)
 
         if top < 0:
-            # далі піднімати вже нікуди
+            # Cannot move the label higher.
             break
 
         conflict = any(_rects_intersect(rect, r) for r in label_rects)
         if not conflict:
             break
 
-        # піднімаємо текст вище
+        # Move the label higher.
         ty -= step
 
-    # запам'ятовуємо зайняту зону
+    # Store the occupied label rectangle.
     label_rects.append((base_x, ty - label_height, base_x + label_width, ty))
     return base_x, ty
 
@@ -1068,3 +1037,79 @@ def render_tracking_overlays(frame: np.ndarray, detections, matches, frame_idx: 
     label_prefix = "GID" if use_global_ids else "ID"
     draw_matched_tracks(frame=frame, detections=detections, matches=matches, label_prefix=label_prefix)
     draw_frame_index(frame, frame_idx)
+
+# ============================================================
+# Stage rendering/crop adapters
+# ============================================================
+
+class _LightDet:
+    """Small detection-like object compatible with render_tracking_overlays."""
+
+    def __init__(self, bbox, keypoints, kp_conf):
+        bbox = [float(v) for v in bbox]
+        self.meta = {"raw": {"bbox": bbox, "bbox_for_intersection": bbox}}
+        self.center = ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
+        self.keypoints = keypoints
+        self.kp_conf = kp_conf
+
+
+def clip_bbox_to_image(bbox, img_shape) -> Optional[List[float]]:
+    """Clip an xyxy bbox to an image shape and return floats."""
+    if img_shape is None or len(img_shape) < 2:
+        return None
+    h, w = img_shape[:2]
+    clipped = clip_bbox_xyxy(bbox, img_w=w, img_h=h)
+    return None if clipped is None else [float(v) for v in clipped]
+
+
+def bbox_from_keypoints_for_image(kps, kp_conf, img_shape, conf_th: float = 0.05) -> Optional[List[float]]:
+    """Build an image-clipped bbox from separate xy keypoints and confidence arrays."""
+    xy, conf = _coerce_keypoints_and_conf(kps, kp_conf)
+    if xy is None or conf is None:
+        return None
+    h, w = img_shape[:2]
+    person = np.concatenate([xy, conf[:, None]], axis=1).astype(np.float32, copy=False)
+    bbox = keypoints_to_intersection_bbox(person, conf_th=conf_th, img_w=w, img_h=h)
+    return None if bbox is None else [float(v) for v in bbox]
+
+
+def bbox_from_parquet_row(row, kps, kp_conf, img_shape) -> Optional[List[float]]:
+    """Use parquet bbox columns first; fall back to keypoints when they are missing."""
+    try:
+        values = [float(row.bbox_x1), float(row.bbox_y1), float(row.bbox_x2), float(row.bbox_y2)]
+    except (AttributeError, TypeError, ValueError):
+        values = None
+
+    if values is not None and np.isfinite(values).all():
+        bbox = clip_bbox_to_image(values, img_shape)
+        if bbox is not None:
+            return bbox
+
+    return bbox_from_keypoints_for_image(kps, kp_conf, img_shape)
+
+
+def build_visual_detections_from_rows(frame_rows, img: np.ndarray):
+    """Convert parquet detection rows into lightweight detections for overlay rendering."""
+    detections, row_by_det_id, vis_idx_by_det_id = [], {}, {}
+    if frame_rows is None or frame_rows.empty:
+        return detections, row_by_det_id, vis_idx_by_det_id
+
+    if "det_id" in frame_rows.columns:
+        frame_rows = frame_rows.sort_values("det_id").reset_index(drop=True)
+
+    for row in frame_rows.itertuples(index=False):
+        det_id = int(row.det_id) if hasattr(row, "det_id") else len(detections)
+        kps, kp_conf = _coerce_keypoints_and_conf(row.keypoints, getattr(row, "kp_conf", None))
+        if kps is None or kp_conf is None:
+            kps = np.empty((0, 2), dtype=np.float32)
+            kp_conf = np.empty((0,), dtype=np.float32)
+
+        bbox = bbox_from_parquet_row(row, kps, kp_conf, img.shape)
+        if bbox is None:
+            continue
+
+        vis_idx_by_det_id[det_id] = len(detections)
+        row_by_det_id[det_id] = row
+        detections.append(_LightDet(bbox, kps, kp_conf))
+
+    return detections, row_by_det_id, vis_idx_by_det_id

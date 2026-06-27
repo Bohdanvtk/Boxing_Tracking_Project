@@ -81,6 +81,10 @@ tracking:
     app_buffer_clear_on_safety_fail: true   # Clear recovery buffer when motion/pose/coverage safety gates fail.
     missing_app_penalty: 0.08 # Small cost penalty for missing/unknown appearance parts
 
+    # During overlap, boost appearance importance in matching cost.
+    # 1.0 disables the boost; values >1.0 make appearance stronger.
+    overlap_app_cost_boost: 4.0
+
     motion_threshold: 0.09    # Max allowed normalized motion distance
                               # Above this -> reject pair
     pose_threshold: 0.4       # Max allowed pose distance
@@ -110,7 +114,11 @@ tracking:
     miss_relax_full_after: 20
     miss_relax_strength: 2.0
 
-    min_core_kps: 7           # Minimum valid core keypoints for reliable pose matching
+    min_core_kps: 7           # Backward-compatible fallback for core keypoint requirements
+    # Minimum core keypoints for pose memory update on matched tracks.
+    min_core_kps_update: 5
+    # Minimum core keypoints for appearance initialization/update on new tracks.
+    min_core_kps_create_track: 7
 
     pose_core:                # BODY_25 joints used for pose comparison
       - 1   # Neck
@@ -140,14 +148,39 @@ tracking:
     min_kp_conf: 0.009         # Minimum keypoint confidence for track update
     reset_g_threshold: 0.32   # If g < threshold -> activate reset mode
     max_unconfirmed_tracks: 3  # Max number of active unconfirmed tracks (confirmed tracks are never pruned)
+    # During risky overlap, weakly interpolate detection center into Kalman update.
+    # 0.0 ignores detection center; 1.0 uses normal full update.
+    overlap_motion_alpha: 0.25
     w_body: 1.0               # Weight of body appearance features in fused e_app
     w_left_glove: 0.25         # Weight of left glove features in fused e_app
     w_right_glove: 0.25        # Weight of right glove features in fused e_app
     w_shorts: 0.5           # Weight of shorts features in fused e_app
 
   graph_clustering:
-    k: 9                      # Number of neighbors / graph connectivity parameter
-    sim_threshold: 0.8        # Minimum similarity for linking nodes
-    n_clusters: 3             # Number of output clusters
-    random_state: 42          # Random seed for reproducibility
-    assign_labels: kmeans     # Label assignment strategy
+    method: pairwise_clique        # Global ID grouping strategy. Uses strict pairwise similarity groups.
+
+    # Track eligibility
+    confirmed_only: true           # Use only confirmed local tracks for global grouping.
+    min_track_history: 5           # Minimum number of accepted appearance embeddings required for a track.
+
+    # Pairwise clique grouping
+    pair_threshold: 0.76          # Every pair inside a valid global group must have similarity >= this value.
+    min_group_size: 3              # Minimum number of tracks required to create a global ID.
+
+    # Same-epoch behavior
+    allow_same_epoch_in_group: true
+    # false -> one global group cannot contain two tracks from the same epoch.
+    # true  -> same-epoch tracks may be grouped if all pairwise checks pass.
+
+    # The strict clique rule already checks every pair inside a group.
+    # Therefore no extra group-mean/member-mean or KNN filtering is needed.
+
+    # Unknown handling
+    assign_unknown: false          # If false, uncertain tracks are excluded from local_to_global.parquet.
+    unknown_global_id: 880         # Used only when assign_unknown is true.
+
+    # Debug
+    max_debug_edges: 200           # Maximum number of accepted/rejected edge records stored in debug.
+    log_pair_threshold_rejections: false
+    # false -> do not store every low-similarity pair in rejected_edges.
+    # This prevents huge O(N^2) debug payloads.

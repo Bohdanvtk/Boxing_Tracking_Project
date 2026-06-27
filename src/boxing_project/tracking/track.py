@@ -203,13 +203,15 @@ class Track:
             update_app: bool = True,
             has_overlap: bool = False,
             ignore_overlap: bool = False,
+            overlap_motion_alpha: float = 1.0,
     ):
         # Tracker owns overlap decisions; Track only applies blocking.
         current_overlap = False if ignore_overlap else bool(has_overlap)
         det.meta["birth_overlap_bypass"] = bool(ignore_overlap)
 
         if current_overlap:
-            update_motion = False
+            # Configurable overlap-safety mechanism: keep a weak Kalman motion
+            # update from the detection center, but block unstable pose/app memory.
             update_pose = False
             update_app = False
         elif not bool(update_motion):
@@ -217,8 +219,11 @@ class Track:
             update_app = False
 
         disabled_reasons = list(det.meta.get("track_update_disabled_reasons", []) or [])
-        if current_overlap and "overlap_update_disabled" not in disabled_reasons:
-            disabled_reasons.append("overlap_update_disabled")
+        if current_overlap:
+            if not bool(update_motion) and "overlap_motion_update_disabled" not in disabled_reasons:
+                disabled_reasons.append("overlap_motion_update_disabled")
+            if "overlap_pose_app_update_disabled" not in disabled_reasons:
+                disabled_reasons.append("overlap_pose_app_update_disabled")
 
         det.meta["track_update_motion_allowed"] = bool(update_motion)
         det.meta["track_update_pose_allowed"] = bool(update_pose)
@@ -231,7 +236,23 @@ class Track:
         det.meta["track_match_had_overlap"] = bool(current_overlap)
 
         if update_motion:
-            state, cov = self.kf.update(np.asarray(det.center, dtype=float))
+            if current_overlap:
+                alpha = float(np.clip(overlap_motion_alpha, 0.0, 1.0))
+                old_center = np.asarray(self.pos(), dtype=float)
+                det_center = np.asarray(det.center, dtype=float)
+                measurement = (1.0 - alpha) * old_center + alpha * det_center
+                det.meta["overlap_motion_weak_update"] = True
+                det.meta["overlap_motion_alpha"] = float(alpha)
+                det.meta["overlap_motion_original_center"] = [float(x) for x in det_center.tolist()]
+                det.meta["overlap_motion_update_center"] = [float(x) for x in measurement.tolist()]
+            else:
+                measurement = np.asarray(det.center, dtype=float)
+                det.meta["overlap_motion_weak_update"] = False
+                det.meta["overlap_motion_alpha"] = 1.0
+                det.meta["overlap_motion_original_center"] = [float(x) for x in measurement.tolist()]
+                det.meta["overlap_motion_update_center"] = [float(x) for x in measurement.tolist()]
+
+            state, cov = self.kf.update(measurement)
             self.time_since_update = 0
             self.hits += 1
             if not self.sub_confirmed and self.hits >= self.min_hits_sub:

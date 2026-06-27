@@ -1,351 +1,127 @@
+"""Saving utilities for the staged tracking pipeline.
+
+This module intentionally avoids old per-frame `extra/` outputs and provides
+atomic helpers and table writers used by stages.
+"""
+
 from __future__ import annotations
 
 import json
-import re
+import os
+import pickle
+import tempfile
 from pathlib import Path
 from typing import Any
 
-import cv2
 import numpy as np
-
-from boxing_project.tracking.tracking_debug import format_used_config_lines
-
-
-def _json_safe(value):
-    """Convert numpy/NaN values to JSON-safe Python objects."""
-    if isinstance(value, np.ndarray):
-        value = value.tolist()
-
-    if isinstance(value, dict):
-        return {str(k): _json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(v) for v in value]
-
-    if isinstance(value, (np.floating, float)):
-        v = float(value)
-        return v if np.isfinite(v) else None
-    if isinstance(value, (np.integer, int)):
-        return int(value)
-    if isinstance(value, (np.bool_, bool)):
-        return bool(value)
-
-    return value
+import pandas as pd
 
 
-def _clip_bbox_xyxy(bbox, w: int, h: int):
-    if bbox is None:
-        return None
-    x1, y1, x2, y2 = bbox
-    x1 = max(0, min(int(x1), w - 1))
-    x2 = max(0, min(int(x2), w))
-    y1 = max(0, min(int(y1), h - 1))
-    y2 = max(0, min(int(y2), h))
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return x1, y1, x2, y2
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write bytes atomically to avoid partial files on interruption."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=f"{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
-def _save_matched_det(
-    *,
-    frame_dir: Path,
-    track_id: int,
-    frame: np.ndarray,
-    bbox,
-    keypoints: np.ndarray | None,
-    kp_conf: np.ndarray | None,
-    conf_th: float,
-) -> None:
-    h, w = frame.shape[:2]
-    track_dir = frame_dir / f"track_{track_id}"
-    track_dir.mkdir(parents=True, exist_ok=True)
-
-    bb = _clip_bbox_xyxy(bbox, w=w, h=h)
-    if bb is not None:
-        x1, y1, x2, y2 = bb
-        crop = frame[y1:y2, x1:x2]
-        cv2.imwrite(str(track_dir / "crop.jpg"), crop)
-
-    if keypoints is None or kp_conf is None:
-        kps4 = np.zeros((0, 4), dtype=np.float32)
-    else:
-        xy = keypoints.astype(np.float32, copy=False)
-        conf = kp_conf.astype(np.float32, copy=False)
-
-        if xy.ndim != 2 or xy.shape[1] != 2:
-            xy = xy.reshape((-1, 2)).astype(np.float32, copy=False)
-
-        conf = conf.reshape((-1,))
-        k = min(xy.shape[0], conf.shape[0])
-        xy = xy[:k]
-        conf = conf[:k]
-
-        finite = np.isfinite(xy[:, 0]) & np.isfinite(xy[:, 1])
-        mask = (conf >= float(conf_th)) & finite
-
-        kps4 = np.concatenate([xy, conf[:, None], mask.astype(np.float32)[:, None]], axis=1).astype(np.float32, copy=False)
-        kps4[:, :2] = np.nan_to_num(kps4[:, :2], nan=0.0, posinf=0.0, neginf=0.0)
-
-    np.savez_compressed(str(track_dir / "kps.npz"), kps=kps4)
 
 
-def _save_frame_extra(*, frame_dir: Path, unprocessed_frame: np.ndarray, detections) -> None:
-    h, w = unprocessed_frame.shape[:2]
-    extra_dir = frame_dir / "extra"
-    extra_dir.mkdir(parents=True, exist_ok=True)
+def atomic_write_parquet(path: Path, df: pd.DataFrame) -> None:
+    """Write parquet atomically via temporary file and rename."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".parquet", dir=str(path.parent))
+    os.close(fd)
+    tmp_path = Path(tmp)
+    try:
+        df.to_parquet(tmp_path, index=False)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
 
-    cv2.imwrite(str(extra_dir / "unprocessed_image.jpg"), unprocessed_frame)
-
-    for det_idx, det in enumerate(detections):
-        raw = det.meta.get("raw", {})
-        bb = _clip_bbox_xyxy(raw.get("bbox", None), w=w, h=h)
-        if bb is None:
-            continue
-        x1, y1, x2, y2 = bb
-        crop = unprocessed_frame[y1:y2, x1:x2]
-        cv2.imwrite(str(extra_dir / f"det_{det_idx:03d}.jpg"), crop)
+def atomic_write_json(path: Path, obj: dict[str, Any]) -> None:
+    """Serialize dict as UTF-8 JSON and write atomically."""
+    atomic_write_bytes(path, json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8"))
 
 
-def save_tracks_similarity(
-    *,
-    nodes: list[tuple[int, int]],
-    sim: np.ndarray,
-    output_path: Path,
-) -> None:
+def save_manifest(stage_dir: Path, manifest: dict[str, Any]) -> None:
+    """Persist `manifest.json` for a stage."""
+    atomic_write_json(stage_dir / "manifest.json", manifest)
+
+
+def save_checkpoint(path: Path, state: Any) -> None:
+    """Save Python object checkpoint using pickle + atomic write."""
+    atomic_write_bytes(path, pickle.dumps(state))
+
+
+def load_checkpoint(path: Path) -> Any:
+    """Load pickled checkpoint object from disk."""
+    return pickle.loads(path.read_bytes())
+
+
+def save_openpose_results_parquet(path: Path, rows: list[dict[str, Any]]) -> None:
+    """Write preprocessing metadata table."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_parquet(path, pd.DataFrame(rows))
+
+
+def save_local_tracks_parquet(path: Path, rows: list[dict[str, Any]]) -> None:
+    """Write local track assignments table."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_parquet(path, pd.DataFrame(rows))
+
+
+def save_tracking_logs(path: Path, rows: list[dict[str, Any]]) -> None:
+    """Write tracking logs table when `save_log=True`."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_parquet(path, pd.DataFrame(rows))
+
+
+def save_tracks_similarity(*, nodes, sim: np.ndarray, output_path: Path) -> None:
+    """Persist global clustering similarity matrix and node index."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    nodes_arr = np.asarray(nodes, dtype=np.int32)  # shape (N, 2)
-
-    np.savez_compressed(
-        str(output_path),
-        sim=sim.astype(np.float32),
-        nodes=nodes_arr,
-    )
+    np.savez_compressed(str(output_path), sim=sim.astype(np.float32), nodes=np.asarray(nodes, dtype=np.int32))
 
 
-def _save_frame_debug_txt(*, debug_dir: Path, frame_idx: int, frame_log) -> None:
-    """Save textual matrix debug from tracking_debug.DebugLog buffer."""
-    if frame_log is None or not hasattr(frame_log, "buffer"):
-        return
-
-    lines = list(getattr(frame_log, "buffer", []) or [])
-    if not lines:
-        return
-
-    cfg_lines = format_used_config_lines(getattr(frame_log, "meta", {}).get("used_config", {}))
-    if cfg_lines:
-        lines.extend(["", *cfg_lines])
-
-    txt = "\n".join([f"FRAME {int(frame_idx):06d}", "=" * 80, "", *lines, "", "=" * 80])
-    (debug_dir / "tracking_debug.txt").write_text(txt, encoding="utf-8")
-
-
-def _save_frame_debug(*, frame_dir: Path, detections, tracker, log: dict) -> None:
-    debug_dir = frame_dir / "debug"
-    debug_dir.mkdir(parents=True, exist_ok=True)
-
-    matches = {int(det_idx): int(track_id) for track_id, det_idx in log.get("matches", [])}
-    global_matches = {int(det_idx): int(track_id) for track_id, det_idx in log.get("global_matches", [])}
-    tracks_by_id = {int(t.track_id): t for t in tracker.tracks}
-
-    _save_frame_debug_txt(
-        debug_dir=debug_dir,
-        frame_idx=int(log.get("frame_idx", -1)),
-        frame_log=log.get("frame_log", None),
-    )
-
-    for det_idx, det in enumerate(detections):
-        raw = det.meta.get("raw", {}) if isinstance(det.meta, dict) else {}
-        bbox = raw.get("bbox", None)
-        track_id = matches.get(det_idx)
-        global_track_id = global_matches.get(det_idx)
-        trk = tracks_by_id.get(track_id) if track_id is not None else None
-
-        rec: dict[str, Any] = {
-            "frame_idx": int(log.get("frame_idx", -1)),
-            "det_idx": int(det_idx),
-            "bbox_xyxy": list(map(float, bbox)) if bbox is not None else None,
-            "det_center": list(map(float, det.center)) if det.center is not None else None,
-
-            "max_overlap_iou": float(det.meta.get("max_overlap_iou", 0.0)),
-            "max_overlap_det_idx": det.meta.get("max_overlap_det_idx", None),
-            "is_overlapping": bool(det.meta.get("is_overlapping", False)),
-            "overlap_relations": det.meta.get("overlap_relations", []),
-
-            "has_e_app": bool(det.meta.get("e_app") is not None),
-            "e_app_error": det.meta.get("e_app_error", None) if isinstance(det.meta, dict) else None,
-            "matched_track_id": int(track_id) if track_id is not None else None,
-            "matched_global_track_id": int(global_track_id) if global_track_id is not None else None,
-            "track": None,
-        }
-
-        if trk is not None:
-            rec["track"] = {
-                "track_id": int(trk.track_id),
-                "confirmed": bool(trk.confirmed),
-                "age": int(trk.age),
-                "hits": int(trk.hits),
-                "time_since_update": int(trk.time_since_update),
-                "center": [float(x) for x in trk.pos()],
-                "state": np.asarray(trk.state, dtype=float).tolist(),
-                "last_det_center": [float(x) for x in trk.last_det_center] if trk.last_det_center is not None else None,
-                "previous_kps": None if trk.last_keypoints is None else np.asarray(trk.last_keypoints, dtype=float).tolist(),
-                "previous_kp_conf": None if trk.last_kp_conf is None else np.asarray(trk.last_kp_conf, dtype=float).tolist(),
-            }
-
-        rec["det"] = {
-            "center": _json_safe(det.center),
-            "keypoints": _json_safe(det.keypoints),
-            "kp_conf": _json_safe(det.kp_conf),
-        }
-
-        rec = _json_safe(rec)
-        (debug_dir / f"det_{det_idx:03d}.json").write_text(
-            json.dumps(rec, ensure_ascii=False, indent=2, allow_nan=False),
-            encoding="utf-8",
-        )
-
-
-def save_tracking_outputs(
-    *,
-    save_dir: Path,
-    frame_idx: int,
-    original_frame: np.ndarray,
-    processed_frame: np.ndarray,
-    local_processed_frame: np.ndarray | None,
-    detections,
-    log: dict,
-    conf_th: float,
-    tracker,
-) -> None:
-    frame_dir = Path(save_dir) / f"frame_{frame_idx:06d}"
-    frame_dir.mkdir(parents=True, exist_ok=True)
-
-    vis_path = frame_dir / "frame_vis.jpg"
-    if processed_frame is not None and not vis_path.exists():
-        cv2.imwrite(str(vis_path), processed_frame)
-
-    local_vis_path = frame_dir / "frame_local_vis.jpg"
-    if local_processed_frame is not None and not local_vis_path.exists():
-        cv2.imwrite(str(local_vis_path), local_processed_frame)
-
-    if bool(tracker.cfg.save_log):
-        from boxing_project.tracking.tracking_debug import GENERAL_LOG
-
-        (Path(save_dir) / "debug_log.txt").write_text("\n".join(GENERAL_LOG), encoding="utf-8")
-
-    _save_frame_extra(frame_dir=frame_dir, unprocessed_frame=original_frame, detections=detections)
-
-    if bool(tracker.cfg.debug):
-        debug_log = dict(log)
-        debug_log["frame_idx"] = int(frame_idx)
-        _save_frame_debug(frame_dir=frame_dir, detections=detections, tracker=tracker, log=debug_log)
-
-    for track_id, det_idx in log.get("matches", []):
-        if det_idx < 0 or det_idx >= len(detections):
-            continue
-
-        det = detections[det_idx]
-        raw = det.meta.get("raw", {})
-        _save_matched_det(
-            frame_dir=frame_dir,
-            track_id=int(track_id),
-            frame=original_frame,
-            bbox=raw.get("bbox", None),
-            keypoints=det.keypoints,
-            kp_conf=det.kp_conf,
-            conf_th=conf_th,
-        )
-
-
-def save_global_tracking_debug(
-    *,
-    save_dir: Path,
-    global_debug: dict,
-) -> None:
-    """
-    Save compact global tracking debug files:
-    - global_tracking_debug.json: structured data
-    - global_tracking_log.txt: short readable log
-    """
-    save_dir = Path(save_dir)
+def save_global_tracking_debug(*, save_dir: Path, global_debug: dict) -> None:
+    """Store optional compact global debug JSON."""
     save_dir.mkdir(parents=True, exist_ok=True)
-
-    global_debug = _json_safe(global_debug or {})
-    log_lines = global_debug.get("log_lines", []) or []
-
     (save_dir / "global_tracking_debug.json").write_text(
-        json.dumps(global_debug, ensure_ascii=False, indent=2, allow_nan=False),
-        encoding="utf-8",
-    )
-
-    (save_dir / "global_tracking_log.txt").write_text(
-        "\n".join(str(line) for line in log_lines) + "\n",
+        json.dumps(global_debug or {}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
 
 class FragmentExporter:
+    """Minimal fragment exporter for segment snapshots used by legacy workflows."""
+
     def __init__(self, base_dir: Path, min_hits: int):
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.min_hits = int(min_hits)
 
-        max_idx = 0
-        for p in self.base_dir.glob("fragment_*"):
-            m = re.match(r"fragment_(\d+)$", p.name)
-            if m:
-                max_idx = max(max_idx, int(m.group(1)))
-        self.fragment_idx = max_idx
-
-    def next_fragment(self) -> Path:
-        self.fragment_idx += 1
-        fragment_dir = self.base_dir / f"fragment_{self.fragment_idx}"
-        fragment_dir.mkdir(parents=True, exist_ok=True)
-        return fragment_dir
-
     def save_tracks(self, tracks, frame_idx: int) -> Path:
-        tracks = list(tracks or [])
-
-        track_rows = []
-
-        for trk in tracks:
-            track_id = int(getattr(trk, "track_id", -1))
-            hits = int(getattr(trk, "hits", 0))
-            min_hits = int(getattr(trk, "min_hits", self.min_hits))
-            confirmed = bool(getattr(trk, "confirmed", hits >= min_hits))
-
-            emb_history = list(getattr(trk, "app_emb_history", []) or [])
-
-            track_rows.append({
-                "local_track_id": track_id,
-                "confirmed": confirmed,
-                "hits": hits,
-                "min_hits": min_hits,
-                "age": int(getattr(trk, "age", 0)),
-                "time_since_update": int(getattr(trk, "time_since_update", 0)),
-                "has_embedding_history": bool(len(emb_history) > 0),
-                "embedding_history_len": int(len(emb_history)),
-            })
-
-        eligible = [
-            row for row in track_rows
-            if bool(row["confirmed"]) and bool(row["has_embedding_history"])
-        ]
-
-        fragment_dir = self.next_fragment()
-
-        manifest = {
-            "frame_idx": int(frame_idx),
-            "min_hits": int(self.min_hits),
-            "tracks_total": int(len(tracks)),
-            "tracks_eligible": int(len(eligible)),
-            "tracks_saved": int(len(eligible)),
-            "tracks": track_rows,
-        }
-
-        (fragment_dir / "fragment_info.json").write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2),
+        """Save a tiny fragment metadata record."""
+        output_path = self.base_dir / f"fragment_{frame_idx:06d}.json"
+        output_path.write_text(
+            json.dumps({"frame_idx": int(frame_idx), "tracks": len(list(tracks or []))}),
             encoding="utf-8",
         )
+        return output_path
 
-        return fragment_dir
+
+def save_tracking_outputs(**kwargs):
+    """Deprecated legacy API.
+
+    Raises:
+        RuntimeError: Always. Use staged saving stages instead.
+    """
+    raise RuntimeError("save_tracking_outputs is deprecated in staged pipeline. Use LocalDetSavingStage/GlobalSavingStage.")

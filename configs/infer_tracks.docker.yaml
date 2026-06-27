@@ -1,0 +1,70 @@
+openpose:
+  root: "/opt/openpose"
+  hand: false
+  face: false
+  net_resolution: "-1x256"
+  num_gpu: 1
+  num_gpu_start: 0
+  render_pose: 0
+  disable_blending: true
+  number_people_max: -1
+  disable_multi_thread: true
+
+data:
+  input_dir: "/data/input/video.mp4"
+  save_width: 800
+  save_dir: "/data/output/test"
+  video_frames_dir: "/data/output/.cache/video_frames"
+restore_mode: false
+save_log: true
+
+stages:
+  preprocessing: true
+  detection_preparation: true
+  local_tracking: true
+  local_det_saving: true
+  global_clustering: true
+  global_saving: true
+  dataset_export: true
+
+preprocessing:
+  batch_size: 256
+  checkpoint_every_frames: 100
+
+detection_preparation:
+  batch_size: 256
+
+local_tracking:
+  batch_size: 500
+  checkpoint_every_frames: 50
+
+local_det_saving:
+  batch_size: 700
+  save_matched_dets: true
+  save_unmatched_dets: true
+
+global_clustering:
+  checkpoint_every_tracks: 10
+
+global_saving:
+  batch_size: 700
+
+dataset_export:
+  video:
+    local:
+      enabled: true
+      fps: 25
+    global:
+      enabled: true
+      fps: 25
+
+progress:
+  enabled: true
+
+tracking:
+  config_path: "/app/configs/tracking.yaml"
+  birth_config_path: "/app/configs/birth_manager.yaml"
+  apperance_embedding_model_path: "/app/models/appearance.onnx"
+
+shot_boundary:
+  config_path: "/app/configs/shot_boundary.yaml"
