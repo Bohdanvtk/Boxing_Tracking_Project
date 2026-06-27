@@ -14,7 +14,9 @@ data:
   input_dir: "/data/input/video.mp4"
   save_width: 800
   save_dir: "/data/output/test"
-  video_frames_dir: "/data/output/.cache/video_frames"
+  # Ephemeral in-container cache: extracted frames live inside the container and
+  # vanish when it exits (--rm), so no .cache folder is left in the mounted output.
+  video_frames_dir: "/tmp/boxing_video_frames"
 restore_mode: false
 save_log: true
 
