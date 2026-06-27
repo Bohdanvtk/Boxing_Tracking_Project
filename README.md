@@ -315,155 +315,14 @@ When clustering quality is unsatisfactory, tune this value first.
 
 ## Appearance ReID Fine-Tuning
 
-The tracker uses an appearance embedding to compare the visual identity of a
-current detection with an existing track. The repository includes an optional
-training workflow that was used to fine-tune an OSNet-style encoder for boxing
-footage.
+The tracker compares boxers using an appearance embedding (an OSNet-style ONNX
+model). The repository includes an **optional** workflow to fine-tune that model
+on boxing footage — needed only when creating or improving the appearance model;
+normal inference simply uses an existing ONNX.
 
-This training workflow is separate from normal inference. It is needed only
-when creating or improving the appearance model; inference can use an existing
-ONNX model directly.
-
-### Training Dependencies
-
-Install the additional ReID training dependencies:
-
-```bash
-python -m pip install -r requirements-reid.txt
-```
-
-These dependencies include PyTorch, Torchvision, Torchreid, ONNX, and the
-supporting training libraries. They are kept separate because they are much
-heavier than the normal result-processing dependencies.
-
-### Pair Dataset Format
-
-Training uses labelled image pairs:
-
-```text
-dataset_root/
-├── A/
-│   ├── 000001__pos_easy__w_100.jpg
-│   └── 000002__neg_hard__w_280.jpg
-├── B/
-│   ├── 000001__pos_easy__w_100.jpg
-│   └── 000002__neg_hard__w_280.jpg
-└── Label/
-    ├── 000001.txt
-    └── 000002.txt
-```
-
-The numeric prefix is the pair identifier and must match across `A`, `B`, and
-`Label`.
-
-Labels have the following meaning:
-
-```text
-1 = the two crops show the same boxer
-0 = the two crops show different boxers
-```
-
-An optional filename suffix such as `__w_280` assigns a sample weight of `2.80`.
-When no weight suffix is present, the default sample weight is `1.0`.
-
-### Fine-Tuning OSNet
-
-Example training command:
-
-```bash
-python scripts/train_reid_osnet_siamese.py \
-  --train_roots data/reid/train_stage_1 data/reid/train_stage_2 \
-  --val_root data/reid/validation \
-  --model_name osnet_x0_5 \
-  --batch_size 32 \
-  --epochs_per_stage 20 \
-  --lr 1e-4 \
-  --out_dir artifacts/reid/osnet_x0_5
-```
-
-Each path passed to `--train_roots` is processed as a training stage. This makes
-it possible to organise progressively harder or differently balanced pair
-sets without mixing every sample into one directory.
-
-The training script:
-
-- resizes crops to the ReID input size of `256 × 128`;
-- builds a shared Siamese appearance encoder;
-- produces L2-normalised embeddings;
-- minimises contrastive loss on positive and negative boxer pairs;
-- supports per-pair sample weighting;
-- applies validation-based learning-rate reduction and early stopping;
-- stores stage checkpoints and a combined training history.
-
-Typical outputs are:
-
-```text
-artifacts/reid/osnet_x0_5/
-├── stage_01/
-│   ├── best.pth
-│   ├── last.pth
-│   └── epoch_...pth
-├── stage_02/
-│   └── ...
-├── final.pth
-└── history.json
-```
-
-### Resuming Training
-
-Training can continue from an existing stage checkpoint:
-
-```bash
-python scripts/train_reid_osnet_siamese.py \
-  --train_roots data/reid/train_stage_1 data/reid/train_stage_2 \
-  --val_root data/reid/validation \
-  --model_name osnet_x0_5 \
-  --resume_weights artifacts/reid/osnet_x0_5/stage_01/last.pth \
-  --out_dir artifacts/reid/osnet_x0_5
-```
-
-The script determines the next epoch from the checkpoint directory and
-continues inside the existing run directory.
-
-### ONNX Export and Runtime Use
-
-The tracker runtime consumes an ONNX appearance model. A PyTorch checkpoint
-must therefore be exported before it is referenced by inference.
-
-The export model architecture must be exactly the same as the architecture
-used during training. The model name, projection head, input shape, and
-checkpoint state dictionary must agree; otherwise strict checkpoint loading or
-runtime embeddings will be invalid.
-
-The repository includes:
-
-```text
-scripts/export_reid_onnx.py
-```
-
-At the current revision, that script constructs a fixed `TransReID`
-configuration internally. An OSNet checkpoint trained with
-`--model_name osnet_x0_5` must not be presented as safely exportable through
-that fixed configuration. Before using the exporter for OSNet, make the export
-script accept `--model_name` and construct the same `SiameseConfig` that was
-used for training.
-
-After a compatible ONNX model has been produced, set its path in:
-
-```yaml
-tracking:
-  apperance_embedding_model_path: "artifacts/models/appearance/osnet_boxing.onnx"
-```
-
-inside `configs/infer_tracks.yaml`.
-
-This separation is deliberate:
-
-```text
-ReID training     learns boxing-specific appearance embeddings
-ONNX export       converts the trained encoder for deployment
-tracking inference uses the exported embeddings as one identity cue
-```
+See the dedicated **[Appearance ReID fine-tuning guide](README_REID_TRAINING.md)**
+for the training dependencies, the pair-dataset format, training/resuming
+commands and ONNX export.
 
 ## Dataset Output
 
@@ -544,14 +403,38 @@ quickly-made helpers that just make it easier to look at the output.
 - **standard** (`jj.py`) — more detailed; best for short clips;
 - **small** (`jj_small.py`) — faster, with fewer features; best for long videos.
 
-Each one opens a finished pipeline output folder (the `.../test` directory) and
-renders the tracks. They rely on PySide6, OpenCV, pandas, pyarrow and NumPy;
-dependency versions are intentionally not pinned and setup can be finicky, so
-treat them as experimental and provided as-is. Expect rough edges — they can be
-unstable, and the standard viewer in particular may take a while to load on
-larger outputs.
+Both are single-file PySide6 (Qt) desktop apps. On launch they open a file
+dialog; point them at a **finished pipeline output folder** — the `.../test`
+directory that holds `preprocessed/`, `local_tracking/`, `global_clustering/`
+and `dataset/` — and they render the tracks frame by frame, so you can step
+through detections, local IDs and recovered global identities to sanity-check a
+run. The standard build (`jj.py`) draws more per-frame detail and is comfortable
+on short clips; the small build (`jj_small.py`) trims features for speed and is
+the one to use on long videos.
 
-Download them from the [latest release](https://github.com/Bohdanvtk/Boxing_Tracking_Project/releases/latest).
+### Running a viewer
+
+Download the bundle from the [latest release](https://github.com/Bohdanvtk/Boxing_Tracking_Project/releases/latest)
+(`boxing-tracking-viewers.zip`), unzip it, then run either script with a Python
+that has the dependencies installed:
+
+```bash
+python jj.py          # standard, detailed — short clips
+python jj_small.py    # small, faster — long videos
+```
+
+The scripts already force software rendering internally, so a plain `python …`
+is usually enough. If the window fails to open on some Linux/GPU setups, run it
+through the X11 platform plugin instead:
+
+```bash
+QT_QPA_PLATFORM=xcb python jj_small.py
+```
+
+They rely on **PySide6, OpenCV, pandas, pyarrow and NumPy**. Dependency versions
+are intentionally not pinned, so the environment setup can be finicky — treat
+these viewers as experimental, provided as-is: they can be unstable, and the
+standard one in particular may take a while to load on larger outputs.
 
 ## Current Limitations
 
