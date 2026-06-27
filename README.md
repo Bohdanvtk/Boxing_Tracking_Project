@@ -532,6 +532,22 @@ segment.detection_mask.shape    # (20,)
 A selection that spans several boxers is split with `selection.segments()`,
 which returns a `SegmentCollection` keyed by global id.
 
+## Optional Result Viewers (experimental)
+
+Two small desktop GUIs are available to visually inspect the tracking results.
+They are **auxiliary debug tools, not part of the core pipeline** — rough,
+quickly-made helpers that just make it easier to look at the output.
+
+- **standard** (`jj.py`) — more detailed; best for short clips;
+- **small** (`jj_small.py`) — faster, with fewer features; best for long videos.
+
+Each one opens a finished pipeline output folder (the `.../test` directory) and
+renders the tracks. They rely on PySide6, OpenCV, pandas, pyarrow and NumPy;
+dependency versions are intentionally not pinned and setup can be finicky, so
+treat them as experimental and provided as-is.
+
+Download them from the [latest release](https://github.com/Bohdanvtk/Boxing_Tracking_Project/releases/latest).
+
 ## Current Limitations
 
 - difficult long overlaps can still cause identity errors;
