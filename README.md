@@ -16,6 +16,13 @@ This project was built to solve a practical problem in boxing analysis: before y
   <sub>full local-ID and global-ID runs in higher quality — click the preview above or this link</sub>
 </p>
 
+## Project Status
+
+This repository is released as a **complete research prototype**. It is **not
+under active development**, and no further features are planned in the near
+future — the code, the published Docker image and the demos are provided as-is.
+The *Possible Future Directions* at the end are ideas, not committed work.
+
 ## Why This Project Exists
 
 Pose detectors can find people and keypoints on individual frames, but they do not reliably preserve identity over time.
@@ -443,7 +450,10 @@ standard one in particular may take a while to load on larger outputs.
 - some global matches remain ambiguous after severe viewpoint changes;
 - the current implementation is a research-oriented engineering prototype.
 
-## Future Work
+## Possible Future Directions
+
+The project is complete and not under active development; the items below are
+**ideas, not planned work**:
 
 - improve the public inference API;
 - make ReID ONNX export architecture-configurable and checkpoint-safe;
