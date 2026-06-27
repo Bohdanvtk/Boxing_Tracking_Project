@@ -91,4 +91,18 @@ fi
 
 RUN_ARGS+=("$IMAGE")
 
-"${DOCKER[@]}" "${RUN_ARGS[@]}"
+# Run the pipeline. Capture the exit code so the cleanup below still runs even
+# though `set -e` is active and the container may exit non-zero.
+rc=0
+"${DOCKER[@]}" "${RUN_ARGS[@]}" || rc=$?
+
+# The pipeline extracts video frames into <output>/.cache to speed up OpenPose,
+# but they are not needed once it finishes. Remove the cache so the output
+# directory keeps only the actual results. The path guard avoids ever running
+# rm on an empty/unset OUTPUT.
+if [[ -n "$OUTPUT" && -d "$OUTPUT/.cache" ]]; then
+  echo "Cleaning up frame cache: $OUTPUT/.cache"
+  rm -rf "$OUTPUT/.cache"
+fi
+
+exit "$rc"
