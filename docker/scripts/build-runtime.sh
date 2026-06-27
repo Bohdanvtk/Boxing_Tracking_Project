@@ -8,7 +8,12 @@ set -euo pipefail
 #   build-runtime.sh development -> builds only: boxing-tracking:runtime-dev
 #   build-runtime.sh release     -> builds only: boxing-tracking:runtime
 #
-# Env overrides: CUDA_ARCH_BIN (default 89), DEV_IMAGE, RELEASE_IMAGE.
+# Env overrides: CUDA_ARCH_BIN (default 89), CUDA_ARCH_PTX (default empty),
+# DEV_IMAGE, RELEASE_IMAGE.
+#
+# NOTE: OpenPose's bundled Caffe only builds SASS for the first CUDA_ARCH_BIN
+# value, so list the GPU you run on first and set CUDA_ARCH_PTX to the lowest
+# supported arch (e.g. 75) so the driver can JIT for other GPUs at run time.
 
 if docker info >/dev/null 2>&1; then
   DOCKER=(docker)
@@ -18,6 +23,7 @@ fi
 
 MODE="${1:-all}"
 CUDA_ARCH_BIN="${CUDA_ARCH_BIN:-89}"
+CUDA_ARCH_PTX="${CUDA_ARCH_PTX:-}"
 DEV_IMAGE="${DEV_IMAGE:-boxing-tracking:runtime-dev}"
 RELEASE_IMAGE="${RELEASE_IMAGE:-boxing-tracking:runtime}"
 
@@ -27,12 +33,13 @@ cd "$REPO_ROOT"
 
 build_target() {
   local target="$1" image="$2"
-  printf '\n=== Building target: %s -> %s (CUDA_ARCH_BIN=%s) ===\n' \
-    "$target" "$image" "$CUDA_ARCH_BIN"
+  printf '\n=== Building target: %s -> %s (CUDA_ARCH_BIN=%s CUDA_ARCH_PTX=%s) ===\n' \
+    "$target" "$image" "$CUDA_ARCH_BIN" "$CUDA_ARCH_PTX"
   "${DOCKER[@]}" build \
     --progress=plain \
     --target "$target" \
     --build-arg "CUDA_ARCH_BIN=$CUDA_ARCH_BIN" \
+    --build-arg "CUDA_ARCH_PTX=$CUDA_ARCH_PTX" \
     -f docker/Dockerfile.runtime \
     -t "$image" \
     .

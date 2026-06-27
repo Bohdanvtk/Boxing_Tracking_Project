@@ -9,9 +9,15 @@ FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04 AS openpose-builder
 ARG DEBIAN_FRONTEND=noninteractive
 ARG OPENPOSE_COMMIT=5c5d96523ef917bd30301245fdc8343937cae48d
 ARG CAFFE_COMMIT=1807aadafc934a2a1341021620981cb1ec526b83
-# Default is the RTX 4060 GPU architecture (89). Override during build when
-# producing a more portable public image, for example: "75;80;86;89".
+# Native SASS architectures. Default is the RTX 4060 (89). Override when building
+# a more portable image, for example: "89;86;80;75".
+# IMPORTANT: OpenPose's bundled Caffe only compiles SASS for the FIRST value in
+# this list, so keep the GPU you build/run on first. CUDA_ARCH_PTX below adds a
+# forward-compatible PTX fallback that the driver JIT-compiles for other GPUs.
 ARG CUDA_ARCH_BIN=89
+# Virtual arch emitted as PTX for runtime JIT on GPUs without native SASS. Set to
+# the lowest supported arch (e.g. 75) for broad forward compatibility.
+ARG CUDA_ARCH_PTX=""
 # Pinned because the prebuilt pyopenpose .so is ABI-locked to this NumPy.
 ARG OPENPOSE_NUMPY=1.23.5
 
@@ -70,7 +76,7 @@ RUN cmake \
       -DPYTHON_LIBRARY=/usr/lib/x86_64-linux-gnu/libpython3.10.so \
       -DCUDA_ARCH=Manual \
       -DCUDA_ARCH_BIN="${CUDA_ARCH_BIN}" \
-      -DCUDA_ARCH_PTX="" \
+      -DCUDA_ARCH_PTX="${CUDA_ARCH_PTX}" \
       -DDOWNLOAD_BODY_25_MODEL=OFF \
       -DDOWNLOAD_FACE_MODEL=OFF \
       -DDOWNLOAD_HAND_MODEL=OFF \

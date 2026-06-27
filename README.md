@@ -282,6 +282,29 @@ The inference pipeline is organised into seven stages:
 Stages can be enabled or disabled in `configs/infer_tracks.yaml`. Later stages
 depend on the outputs of the earlier stages they consume.
 
+### Tuning global clustering quality
+
+If the global identities are not grouped the way you expect (boxers split into
+too many IDs, or different boxers merged into one), the single most important
+knob is:
+
+```yaml
+# configs/tracking.yaml
+tracking:
+  graph_clustering:
+    pair_threshold: 0.76   # how similar two tracks must be to share a global ID
+```
+
+`pair_threshold` is the minimum appearance similarity required between *every*
+pair of tracks before they are merged into one global boxer identity:
+
+- **raise it** (e.g. `0.80`) to be stricter — fewer wrong merges, but the same
+  boxer may be split into several global IDs;
+- **lower it** (e.g. `0.70`) to be more permissive — more fragments get merged,
+  but at a higher risk of merging two different boxers.
+
+When clustering quality is unsatisfactory, tune this value first.
+
 ## Appearance ReID Fine-Tuning
 
 The tracker uses an appearance embedding to compare the visual identity of a

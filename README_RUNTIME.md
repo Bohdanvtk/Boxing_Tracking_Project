@@ -117,16 +117,27 @@ model; `release` produces the final, publishable image.
 ### GPU portability (multi-arch)
 
 The default build targets only the local RTX 4060 (`sm_89`). For a portable
-public image, build for several architectures:
+public image, build for several architectures and add a PTX fallback:
 
 ```bash
-CUDA_ARCH_BIN='75;80;86;89' docker/scripts/build-runtime.sh release
+CUDA_ARCH_BIN='89;86;80;75' CUDA_ARCH_PTX='75' docker/scripts/build-runtime.sh release
 ```
 
-This is exactly how the **published** image is produced. It lengthens the
-OpenPose compile and enlarges the image slightly, but lets the same image run on
-Turing → Ada GPUs and the A100. This setting affects only the OpenPose
-compilation; everything else is identical.
+This is exactly how the **published** image is produced, and it lets the same
+image run on Turing → Ada GPUs and the A100.
+
+Why the specific order and the PTX value matter:
+
+- OpenPose's bundled **Caffe only compiles native code for the FIRST**
+  `CUDA_ARCH_BIN` value, so the GPU you actually run on must be listed first
+  (here `89` for the RTX 4060). Listing it later silently produces an image that
+  fails at run time with `no kernel image is available for execution on the device`.
+- `CUDA_ARCH_PTX='75'` embeds forward-compatible PTX that the driver
+  JIT-compiles for any GPU with compute capability ≥ 7.5 (Turing and newer),
+  which is how other GPUs are supported from a single build.
+
+This setting only affects the OpenPose/Caffe compilation; everything else is
+identical.
 
 ### Test
 
@@ -196,7 +207,7 @@ The release image is pushed manually from a machine that has it built locally.
 1. **Build the multi-arch release** (see above):
 
    ```bash
-   CUDA_ARCH_BIN='75;80;86;89' docker/scripts/build-runtime.sh release
+   CUDA_ARCH_BIN='89;86;80;75' CUDA_ARCH_PTX='75' docker/scripts/build-runtime.sh release
    ```
 
 2. **Authenticate to GHCR** with a Personal Access Token that has the
