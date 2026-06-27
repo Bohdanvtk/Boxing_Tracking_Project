@@ -403,6 +403,13 @@ which returns a `SegmentCollection` keyed by global id.
 
 ## Optional Result Viewers (experimental)
 
+<p align="center">
+  <img src="assets/readme/debugger_viewer.png" alt="Result viewer — per-frame inspection of detections, local IDs and global identities" width="900" />
+</p>
+<p align="center">
+  <sub>Step through every frame and inspect detections, matching decisions, local IDs and recovered global identities.</sub>
+</p>
+
 Two small desktop GUIs are available to visually inspect the tracking results.
 They are **auxiliary debug tools, not part of the core pipeline** — rough,
 quickly-made helpers that just make it easier to look at the output.
