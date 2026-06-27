@@ -6,7 +6,7 @@ from typing import Union, Tuple
 
 
 def _q_block(dt: float, var: float) -> np.ndarray:
-    """1D constant-acceleration Q-блок для [pos, vel]."""
+    """1D constant-acceleration Q block for [pos, vel]."""
     dt2 = dt * dt
     dt3 = dt2 * dt
     dt4 = dt3 * dt
@@ -21,9 +21,9 @@ def _q_block(dt: float, var: float) -> np.ndarray:
 
 def _ensure_state(x0: Union[np.ndarray, list, tuple]) -> np.ndarray:
     """
-    Приводимо початковий стан до (4,1): [x, y, vx, vy]^T.
+    Convert the initial state to shape (4, 1): [x, y, vx, vy]^T.
 
-    Дозволено:
+    Accepted inputs:
       - [x, y]
       - [x, y, vx, vy]
     """
@@ -36,7 +36,7 @@ def _ensure_state(x0: Union[np.ndarray, list, tuple]) -> np.ndarray:
 
 
 def _ensure_measurement(z: Union[np.ndarray, list, tuple]) -> np.ndarray:
-    """Приводимо вимір до (2,1): [x, y]^T."""
+    """Convert a measurement to shape (2, 1): [x, y]^T."""
     z = np.asarray(z, dtype=float).reshape(-1)
     if z.size != 2:
         raise ValueError("Measurement z must have length 2: [x, y]")
@@ -45,10 +45,10 @@ def _ensure_measurement(z: Union[np.ndarray, list, tuple]) -> np.ndarray:
 
 class KalmanTracker:
     """
-    Проста 2D Kalman-модель з постійною швидкістю.
+    Simple 2D constant-velocity Kalman model.
 
-    Стан:        [x, y, vx, vy]^T
-    Вимір:       [x, y]^T
+    State:       [x, y, vx, vy]^T
+    Measurement: [x, y]^T
     """
 
     def __init__(
@@ -59,14 +59,14 @@ class KalmanTracker:
         measure_var: float,
         p0: float,
     ):
-        # нормалізуємо початковий стан
+        # Normalize the initial state.
         x0 = _ensure_state(x0)
         self.dt = float(dt)
 
-        # внутрішній KalmanFilter з filterpy
+        # Internal filterpy KalmanFilter.
         self.kf = KalmanFilter(dim_x=4, dim_z=2)
 
-        # Матриця переходу стану (constant velocity)
+        # Constant-velocity state transition matrix.
         self.kf.F = np.array(
             [
                 [1.0, 0.0, self.dt, 0.0],
@@ -77,7 +77,7 @@ class KalmanTracker:
             dtype=float,
         )
 
-        # Вимірюємо тільки позицію (x, y)
+        # Measure position only.
         self.kf.H = np.array(
             [
                 [1.0, 0.0, 0.0, 0.0],
@@ -86,10 +86,10 @@ class KalmanTracker:
             dtype=float,
         )
 
-        # Коваріація вимірювального шуму
+        # Measurement noise covariance.
         self.kf.R = float(measure_var) * np.eye(2, dtype=float)
 
-        # Процесний шум (constant acceleration у x,y)
+        # Process noise from a constant-acceleration model.
         Q_cv = np.block(
             [
                 [_q_block(self.dt, process_var), np.zeros((2, 2))],
@@ -97,7 +97,7 @@ class KalmanTracker:
             ]
         )
 
-        # Перестановка під порядок стану [x, y, vx, vy]
+        # Reorder to the [x, y, vx, vy] state layout.
         Pperm = np.array(
             [
                 [1, 0, 0, 0],  # x
@@ -109,44 +109,44 @@ class KalmanTracker:
         )
         self.kf.Q = Pperm @ Q_cv @ Pperm.T
 
-        # Початковий стан і коваріація
+        # Initial state and covariance.
         self.kf.x = x0
         self.kf.P = np.eye(4, dtype=float) * float(p0)
 
-    # -------- основний API --------
+    # -------- public API --------
 
     def predict(self) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Прогноз на один крок.
+        Predict one step ahead.
 
-        Повертає:
+        Returns:
           state: (4,) [x, y, vx, vy]
-          cov:   (4,4) P
+          cov:   (4, 4) covariance matrix
         """
         self.kf.predict()
         return self.get_state(), self.get_cov()
 
     def update(self, z: Union[np.ndarray, list, tuple]) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Оновлення за новим виміром z = [x, y].
+        Update the filter with a new measurement z = [x, y].
 
-        Повертає:
-          state: (4,) оновлений стан
-          cov:   (4,4) P
+        Returns:
+          state: (4,) updated state
+          cov:   (4, 4) covariance matrix
         """
         z_norm = _ensure_measurement(z)
         self.kf.update(z_norm)
         return self.get_state(), self.get_cov()
 
-    # -------- допоміжні методи --------
+    # -------- helper methods --------
 
     def project(self) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Проєкція поточного стану в простір вимірювань.
+        Project the current state into measurement space.
 
-        Повертає:
-          z_hat: (2,1) прогнозований вимір
-          S:     (2,2) коваріація інновації
+        Returns:
+          z_hat: (2, 1) predicted measurement
+          S:     (2, 2) innovation covariance
         """
         H = self.kf.H
         x = self.kf.x
@@ -157,12 +157,12 @@ class KalmanTracker:
 
     def gating_distance(self, z: Union[np.ndarray, list, tuple]) -> float:
         """
-        Махаланобісова відстань^2 між виміром z та прогнозом.
-        Використовується для χ²-gating.
+        Squared Mahalanobis distance between measurement and prediction.
+        Used for chi-square gating.
         """
         z = _ensure_measurement(z)
         z_hat, S = self.project()
-        r = z - z_hat  # інновація
+        r = z - z_hat  # innovation
 
         try:
             S_inv = np.linalg.inv(S)
@@ -178,11 +178,11 @@ class KalmanTracker:
         self.kf.P = np.eye(4, dtype=float) * float(p0)
 
     def get_state(self) -> np.ndarray:
-        """Поточний стан як (4,) [x, y, vx, vy]."""
+        """Return the current state as (4,) [x, y, vx, vy]."""
         return self.kf.x.reshape(-1).copy()
 
     def get_cov(self) -> np.ndarray:
-        """Поточна коваріація (4x4)."""
+        """Return the current covariance matrix (4x4)."""
         return self.kf.P.copy()
 
     @property

@@ -1,0 +1,10 @@
+-r requirements.txt
+
+torch
+torchvision
+torchreid
+onnx
+timm
+tensorboard
+yacs
+gdown

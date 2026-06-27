@@ -1,36 +1,126 @@
 tracking:
-  debug: true                 # Enable console debug output (cost matrix, per-pair breakdown)
-  save_log: true              # Save debug logs to disk (only works if debug=true)
-  fps: 30                     # Video FPS (used for time-related interpretations)
+  debug: true                 # Enable console debug output
+  save_log: true              # Save debug logs to disk
+  fps: 30                     # Video FPS
+  overlap_log_threshold: 0.001   # IoU threshold used only for debug/logging overlap state
+    # If detection IoU with another detection >= this value,
+    # it is marked as overlapping in logs/meta when overlap_mechanism is bbox_iou.
+  skeleton_overlap_threshold: 0.08
+  skeleton_overlap_full_weight: 0.35
+  skeleton_overlap_core_weight: 0.65
+  skeleton_overlap_conf_threshold: 0.009
+  skeleton_overlap_thickness: 7
+
+
+  adaptive_overlap_iou_near: 0.003
+  # Overlap threshold when two stable tracks are very close by center distance.
+  # Very strict: any skeleton overlap is treated as risky.
+
+  adaptive_overlap_iou_mid: 0.005
+  # Overlap threshold when two stable tracks are medium-close.
+  # Still almost any skeleton overlap is risky.
+
+  adaptive_overlap_iou_far: 0.007
+  # Overlap threshold when two stable tracks are far-but-still-relevant.
+  # Requires stronger skeleton overlap to be treated as risky.
+
+  adaptive_overlap_iou_default: 0.008
+  # Fallback threshold.
+  # Used when tracks are not stable yet, or when center distance is farther than adaptive_overlap_center_far.
+
+  adaptive_overlap_center_near: 0.55
+  # If normalized center distance cdn <= 0.55,
+  # use adaptive_overlap_iou_near.
+
+  adaptive_overlap_center_mid: 0.85
+  # If 0.55 < cdn <= 0.85,
+  # use adaptive_overlap_iou_mid.
+
+  adaptive_overlap_center_far: 1.20
+    # If 0.85 < cdn <= 1.20,
+  # use adaptive_overlap_iou_far.
+  # If cdn > 1.20, use adaptive_overlap_iou_default.
+  overlap_app_freeze_after: 13
+    # Source-based cooldown length.
+    # If Track M disappears immediately after overlap with Track N,
+    # Track N freezes appearance until Track M matches again or this counter reaches 0.
 
   kalman:
-    process_var: 1e6        # Process noise variance (acceleration noise).
-                              # Higher → Kalman trusts predictions less, adapts faster
-    measure_var: 2000       # Measurement noise variance (detection noise).
-                              # Higher → Kalman trusts detections less
-    p0: 1000.0                # Initial covariance for new tracks or Kalman reset.
-                              # Higher → more uncertainty, easier re-alignment
+    process_var: 1e7          # Process noise variance
+                              # Higher -> less trust in prediction, faster adaptation
+    measure_var: 5000         # Measurement noise variance
+                              # Higher -> less trust in detections
+    p0: 1000.0                # Initial covariance
+                              # Higher -> more uncertainty for new tracks
 
   matching:
-    alpha: 0.8                # (Legacy/optional) blending factor if pose/motion are mixed elsewhere
-    chi2_gating: 9.21         # Chi-square gating threshold for Kalman distance.
-                              # Lower → stricter gating, fewer candidates
-    pose_scale_eps: 1.0e-6    # Small epsilon to avoid division by zero in pose normalization
-    greedy_threshold: 1.6     # Cost threshold for accepting matches in normal mode
-    greedy_reset_threshold: 0.002026  # Stricter threshold used in reset_mode (appearance-only matching)
-    emb_ema_alpha: 0.9        # Ema param which corresponds to speed of acquisition of a new information
-    bad_kp_patience: 50         # how much time algorithm should wait to update ema, kalman and pose
-    large_cost: 880.0         # Sentinel value for invalid / gated-out matches
-    min_kp_conf: 0.05         # Minimum confidence for a keypoint to be considered valid
+    alpha: 0.8                # Legacy / optional blending parameter
+    chi2_gating: 9.21         # Chi-square gating threshold
+                              # Lower -> stricter motion gate
+    pose_scale_eps: 1.0e-6    # Small epsilon for pose-related normalization
+    greedy_threshold: 4.1     # Max final cost accepted by greedy matcher
+    max_update_cost: 1.2      # Max absolute raw weighted cost allowed for Track update
+    max_update_motion: 0.08  # If d_motion is above this, skip Kalman/motion update
+    max_update_pose: 0.25    # If d_pose is above this, skip pose memory update
+    max_update_app: 0.06     # Strict direct EMA update threshold for current detection.
+    # ----------------------------------------------------------------------
+    # Appearance EMA recovery buffer
+    # ----------------------------------------------------------------------
+    app_buffer_upper: 0.12   # Base upper d_app limit for putting embeddings into recovery buffer.
+    app_buffer_hard_upper: 0.18  # Maximum relaxed d_app limit; above this embeddings are never buffered.
+    app_buffer_relax_tau: 8  # How fast app_buffer_upper relaxes toward hard_upper as app_stale_frames grows.
+    app_buffer_min_size: 3   # Accepted recovery embeddings needed before batch EMA recovery update.
+    app_buffer_max_motion: 0.08  # Required motion quality gate for recovery buffer entry.
+    app_buffer_max_pose: 0.25    # Required pose quality gate for recovery buffer entry.
+    app_buffer_min_coverage: 0.70  # Minimum appearance crop coverage required for buffer entry.
+    app_buffer_recovery_ema_alpha: 0.97  # Old-EMA weight for recovery batch update; high value keeps it cautious.
+    app_buffer_clear_on_overlap: true       # Clear recovery buffer when overlap-based reject occurs.
+    app_buffer_clear_on_freeze: true        # Clear recovery buffer when freeze-based reject occurs.
+    app_buffer_clear_on_hard_reject: true   # Clear recovery buffer when d_app exceeds hard upper threshold.
+    app_buffer_clear_on_strict_update: true # Clear recovery buffer after successful strict appearance update.
+    app_buffer_clear_on_safety_fail: true   # Clear recovery buffer when motion/pose/coverage safety gates fail.
+    missing_app_penalty: 0.08 # Small cost penalty for missing/unknown appearance parts
 
-    w_motion: 3.0             # Weight of motion (Kalman distance) in total cost
-    w_pose: 5                 # Weight of pose similarity in total cost
-    w_app: 10.0               # Weight of appearance similarity (highest → most important)
+    # During overlap, boost appearance importance in matching cost.
+    # 1.0 disables the boost; values >1.0 make appearance stronger.
+    overlap_app_cost_boost: 4.0
+
+    motion_threshold: 0.09    # Max allowed normalized motion distance
+                              # Above this -> reject pair
+    pose_threshold: 0.4       # Max allowed pose distance
+                              # Above this -> reject pair
+    appearance_threshold: 0.12 # Max allowed appearance distance
+                              # Above this -> reject pair
+
+    emb_ema_alpha: 0.9      # Weight of OLD appearance EMA.
+                              # Higher -> slower update, more stable memory.
+                              # Lower -> faster update, more aggressive replacement.
+    bad_kp_patience: 50       # Frames to wait before updating from bad keypoints
+    large_cost: 880.0         # Sentinel cost for invalid / gated pairs
+    min_kp_conf: 0.05         # Minimum keypoint confidence
+
+    w_motion: 3.0             # Weight of relative motion penalty
+    w_pose: 1.0               # Weight of relative pose penalty
+    w_app: 2.0                # Weight of relative appearance penalty
+
+    k_motion: 3.0             # Relative saturation ratio for motion
+                              # 3x worse than best -> near max penalty
+    k_pose: 3.0               # Relative saturation ratio for pose
+                              # 3x worse than best -> near max penalty
+    k_app: 3.0                # Relative saturation ratio for appearance
+                              # 3x worse than best -> near max penalty
 
 
-    min_core_kps: 7           # How many of kps points should be in det to consider it good for matching
+    miss_relax_full_after: 20
+    miss_relax_strength: 2.0
 
-    pose_core:                # BODY_25 keypoint indices used for pose comparison
+    min_core_kps: 7           # Backward-compatible fallback for core keypoint requirements
+    # Minimum core keypoints for pose memory update on matched tracks.
+    min_core_kps_update: 5
+    # Minimum core keypoints for appearance initialization/update on new tracks.
+    min_core_kps_create_track: 7
+
+    pose_core:                # BODY_25 joints used for pose comparison
       - 1   # Neck
       - 2   # Right Shoulder
       - 3   # Right Elbow
@@ -42,19 +132,55 @@ tracking:
       - 12  # Left Hip
       - 13  # Left Knee
 
-
-    pose_center:      # BODY_25 keypoints used for pose centering (priority order)
-      - 8    # MidHip        (primary root, most stable)
-      - 1    # Neck          (fallback if MidHip is missing)
-      - 9    # Right Hip     (pelvis fallback)
-      - 12   # Left Hip      (pelvis fallback)
-      - 2    # Right Shoulder
-      - 5    # Left Shoulder
+    pose_center:              # BODY_25 joints used as centering roots (priority order)
+      - 8   # MidHip
+      - 1   # Neck
+      - 9   # Right Hip
+      - 12  # Left Hip
+      - 2   # Right Shoulder
+      - 5   # Left Shoulder
 
   tracker:
-    max_age: 25               # How many frames a track can survive without matching
-    post_reset_max_age: 100   # How many frames a track can survive without matching in post_reset_mode
-    min_hits: 200             # Number of successful matches required to confirm a track
-    min_kp_conf: 0.05         # Minimum keypoint confidence when updating track pose
-    reset_g_threshold: 0.32    # If g < this value → reset_mode is activated
-                              # (ignore motion & pose, match only by appearance)
+    max_age: 10                # Max missed frames for unconfirmed track
+    max_confirmed_age: 30     # Max missed frames for confirmed track
+    min_hits: 30              # Matches needed to confirm a track
+    min_hits_sub: 4          # Matches needed for sub-confirmed adaptive overlap
+    min_kp_conf: 0.009         # Minimum keypoint confidence for track update
+    reset_g_threshold: 0.32   # If g < threshold -> activate reset mode
+    max_unconfirmed_tracks: 3  # Max number of active unconfirmed tracks (confirmed tracks are never pruned)
+    # During risky overlap, weakly interpolate detection center into Kalman update.
+    # 0.0 ignores detection center; 1.0 uses normal full update.
+    overlap_motion_alpha: 0.25
+    w_body: 1.0               # Weight of body appearance features in fused e_app
+    w_left_glove: 0.25         # Weight of left glove features in fused e_app
+    w_right_glove: 0.25        # Weight of right glove features in fused e_app
+    w_shorts: 0.5           # Weight of shorts features in fused e_app
+
+  graph_clustering:
+    method: pairwise_clique        # Global ID grouping strategy. Uses strict pairwise similarity groups.
+
+    # Track eligibility
+    confirmed_only: true           # Use only confirmed local tracks for global grouping.
+    min_track_history: 5           # Minimum number of accepted appearance embeddings required for a track.
+
+    # Pairwise clique grouping
+    pair_threshold: 0.76          # Every pair inside a valid global group must have similarity >= this value.
+    min_group_size: 3              # Minimum number of tracks required to create a global ID.
+
+    # Same-epoch behavior
+    allow_same_epoch_in_group: true
+    # false -> one global group cannot contain two tracks from the same epoch.
+    # true  -> same-epoch tracks may be grouped if all pairwise checks pass.
+
+    # The strict clique rule already checks every pair inside a group.
+    # Therefore no extra group-mean/member-mean or KNN filtering is needed.
+
+    # Unknown handling
+    assign_unknown: false          # If false, uncertain tracks are excluded from local_to_global.parquet.
+    unknown_global_id: 880         # Used only when assign_unknown is true.
+
+    # Debug
+    max_debug_edges: 200           # Maximum number of accepted/rejected edge records stored in debug.
+    log_pair_threshold_rejections: false
+    # false -> do not store every low-similarity pair in rejected_edges.
+    # This prevents huge O(N^2) debug payloads.

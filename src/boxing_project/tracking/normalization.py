@@ -6,21 +6,21 @@ def center_skeleton_2d(keypoints, root_index):
     keypoints = np.asarray(keypoints, dtype=np.float32)
     xy = keypoints[:, :2]
 
-    # 1) беремо root
+    # 1) Read the root keypoint.
     if 0 <= root_index < xy.shape[0]:
         root = xy[root_index]
     else:
         root = np.array([np.nan, np.nan], dtype=np.float32)
 
-    # 2) якщо root NaN / inf / (0,0) → fallback
+    # 2) Fall back if the root is NaN, infinite, or near zero.
     if not np.isfinite(root).all() or np.abs(root).sum() < 1e-6:
         return xy.copy()
 
-    # 3) якщо ВСЕ було NaN → просто нічого не ламаємо
+    # 3) Keep invalid inputs unchanged instead of breaking the pipeline.
     if not np.isfinite(root).all():
         return xy.copy()
 
-    # 4) центрування (NaN залишаються NaN)
+    # 4) Center the pose; NaNs stay NaN.
     return xy - root
 
 

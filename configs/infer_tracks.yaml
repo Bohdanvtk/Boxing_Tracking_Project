@@ -1,7 +1,5 @@
-#configs/infer_tracks.yaml
-
 openpose:
-  root: "/home/bohdan/openpose"   # path to openpose root
+  root: "/home/bohdan/openpose"
   hand: false
   face: false
   net_resolution: "-1x256"
@@ -9,19 +7,64 @@ openpose:
   num_gpu_start: 0
   render_pose: 0
   disable_blending: true
-  number_people_max: 3
+  number_people_max: -1
   disable_multi_thread: true
 
 data:
-  input_dir: "/home/bohdan/test_video.mp4"
+  input_dir: "/home/bohdan/check_video_short_mid.mp4"
   save_width: 800
-  save_dir: "/home/bohdan/Документи/Samples/Images/boxing_tracker/test"
+  save_dir: "data/output/test"
 
+restore_mode: false
+save_log: true
+
+stages:
+  preprocessing: true
+  detection_preparation: true
+  local_tracking: true
+  local_det_saving: false
+  global_clustering: true
+  global_saving: true
+  dataset_export: true
+
+preprocessing:
+  batch_size: 256
+  checkpoint_every_frames: 100
+
+detection_preparation:
+  batch_size: 256
+
+local_tracking:
+  batch_size: 500
+  checkpoint_every_frames: 50
+
+local_det_saving:
+  batch_size: 700
+  save_matched_dets: true     # write crops into matched_dets/
+  save_unmatched_dets: true   # write crops into unmatched_dets/
+
+global_clustering:
+  checkpoint_every_tracks: 10
+
+global_saving:
+  batch_size: 700
+
+dataset_export:
+  video:
+    local:
+      enabled: true        # video with local ids (from local_track_saving frames)
+      fps: 25
+    global:
+      enabled: true        # video with global ids (from global_saving frames)
+      fps: 25
+
+progress:
+  enabled: true
 
 tracking:
   config_path: "configs/tracking.yaml"
-  num_frames_merge: 0      # how many pictures at one time will appear if it's 0, NO pictures will appear
-  apperance_embedding_model_path: "/home/bohdan/PycharmProjects/Boxing_Tracking_Project/artifacts/models/apperance_cnn/apperance_encoder_02_09_mobilenetv3large.keras"
+  birth_config_path: "configs/birth_manager.yaml"
+  apperance_embedding_model_path: "artifacts/models/apperance_cnn/osnet_1_x_ain(26_03)_new_stage_2.onnx"
 
 shot_boundary:
-  config_path: "/home/bohdan/PycharmProjects/Boxing_Tracking_Project/configs/shot_boundary.yaml"
+  config_path: "configs/shot_boundary.yaml"

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import contextlib
+import json
+import os
+import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -7,8 +12,9 @@ from typing import Optional, Dict, Any
 import yaml
 
 from boxing_project.tracking.inference_utils import init_openpose_from_config, visualize_sequence
+from boxing_project.tracking.progress_utils import RichStageProgress
 from boxing_project.tracking.tracker import MultiObjectTracker
-from boxing_project.tracking.video_utils import load_inference_images
+from boxing_project.tracking.video_utils import input_fingerprint, load_inference_images
 
 
 def _load_yaml(path: Path) -> Dict[str, Any]:
@@ -20,8 +26,51 @@ def _resolve(project_root: Path, p: Optional[str | Path]) -> Optional[Path]:
     """Resolve path relative to project_root if it's not absolute."""
     if p is None:
         return None
+
     p = Path(p)
     return p if p.is_absolute() else (project_root / p)
+
+
+def _report_config(progress, label: str, path: Optional[Path], *, required: bool) -> bool:
+    """Emit a uniform message for a config path.
+
+    Two message types:
+    - found:     "<label> config loaded from: <path>"
+    - not found: "<label> config not found ...; using built-in default values"
+                 (or raises if the config is required and has no default).
+    Returns True when the config file was found and read.
+    """
+    if path is not None and path.exists():
+        progress.message(f"{label} config loaded from: {path}")
+        return True
+    if required:
+        raise FileNotFoundError(f"{label} config not found: {path}")
+    progress.warning(f"{label} config not found ({path}); using built-in default values")
+    return False
+
+
+@contextlib.contextmanager
+def suppress_native_stdout(enabled: bool = True):
+    """
+    Suppress native stdout noise, for example OpenPose startup messages.
+
+    This suppresses stdout only inside this context block.
+    It does not affect the progress hotbar after the block ends.
+    """
+    if not enabled:
+        yield
+        return
+
+    stdout_fd = sys.stdout.fileno()
+    saved_stdout_fd = os.dup(stdout_fd)
+
+    try:
+        with open(os.devnull, "w") as devnull:
+            os.dup2(devnull.fileno(), stdout_fd)
+            yield
+    finally:
+        os.dup2(saved_stdout_fd, stdout_fd)
+        os.close(saved_stdout_fd)
 
 
 @dataclass
@@ -32,7 +81,6 @@ class InferRunner:
     Usage:
         from boxing_project.tracking.infer_runner import InferRunner
         InferRunner("configs/infer_tracks.yaml").run()
-        InferRunner("configs/infer_tracks.yaml").run(video=True)
     """
     infer_cfg_path: str | Path
 
@@ -50,61 +98,190 @@ class InferRunner:
     def run(self) -> None:
         cfg = self.cfg
         pr = self.project_root
+        verbose = bool(cfg.get("verbose", False))
+        restore_mode = bool(cfg.get("restore_mode", False))
 
-        # ---------- OpenPose ----------
-        if "openpose" not in cfg:
-            raise KeyError("infer_tracks.yaml missing key: openpose")
-        _, opWrapper = init_openpose_from_config(cfg["openpose"])
-
-        # ---------- Tracking ----------
-        tracking_cfg = cfg.get("tracking", {})
-        tracking_cfg_path = _resolve(pr, tracking_cfg.get("config_path"))
-        if tracking_cfg_path is None or not tracking_cfg_path.exists():
-            raise FileNotFoundError(f"Tracking config not found: {tracking_cfg_path}")
-
-        tracker = MultiObjectTracker(config_path=str(tracking_cfg_path))
-
-        # ---------- Data / Images ----------
-        data_cfg = cfg.get("data", {})
-        images = load_inference_images(data_cfg, pr)
-
-        save_width = int(data_cfg.get("save_width", 800))
-        merge_n = int(tracking_cfg.get("num_frames_merge", 40))
-
-        # NEW: artifacts output dir
-        save_dir_raw = data_cfg.get("save_dir", None)
-        save_dir = _resolve(pr, save_dir_raw) if save_dir_raw else None
-        if save_dir is not None:
-            save_dir.mkdir(parents=True, exist_ok=True)
-
-        # ---------- Optional embeddings ----------
-        app_emb_path = tracking_cfg.get("apperance_embedding_model_path")
-        app_emb_path = str(app_emb_path).strip() if app_emb_path is not None else ""
-        app_emb_path = app_emb_path if app_emb_path else None
-
-        # ---------- Shot boundary (REQUIRED) ----------
-        sb_block = cfg.get("shot_boundary", None)
-        if not isinstance(sb_block, dict):
-            raise KeyError("infer_tracks.yaml missing key: shot_boundary")
-
-        sb_cfg_path = _resolve(pr, sb_block.get("config_path"))
-        if sb_cfg_path is None or not sb_cfg_path.exists():
-            raise FileNotFoundError(f"Shot boundary config not found: {sb_cfg_path}")
-
-        sb_yaml = _load_yaml(sb_cfg_path)
-        sb_cfg = sb_yaml.get("shot_boundary", sb_yaml)
-
-        if not isinstance(sb_cfg, dict) or not sb_cfg:
-            raise ValueError(f"Shot boundary config is empty or invalid: {sb_cfg_path}")
-
-        # ---------- RUN ----------
-        visualize_sequence(
-            opWrapper=opWrapper,
-            tracker=tracker,
-            app_emb_path=app_emb_path,
-            sb_cfg=sb_cfg,
-            images=images,
-            save_width=save_width,
-            merge_n=merge_n,
-            save_dir=save_dir,
+        progress = RichStageProgress(
+            enabled=bool(cfg.get("progress", {}).get("enabled", True)),
+            restore_mode=restore_mode,
         )
+
+        try:
+            progress.add("setup", "[0/7] SETUP / INITIALIZATION", total=7)
+
+            # ---------- 1. OpenPose config ----------
+            progress.update(
+                "setup",
+                completed=1,
+                description="[0/7] CHECKING OPENPOSE CONFIG",
+                force=True,
+            )
+
+            if "openpose" not in cfg:
+                raise KeyError("infer_tracks.yaml missing key: openpose")
+
+            # ---------- 2. OpenPose ----------
+            progress.update(
+                "setup",
+                completed=2,
+                description="[0/7] INITIALIZING OPENPOSE",
+                force=True,
+            )
+
+            with suppress_native_stdout(enabled=not verbose):
+                _, opWrapper = init_openpose_from_config(cfg["openpose"])
+
+            # ---------- 3. Tracking ----------
+            progress.update(
+                "setup",
+                completed=3,
+                description="[0/7] BUILDING TRACKER AND MODELS",
+                force=True,
+            )
+
+            tracking_cfg = cfg.get("tracking", {})
+            tracking_cfg_path = _resolve(pr, tracking_cfg.get("config_path"))
+            _report_config(progress, "Tracking", tracking_cfg_path, required=True)
+
+            birth_cfg_path = _resolve(pr, tracking_cfg.get("birth_config_path"))
+            _report_config(progress, "Birth", birth_cfg_path, required=False)
+
+            tracker = MultiObjectTracker(
+                config_path=str(tracking_cfg_path),
+                birth_config_path=birth_cfg_path,
+            )
+            tracking_runtime_cfg = _load_yaml(tracking_cfg_path) or {}
+
+            # ---------- 4. Data / Images ----------
+            progress.update(
+                "setup",
+                completed=4,
+                description="[0/7] PREPARING INPUT FRAMES",
+                force=True,
+            )
+
+            data_cfg = cfg.get("data", {})
+            save_dir_raw = data_cfg.get("save_dir", None)
+            save_dir = _resolve(pr, save_dir_raw) if save_dir_raw else None
+
+            if restore_mode and save_dir is not None:
+                # Restore mode reuses intermediate files in save_dir. If the same
+                # directory is pointed at a different input, old manifests/cached
+                # frames can be mixed with new frames and corrupt the resumed run.
+                # Run this guard before load_inference_images(), because video
+                # loading extracts frames and may overwrite the existing frame cache.
+                save_dir.mkdir(parents=True, exist_ok=True)
+                fp_path = save_dir / ".restore_input.json"
+                fp = input_fingerprint(data_cfg, pr)
+                if fp_path.exists():
+                    with open(fp_path, "r") as f:
+                        old_fp = json.load(f)
+                    if old_fp != fp:
+                        raise RuntimeError(
+                            "Restore input mismatch: this output directory was created for a different input. "
+                            "Use another save_dir or disable restore_mode."
+                        )
+                else:
+                    with open(fp_path, "w") as f:
+                        json.dump(fp, f, indent=2, sort_keys=True)
+
+            images = load_inference_images(data_cfg, pr)
+
+            save_width = int(data_cfg.get("save_width", 800))
+            graph_clustering_params = (
+                (tracking_runtime_cfg.get("tracking", {}) or {}).get("graph_clustering", {})
+            )
+
+            # ---------- 5. Output directory ----------
+            progress.update(
+                "setup",
+                completed=5,
+                description="[0/7] PREPARING OUTPUT DIRECTORY",
+                force=True,
+            )
+
+            if save_dir is not None:
+                if restore_mode:
+                    # IMPORTANT:
+                    # Restore mode must keep the output directory because it contains:
+                    # - manifests
+                    # - checkpoints
+                    # - preprocessed parquet files
+                    # - local tracking state
+                    # - global state
+                    progress.message(f"Restore mode enabled: keeping output directory: {save_dir}")
+                    save_dir.mkdir(parents=True, exist_ok=True)
+                else:
+                    # STRONG safety guard:
+                    if (
+                        save_dir.exists()
+
+                    ):
+                        progress.message(f"Removing old output directory: {save_dir}")
+                        shutil.rmtree(save_dir)
+                    else:
+                        progress.warning(
+                            f"there is no directory: {save_dir}"
+                        )
+
+                    save_dir.mkdir(parents=True, exist_ok=True)
+
+            # ---------- 6. Optional embeddings + shot boundary config ----------
+            progress.update(
+                "setup",
+                completed=6,
+                description="[0/7] RESOLVING EMBEDDINGS AND SHOT BOUNDARY",
+                force=True,
+            )
+
+            app_emb_raw = tracking_cfg.get("apperance_embedding_model_path")
+            app_emb_raw = str(app_emb_raw).strip() if app_emb_raw is not None else ""
+            # Resolve relative to project_root so configs can use repo-relative paths
+            # (e.g. "artifacts/models/...") regardless of the current working directory.
+            app_emb_path = str(_resolve(pr, app_emb_raw)) if app_emb_raw else None
+
+            sb_block = cfg.get("shot_boundary", None)
+
+            if not isinstance(sb_block, dict):
+                raise KeyError("infer_tracks.yaml missing key: shot_boundary")
+
+            sb_cfg_path = _resolve(pr, sb_block.get("config_path"))
+            _report_config(progress, "Shot boundary", sb_cfg_path, required=True)
+
+            sb_yaml = _load_yaml(sb_cfg_path)
+            sb_cfg = sb_yaml.get("shot_boundary", sb_yaml)
+
+            if not isinstance(sb_cfg, dict) or not sb_cfg:
+                raise ValueError(f"Shot boundary config is empty or invalid: {sb_cfg_path}")
+
+            # ---------- 7. Setup complete ----------
+            progress.update(
+                "setup",
+                completed=7,
+                description="[0/7] SETUP COMPLETE",
+                force=True,
+            )
+
+            # ---------- RUN ----------
+            visualize_sequence(
+                opWrapper=opWrapper,
+                tracker=tracker,
+                app_emb_path=app_emb_path,
+                sb_cfg=sb_cfg,
+                images=images,
+                save_width=save_width,
+                save_dir=save_dir,
+                graph_clustering_params=graph_clustering_params,
+                pipeline_cfg=cfg,
+                progress=progress,
+            )
+
+        except Exception:
+            try:
+                progress.warning("Pipeline failed with an exception")
+            except Exception:
+                pass
+            raise
+
+        finally:
+            progress.finish()

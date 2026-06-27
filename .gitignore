@@ -1,6 +1,12 @@
 *venv*
 __pycache__/
 *.pyc
-artifacts/
 project_core_contents.txt
 .idea/
+*.egg-info/
+
+# Model weights must never be committed (they are provided at Docker build time
+# from the local working tree, not from Git).
+artifacts/
+docker/openpose_models/
+docker/models/*.onnx
