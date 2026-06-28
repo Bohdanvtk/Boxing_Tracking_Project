@@ -210,6 +210,15 @@ docker run --rm --gpus all --shm-size=2g \
   ghcr.io/bohdanvtk/boxing-tracking:runtime
 ```
 
+> **Where do the configs come from here?** When you run the published image
+> directly like this, the pipeline uses the YAML configs **baked into the image
+> at build time** (`infer_tracks.yaml`, `tracking.yaml`, `birth_manager.yaml`,
+> `shot_boundary.yaml`). You do **not** need a local `configs/` folder, and
+> editing your local `configs/*.yaml` has **no effect** on this run — the
+> container only reads its own embedded copy. To run with your own edited
+> configs instead, use the `run-runtime.sh` script in live mode (see the
+> [Docker runtime guide](README_RUNTIME.md) → *Live configs*).
+
 For building the image yourself, GPU portability, running options and publishing,
 see the dedicated **[Docker runtime guide](README_RUNTIME.md)**.
 
@@ -319,6 +328,11 @@ pair of tracks before they are merged into one global boxer identity:
   but at a higher risk of merging two different boxers.
 
 When clustering quality is unsatisfactory, tune this value first.
+
+> If you are running inside Docker, remember that editing `configs/tracking.yaml`
+> only changes the run when the configs are mounted live (`run-runtime.sh` in its
+> default mode). A direct `docker run` of the published image keeps using the
+> embedded `pair_threshold` — see the [Docker runtime guide](README_RUNTIME.md).
 
 ## Appearance ReID Fine-Tuning
 
