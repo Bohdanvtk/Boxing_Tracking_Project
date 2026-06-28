@@ -36,6 +36,11 @@ Appearance / ReID  artifacts/models/apperance_cnn/osnet_1_x_ain(26_03)_new_stage
 
 Video and output never live in the image — they are mounted at run time.
 
+The project `configs/` folder is also copied into the image during the
+`development` stage, so every published image carries a frozen snapshot of the
+YAML configs as they were **at build time**. How those embedded configs relate
+to your local ones is explained in *Which configs are actually used?* below.
+
 ---
 
 ## Prerequisites (host)
@@ -80,8 +85,41 @@ docker run --rm --gpus all --shm-size=2g \
 - The pipeline uses the configs **baked into the image**, so no local `configs/`
   folder is required.
 
+> **Important:** because this run reads only the embedded configs, editing your
+> local `configs/*.yaml` will **not** change anything here. If you want to run
+> with your own tuned configs, either rebuild the image after editing them, or
+> run through `run-runtime.sh` in live mode (see *Which configs are actually
+> used?* and *Live configs* below).
+
 The dataset and tracking results appear under your mounted output directory (see
 the main `README.md` → *Dataset Output* for the file layout).
+
+---
+
+## Which configs are actually used?
+
+The pipeline always needs four YAML files — `infer_tracks.yaml`,
+`tracking.yaml`, `birth_manager.yaml` and `shot_boundary.yaml`. It does **not**
+fall back to hard-coded defaults: these files are always read from disk. The
+only question is *which copy on disk* — the one frozen inside the image, or the
+one in your working tree. That depends entirely on how you launch the container:
+
+```text
+docker run ghcr.io/bohdanvtk/boxing-tracking:runtime …   -> EMBEDDED configs (baked into the image)
+docker/scripts/run-runtime.sh VIDEO                      -> LIVE configs (your local configs/ folder)
+USE_EMBEDDED_CONFIG=1 docker/scripts/run-runtime.sh …    -> EMBEDDED configs
+```
+
+- **Embedded** = the snapshot of `configs/` copied in at build time. This is what
+  end users of the published image get. Your local edits are invisible to it
+  until you rebuild.
+- **Live** = your host `configs/` folder is mounted into the container at run
+  time, so YAML edits take effect on the next run with no rebuild.
+
+So if you change, say, `tracking.yaml → graph_clustering.pair_threshold` and the
+result does not change, you are almost certainly running in embedded mode (a
+direct `docker run`, or `USE_EMBEDDED_CONFIG=1`). Switch to live mode to see your
+edit applied.
 
 ---
 
@@ -169,6 +207,9 @@ container, so YAML edits take effect on the next run without a rebuild:
   (the script reads this file; the Docker YAML uses container paths, while the
   host `infer_tracks.yaml` keeps local `/home/...` paths).
 
+This is the mode to use when you are tuning configs: edit any
+`configs/*.yaml`, rerun the script, and the change is picked up immediately.
+
 ### Embedded configs
 
 To use the configs baked into the image instead of the local ones (this is also
@@ -177,6 +218,10 @@ what end users of the published image get):
 ```bash
 USE_EMBEDDED_CONFIG=1 docker/scripts/run-runtime.sh VIDEO [OUTPUT]
 ```
+
+In this mode the local `configs/` folder is **not** mounted, so any edits you
+made there are ignored — the container reads its own frozen snapshot. Use it to
+reproduce exactly what an end user of the published image would get.
 
 ### Run the published image through the script
 
@@ -192,8 +237,13 @@ docker/scripts/run-runtime.sh VIDEO [OUTPUT]
 
 ```text
 YAML changes (configs/*.yaml)                       -> rebuild NOT needed (live mode)
+                                                       -> rebuild NEEDED to change embedded configs
 Python / Dockerfile / dependencies / models changes -> rebuild needed
 ```
+
+A YAML edit is free in **live mode**, but if you want that edit to ship inside
+the image (i.e. become the new embedded default that a direct `docker run` or
+`USE_EMBEDDED_CONFIG=1` will use), you have to rebuild.
 
 A change to `run-runtime.sh` itself never needs a rebuild — it is a host script
 and is not part of the image.
