@@ -173,6 +173,7 @@ Boxing_Tracking_Project/
 ├── pyproject.toml
 ├── configs/
 │   ├── infer_tracks.yaml
+│   ├── infer_tracks.docker.yaml
 │   ├── tracking.yaml
 │   ├── birth_manager.yaml
 │   └── shot_boundary.yaml
@@ -198,9 +199,15 @@ subpackages so that each responsibility remains explicit.
 The full pipeline needs OpenPose, CUDA, cuDNN and Caffe. Instead of installing
 those natively, use the prebuilt Docker image — it bundles OpenPose (BODY_25),
 the appearance model and the tracking code, so the only host requirement is an
-NVIDIA GPU with the NVIDIA Container Toolkit:
+NVIDIA GPU with the NVIDIA Container Toolkit.
+
+Create the output directory first. Docker creates a missing bind-mount source
+itself, but as `root:root` — and the container below runs as *you*, so the very
+first write fails with `Permission denied`:
 
 ```bash
+mkdir -p /absolute/path/to/output
+
 docker pull ghcr.io/bohdanvtk/boxing-tracking:runtime
 
 docker run --rm --gpus all --shm-size=2g \
@@ -218,6 +225,22 @@ docker run --rm --gpus all --shm-size=2g \
 > container only reads its own embedded copy. To run with your own edited
 > configs instead, use the `run-runtime.sh` script in live mode (see the
 > [Docker runtime guide](README_RUNTIME.md) → *Live configs*).
+
+Results land in `output/test/dataset/` — `observations.parquet` plus the overlay
+videos enabled in the config — with the per-stage intermediates beside them.
+Expect a few GB per run: the intermediates dominate, and they exist so
+`restore_mode` can resume an interrupted run.
+
+Two flags in that command are easy to skip over. `--user "$(id -u):$(id -g)"`
+makes the results belong to you instead of `root`. `-e HOME=/tmp` is its
+consequence: your user id does not exist inside the image, so `HOME` would fall
+back to `/`, which a non-root process cannot write — and libraries that cache
+under `$HOME` would fail.
+
+Talking to the Docker daemon needs permission of its own. If the run stops at
+`permission denied while trying to connect to the docker API`, your shell session
+is not in the `docker` group — run `newgrp docker` in that terminal, or log out
+and back in if you were added to the group after that session started.
 
 For building the image yourself, GPU portability, running options and publishing,
 see the dedicated **[Docker runtime guide](README_RUNTIME.md)**.
@@ -285,11 +308,26 @@ InferRunner(Path("configs/infer_tracks.yaml")).run()
 Configuration responsibilities are intentionally separated:
 
 ```text
-configs/infer_tracks.yaml     runtime, input, output, enabled stages, batch sizes
-configs/tracking.yaml         matching, lifecycle, overlap, and clustering parameters
-configs/birth_manager.yaml    pending-track and track-birth behaviour
-configs/shot_boundary.yaml    camera-cut detection
+configs/infer_tracks.yaml         runtime, input, output, enabled stages, batch sizes — host paths
+configs/infer_tracks.docker.yaml  the same settings with in-container paths (/app, /opt, /data, /tmp)
+configs/tracking.yaml             matching, lifecycle, overlap, and clustering parameters
+configs/birth_manager.yaml        pending-track and track-birth behaviour
+configs/shot_boundary.yaml        camera-cut detection
 ```
+
+The two `infer_tracks` files exist because a path that is valid on the host is
+usually meaningless inside the container, and the reverse. `scripts/infer_tracks.py`
+always loads `configs/infer_tracks.yaml`, so the image build copies the container
+variant over that name — from `docker/Dockerfile.runtime`:
+
+```dockerfile
+RUN test -f /app/configs/infer_tracks.docker.yaml \
+    && cp /app/configs/infer_tracks.docker.yaml /app/configs/infer_tracks.yaml \
+    ...
+```
+
+Edit `infer_tracks.yaml` for native runs and `infer_tracks.docker.yaml` for the
+image — and keep a change that affects both in step across the two files.
 
 The inference pipeline is organised into seven stages:
 
