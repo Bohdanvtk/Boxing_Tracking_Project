@@ -502,11 +502,50 @@ are intentionally not pinned, so the environment setup can be finicky — treat
 these viewers as experimental, provided as-is: they can be unstable, and the
 standard one in particular may take a while to load on larger outputs.
 
+## Evaluation Status
+
+The pipeline was checked on a broadcast clip producing **32,953 observations
+across 12 camera segments**. Global clustering recovered **7 global identities**,
+and their distribution is the informative part:
+
+| global id | observations | segments present in | local fragments merged |
+|-----------|-------------:|--------------------:|-----------------------:|
+| 1         | 4,433        | 12 / 12             | 15                     |
+| 2         | 4,351        | 12 / 12             | 15                     |
+| 3         | 1,608        | 5                   | 10                     |
+| 7         | 1,153        | 3                   | 4                      |
+| 5         | 1,111        | 4                   | 6                      |
+| 6         | 851          | 3                   | 6                      |
+| 4         | 837          | 4                   | 7                      |
+
+The two dominant identities are the boxers. Each was recovered across **all
+twelve camera segments**, reassembled from fifteen separate local fragments —
+which is exactly what the local/global split exists to do, since local tracking
+restarts from scratch after every cut. Their near-identical observation counts
+(4,433 and 4,351) match two fighters present for a comparable share of the
+footage. The remaining five identities appear in only 3–5 segments and
+correspond to secondary people in frame.
+
+One number is easy to misread. Local tracking opens a candidate track for
+**every** unmatched detection, because the number of people in a broadcast frame
+is not known ahead of time — crowd, corner staff and referee all generate
+candidates. Most are dropped before reaching `confirmed` state, so the raw count
+of local tracks reflects the size of the birth queue, not tracking instability.
+Only confirmed tracks are passed to global clustering.
+
+**This is a sanity check, not a benchmark.** No quantitative multi-object
+tracking evaluation (HOTA, IDF1, MOTA) has been performed, because the project
+has no manually annotated ground truth. The `pair_threshold = 0.76` used for
+global clustering was chosen empirically rather than by optimising a metric on a
+validation set — so the clustering behaviour above is demonstrated, not proven
+optimal.
+
 ## Current Limitations
 
 - difficult long overlaps can still cause identity errors;
 - tracking quality depends on detection and keypoint quality;
 - some global matches remain ambiguous after severe viewpoint changes;
+- no quantitative tracking metrics — see *Evaluation Status* above;
 - the current implementation is a research-oriented engineering prototype.
 
 ## Possible Future Directions
@@ -516,6 +555,6 @@ The project is complete and not under active development; the items below are
 
 - improve the public inference API;
 - make ReID ONNX export architecture-configurable and checkpoint-safe;
-- add quantitative tracking evaluation;
+- add quantitative tracking evaluation on annotated ground truth;
 - extend global identity recovery across harder camera switches;
 - integrate downstream punch-classification models.

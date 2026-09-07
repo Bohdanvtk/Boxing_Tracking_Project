@@ -274,4 +274,5 @@ def load_birth_config(path: str) -> BirthConfig:
         app_bad_penalty=float(b.get("app_bad_penalty", 0.12)),
         app_bad_threshold=float(b.get("app_bad_threshold", 0.35)),
         near_existing_penalty=float(b.get("near_existing_penalty", 0.03)),
+        max_birth_score=float(b.get("max_birth_score", 0.0)),
     )
